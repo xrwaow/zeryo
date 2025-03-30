@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zeryo Chat</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <link id="highlight-theme" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/default.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" integrity="sha384-GvrOXuhMATgEsSwCs4smul74iXGOixntILdUW9XmUC6+HX0sLNAK3q71HotJqlAn" crossorigin="anonymous">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Sidebar -->
+    <div class="sidebar" id="sidebar">
+        <div class="sidebar-content">
+            <button class="new-chat-btn btn-primary" id="new-chat-btn">
+                <i class="bi bi-plus-lg"></i>
+                <span>New Chat</span>
+            </button>
+            <div class="chat-history">
+                <div class="history-title">Recent Conversations</div>
+            </div>
+        </div>
+        
+        <div class="theme-modal" id="theme-modal">
+            <div class="theme-modal-content">
+                <h3>Appearance Settings</h3>
+                <div class="theme-options">
+                    <button class="theme-option" data-theme="white">White Theme</button>
+                    <button class="theme-option" data-theme="solarized">Solarized</button>
+                    <button class="theme-option" data-theme="dark">Dark Theme</button>
+                </div>
+                <div class="color-customizer">
+                    <h3>Accent Color</h3>
+                    <div class="color-picker-wrapper">
+                        <input type="color" id="accent-color-picker" value="#38b2ac">
+                        <button class="btn-primary" id="apply-color">Apply</button>
+                    </div>
+                    <h3>Presets</h3>
+                    <div class="theme-presets">
+                        <div class="theme-preset" style="background-color: #101010" data-color="#101010"></div>
+                        <div class="theme-preset" style="background-color: #007acc" data-color="#007acc"></div>
+                        <div class="theme-preset" style="background-color: #38b2ac" data-color="#38b2ac"></div>
+                        <div class="theme-preset" style="background-color: #d73a49" data-color="#d73a49"></div>
+                        <div class="theme-preset" style="background-color: #6f42c1" data-color="#6f42c1"></div>
+                        <div class="theme-preset" style="background-color: #f5f5f5" data-color="#f5f5f5"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <button class="sidebar-toggle" id="sidebar-toggle">
+        <i class="bi bi-chevron-left"></i>
+    </button>
+    <div class="character-modal" id="character-modal">
+        <div class="character-modal-content">
+            <h3><span id="modal-title">Create New Character</span></h3>
+            <form id="character-form">
+                <input type="hidden" id="character-id" name="character_id">
+                <div class="form-group">
+                    <label for="character-name">Character Name</label>
+                    <input type="text" id="character-name" required>
+                </div>
+                <div class="form-group">
+                    <label for="character-sysprompt">System Prompt</label>
+                    <textarea id="character-sysprompt" rows="4" required></textarea>
+                </div>
+                <div class="form-actions">
+                    <button type="submit" id="submit-btn" class="btn-primary">Create</button>
+                    <button type="button" id="cancel-create-btn" class="btn-secondary">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Main Content -->
+    <div class="main-content">
+        <div class="header">
+            <div class="character-select-container">
+                <button class="character-btn" id="character-btn">Characters</button>
+                <div class="character-popup" id="character-popup" style="display: none;">
+                    <select class="character-select" id="character-select">
+                        <option value="">No Character</option>
+                    </select>
+                    <button class="character-create-btn btn-primary" id="character-create-btn">Create New</button>
+                    <button class="character-edit-btn btn-secondary" id="character-edit-btn" disabled>Edit Selected</button>
+                    <button class="character-delete-btn btn-danger" id="character-delete-btn" disabled>Delete Selected</button>
+                </div>
+            </div>
+            <div class="model-select-container">
+                <select class="model-select" id="model-select"></select>
+            </div>
+            <div class="header-actions">
+                <button class="header-btn" id="clear-chat-btn" title="Clear chat">
+                    <i class="bi bi-trash"></i>
+                </button>
+                <button class="header-btn" id="gen-settings-btn" title="Generation Settings">
+                    <i class="bi bi-sliders"></i>
+                </button>
+                <div class="header-btn">
+                    <i id="settings-btn" class="bi bi-gear"></i>
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-container" id="chat-container">
+            <div class="welcome-container" id="welcome-container">
+                <div class="welcome-title">
+                    <i class="bi bi-stars"></i> Welcome to Zeryo
+                </div>
+            </div>
+            <div class="messages-wrapper" id="messages-wrapper"></div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-container">
+                <div class="image-preview-container" id="image-preview-container"></div>
+                <div class="input-wrapper">
+                    <textarea id="message-input" placeholder="Message Zeryo..." rows="1"></textarea>
+                    <div class="input-buttons">
+                        <button class="input-button" id="image-button" title="Attach image">
+                            <i class="bi bi-image"></i>
+                        </button>
+                        <button class="input-button" id="file-button" title="Attach file">
+                            <i class="bi bi-file-earmark-text"></i>
+                        </button>
+                        <button class="input-button" id="stop-button" style="display:none;" title="Stop generating">
+                            <i class="bi bi-stop-fill"></i>
+                        </button>
+                        <button class="input-button send-button" id="send-button" title="Send message">
+                            <i class="bi bi-send-fill"></i>
+                        </button>
+                    </div>
+                </div>
+                <div class="input-footer">
+                    Shift+Enter for new line • Ctrl+Enter to send
+                </div>
+            </div>
+        </div>
+        <div class="gen-settings-modal" id="gen-settings-modal">
+            <div class="gen-settings-modal-content">
+                <h3>Generation Settings</h3>
+                <div class="gen-setting">
+                    <label>Temperature (0 to 2)</label>
+                    <div class="slider-container">
+                        <input type="range" id="temp-slider" min="0" max="2" step="0.01" value="0.7">
+                        <span id="temp-value">0.7</span>
+                        <label><input type="checkbox" id="temp-none"> None</label>
+                    </div>
+                </div>
+                <div class="gen-setting">
+                    <label>Min P (0 to 0.5)</label>
+                    <div class="slider-container">
+                        <input type="range" id="minp-slider" min="0" max="0.5" step="0.01" value="0.05">
+                        <span id="minp-value">0.05</span>
+                        <label><input type="checkbox" id="minp-none"> None</label>
+                    </div>
+                </div>
+                <div class="gen-setting">
+                    <label>Max Tokens (1 to 8192)</label>
+                    <div class="slider-container">
+                        <input type="range" id="maxt-slider" min="1" max="8192" step="1" value="1024">
+                        <span id="maxt-value">1024</span>
+                        <label><input type="checkbox" id="maxt-none"> None</label>
+                    </div>
+                </div>
+                <div class="form-actions">
+                    <button id="apply-gen-settings" class="btn-primary">Apply</button>
+                    <button id="cancel-gen-settings" class="btn-secondary">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="script.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js" crossorigin="anonymous"></script>
+</body>
+</html>
