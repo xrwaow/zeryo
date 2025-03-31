@@ -176,7 +176,7 @@ async function init() {
     adjustTextareaHeight();
     setupDropZone();
     setupThemeSwitch();
-    setupInlineCodeCopy();
+    //setupInlineCodeCopy();
     setupGenerationSettings(); // Setup after loading saved args
 
     // Attempt to load last chat
@@ -1521,6 +1521,7 @@ function copyMessageContent(contentDiv, buttonElement) {
 }
 
 // Copy inline code
+/*
 function setupInlineCodeCopy() {
     messagesWrapper.addEventListener('click', (e) => {
         // Check if the click target is a <code> element NOT inside a <pre>
@@ -1529,16 +1530,17 @@ function setupInlineCodeCopy() {
             navigator.clipboard.writeText(text).then(() => {
                 // Visual feedback: temporary highlight
                  e.target.style.transition = 'background-color 0.1s ease-in-out';
-                e.target.style.backgroundColor = 'var(--accent-hover)'; // Use theme color
+                e.target.style.backgroundColor = 'var(--bg-secondary)'; // Use theme color
                 setTimeout(() => {
                     e.target.style.backgroundColor = ''; // Revert to original or CSS default
-                }, 500); // Shorter feedback duration
+                }, 250); // Shorter feedback duration
             }).catch(err => {
                  console.error("Failed to copy inline code:", err);
             });
         }
     });
 }
+*/
 
 // --- Event Listeners Setup ---
 function setupEventListeners() {
@@ -3048,90 +3050,88 @@ async function deleteCurrentChat() {
     }
 }
 
-
-// --- Theme Switcher --- (Largely unchanged, ensure variables match CSS)
 function setupThemeSwitch() {
     const settingsBtn = document.getElementById('settings-btn');
     const themeModal = document.getElementById('theme-modal');
-    const colorPicker = document.getElementById('accent-color-picker');
-    const applyColorBtn = document.getElementById('apply-color');
+    // REMOVED: colorPicker, applyColorBtn references
 
     // Define themes (ensure these variables are used in style.css)
     const themes = {
         white: {
             '--bg-primary': '#ffffff',
-            '--bg-secondary': '#f7f7f7', // Slightly adjusted
-            '--bg-tertiary': '#f0f0f0', // Slightly adjusted
+            '--bg-secondary': '#f7f7f7',
+            '--bg-tertiary': '#f0f0f0',
+            '--accent-color': '#101010', // Predefined accent
             '--text-primary': '#1f2328',
-            '--text-secondary': '#57606a', // Adjusted
-            '--accent-color': '#0969da', // GitHub blue
-            '--accent-hover': '#2c85e9',
-            '--error-color': '#d73a49', // GitHub red
+            '--text-secondary': '#57606a',
+            '--accent-hover': '#1f2328', // Based on predefined accent or a fixed hover
+            '--accent-color-highlight': '#1f2328', // Based on predefined accent
+            '--error-color': '#d73a49',
             '--message-user': '#f0f0f0',
             '--message-assistant': '#ffffff',
             '--scrollbar-bg': '#f0f0f0',
             '--scrollbar-thumb': '#cccccc',
             '--border-color': '#d0d7de',
-            '--code-bg': '#f6f8fa', // Code background
-             '--code-text': '#1f2328',
-             '--link-color': '#0969da',
         },
-        solarized: { // Using Solarized Light values
+        solarized: {
             '--bg-primary': '#fdf6e3',   // base3
             '--bg-secondary': '#eee8d5', // base2
             '--bg-tertiary': '#e8e1cf',   // Adjusted tertiary
             '--text-primary': '#657b83', // base00
             '--text-secondary': '#839496', // base0
-            '--accent-color': '#268bd2', // blue
-            '--accent-hover': '#58a6ff', // Lighter blue
+            '--accent-color': '#d4c4a8', // Changed to warm cream
+            '--accent-hover': '#657b83', // Predefined hover (Lighter blue)
+            '--accent-color-highlight': '#657b83', // Matching new accent
             '--error-color': '#dc322f', // red
             '--message-user': '#eee8d5',
             '--message-assistant': '#fdf6e3',
             '--scrollbar-bg': '#eee8d5',
             '--scrollbar-thumb': '#93a1a1', // base01
             '--border-color': '#d9cfb3',   // Adjusted border
-            '--code-bg': '#eee8d5',
-             '--code-text': '#657b83',
-             '--link-color': '#268bd2',
         },
-        dark: { // Example dark theme (adjust as needed)
-            '--bg-primary': '#0d1117',   // GitHub Dark Dimmed like
-            '--bg-secondary': '#161b22',
-            '--bg-tertiary': '#21262d',
-            '--text-primary': '#c9d1d9',
-            '--text-secondary': '#8b949e',
-            '--accent-color': '#58a6ff', // GitHub Dark blue
-            '--accent-hover': '#79c0ff',
-            '--error-color': '#f85149', // GitHub Dark red
-            '--message-user': '#1a1f27', // Slightly different user message bg
-            '--message-assistant': '#161b22',
-            '--scrollbar-bg': '#161b22',
-            '--scrollbar-thumb': '#444c56',
-            '--border-color': '#30363d',
-            '--code-bg': '#161b22',
-             '--code-text': '#c9d1d9',
-             '--link-color': '#58a6ff',
+        dark: {
+            '--bg-primary': '#121212',
+            '--bg-secondary': '#1a1a1a',
+            '--bg-tertiary': '#101010',
+            '--text-primary': '#e0e0e0',
+            '--text-secondary': '#a0a0a0',
+            '--accent-color': '#2c2c2c', // Changed to cool black
+            '--accent-hover': '#1a1a1a',
+            '--accent-color-highlight': '#e0e0e0', // Based on new accent
+            '--error-color': '#cf6679',
+            '--message-user': '#1e1e1e',
+            '--message-assistant': '#1a1a1a',
+            '--scrollbar-bg': '#1a1a1a',
+            '--scrollbar-thumb': '#424242',
+            '--border-color': '#333333',
         }
     };
 
     function applyTheme(themeName) {
          const theme = themes[themeName] || themes.dark; // Default to dark
+         const customStyle = document.createElement('style');
+
          Object.entries(theme).forEach(([prop, value]) => {
              document.documentElement.style.setProperty(prop, value);
          });
-         // Update derived RGB color
-          updateAccentColorRGB(document.documentElement.style.getPropertyValue('--accent-color'));
+         // REMOVED: call to updateAccentColorRGB
 
          // Update highlight.js theme
          const highlightThemeLink = document.getElementById('highlight-theme');
          if (themeName === 'white') {
              highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css';
          } else if (themeName === 'solarized') {
-             // Using light version, map solarized theme name to appropriate CSS
-              highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/solarized-light.min.css';
+             highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/base16/solarized-light.min.css';
          } else { // dark theme
-             highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark-dimmed.min.css'; // Or another dark theme
+            highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/stackoverflow-dark.css';
          }
+
+         customStyle.textContent = `
+         pre code.hljs {
+             background: var(--bg-tertiary) !important;
+         }
+         `;
+        document.head.appendChild(customStyle);
 
          // Re-highlight existing code blocks after theme change
           setTimeout(() => { // Timeout ensures CSS is applied
@@ -3159,87 +3159,23 @@ function setupThemeSwitch() {
          console.log(`Theme applied: ${themeName}`);
     }
 
-    function setAccentColor(colorValue) {
-        if (!colorValue) return;
-         document.documentElement.style.setProperty('--accent-color', colorValue);
-         updateAccentColorRGB(colorValue);
-         // Calculate hover color (e.g., slightly lighter/brighter)
-          const hoverColor = lightenColor(colorValue, 0.15); // Adjust lighten factor as needed
-         document.documentElement.style.setProperty('--accent-hover', hoverColor);
-         document.documentElement.style.setProperty('--link-color', colorValue); // Update link color too
-         localStorage.setItem('accentColor', colorValue);
-         console.log(`Accent color set to: ${colorValue}`);
-    }
-
-     function updateAccentColorRGB(hexColor) {
-         if (!hexColor || !hexColor.startsWith('#')) return;
-         const cleanHex = hexColor.substring(1);
-         if (cleanHex.length !== 6 && cleanHex.length !== 3) return; // Basic validation
-
-          let r = 0, g = 0, b = 0;
-          if (cleanHex.length === 3) {
-              r = parseInt(cleanHex[0] + cleanHex[0], 16);
-              g = parseInt(cleanHex[1] + cleanHex[1], 16);
-              b = parseInt(cleanHex[2] + cleanHex[2], 16);
-          } else {
-              r = parseInt(cleanHex.substring(0, 2), 16);
-              g = parseInt(cleanHex.substring(2, 4), 16);
-              b = parseInt(cleanHex.substring(4, 6), 16);
-          }
-          if (!isNaN(r) && !isNaN(g) && !isNaN(b)) {
-             document.documentElement.style.setProperty('--accent-color-rgb', `${r}, ${g}, ${b}`);
-          }
-     }
-
-    function lightenColor(hex, factor) {
-         if (!hex || !hex.startsWith('#')) return hex; // Return original if invalid
-         let cleanHex = hex.substring(1);
-          if (cleanHex.length === 3) {
-              cleanHex = cleanHex[0] + cleanHex[0] + cleanHex[1] + cleanHex[1] + cleanHex[2] + cleanHex[2];
-          }
-          if (cleanHex.length !== 6) return hex;
-
-         try {
-             let r = parseInt(cleanHex.substring(0, 2), 16);
-             let g = parseInt(cleanHex.substring(2, 4), 16);
-             let b = parseInt(cleanHex.substring(4, 6), 16);
-
-             r = Math.min(255, Math.round(r + (255 - r) * factor));
-             g = Math.min(255, Math.round(g + (255 - g) * factor));
-             b = Math.min(255, Math.round(b + (255 - b) * factor));
-
-             return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
-         } catch (e) {
-             console.error("Error lightening color:", e);
-             return hex; // Return original on error
-         }
-    }
-
     // --- Event Listeners for Theme Modal ---
     settingsBtn.addEventListener('click', (e) => {
         themeModal.style.display = 'flex';
         e.stopPropagation();
     });
 
+    // Listener for theme buttons (White, Solarized, Dark)
     document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
         button.addEventListener('click', () => {
             applyTheme(button.dataset.theme);
+            // Close modal after selecting a theme
+            themeModal.style.display = 'none';
         });
     });
 
-    applyColorBtn.addEventListener('click', () => {
-        setAccentColor(colorPicker.value);
-        // Optionally close modal after applying
-        // themeModal.style.display = 'none';
-    });
-
-    document.querySelectorAll('.theme-preset').forEach(preset => {
-        preset.addEventListener('click', () => {
-            const color = preset.dataset.color;
-            colorPicker.value = color; // Update picker value
-            setAccentColor(color); // Apply the color
-        });
-    });
+    // REMOVED: Event listener for applyColorBtn
+    // REMOVED: Event listeners for theme-preset elements
 
     // Close modal on background click
     themeModal.addEventListener('click', (e) => {
@@ -3248,17 +3184,10 @@ function setupThemeSwitch() {
         }
     });
 
-    // Apply saved theme and color on initial load
+    // Apply saved theme on initial load
     const savedTheme = localStorage.getItem('theme') || 'dark'; // Default to dark
     applyTheme(savedTheme);
-    const savedColor = localStorage.getItem('accentColor');
-    if (savedColor) {
-        colorPicker.value = savedColor; // Set picker value
-        setAccentColor(savedColor); // Apply saved color
-    } else {
-         // If no saved color, apply the default accent of the loaded theme
-         setAccentColor(document.documentElement.style.getPropertyValue('--accent-color'));
-    }
+    // REMOVED: Loading and applying saved accent color
 }
 
 // Add System Message utility (for frontend errors/info)
@@ -3272,7 +3201,7 @@ function addSystemMessage(text, type = "info") { // type can be 'info', 'error',
         margin: 5px auto; /* Center with auto margins */
         max-width: 800px; /* Match message width */
         border-radius: var(--border-radius-md);
-        background-color: ${type === 'error' ? 'rgba(229, 62, 62, 0.2)' : 'rgba(var(--accent-color-rgb), 0.1)'};
+        background-color: ${type === 'error' ? 'rgba(229, 62, 62, 0.2)' : 'color-mix(in srgb, var(--text-secondary) 10%, transparent)'};
         color: ${type === 'error' ? 'var(--error-color)' : 'var(--text-secondary)'};
         border: 1px solid ${type === 'error' ? 'var(--error-color)' : 'var(--border-color)'};
         font-size: 0.9em;

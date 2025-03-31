@@ -443,6 +443,7 @@ class GenerationService:
             # Add attachments
             for attachment in msg.get("attachments", []):
                 if attachment["type"] == "image":
+                    # Handle images (no changes needed here based on request)
                     if provider == "google":
                          # Google expects parts format
                         content_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": attachment['content']}})
@@ -453,38 +454,59 @@ class GenerationService:
                             "image_url": {"url": f"data:image/jpeg;base64,{attachment['content']}"}
                         })
                 elif attachment["type"] == "file":
-                     # Extract raw content for embedding
                      raw_file_content = attachment['content']
-                     try:
-                         # Remove header like "filename.txt:\n```ext\n" and trailing "\n```"
-                         lines = attachment['content'].split('\n')
-                         if len(lines) > 2 and lines[0].endswith(':') and lines[1].startswith('```'):
-                             raw_file_content = '\n'.join(lines[2:-1])
-                     except Exception: pass # Keep original content if parsing fails
 
-                     file_text = f"\n--- Attached File: {attachment.get('name', 'file.txt')} ---\n{raw_file_content}\n--- End File ---"
+                     # Add this formatted text to the message content
                      if provider == "google":
-                         content_parts.append(file_text)
+                         # Google expects simple strings in 'parts'
+                         # Check if the last part is a string and append, otherwise add new part
+                         if content_parts and isinstance(content_parts[-1], str):
+                              content_parts[-1] += raw_file_content
+                         else:
+                              content_parts.append(raw_file_content)
                      else:
+                        # OpenRouter/Local expect {"type": "text", "text": ...}
                         # Find existing text part or add a new one
                         text_part = next((part for part in content_parts if part["type"] == "text"), None)
                         if text_part:
-                             text_part["text"] += file_text
+                             # Append to existing text part
+                             text_part["text"] += raw_file_content
                         else:
-                             content_parts.append({"type": "text", "text": file_text})
+                             # Add a new text part if none exists
+                             content_parts.append({"type": "text", "text": raw_file_content})
 
             # Construct the final message object based on provider format
             if provider == "google":
                 # Skip messages with no parts (e.g., user message with only image?)
                 if content_parts:
-                    base_formatted.append({"role": role, "parts": content_parts})
+                    # Ensure parts are correctly formatted (strings or dicts)
+                    final_parts = []
+                    current_text = ""
+                    for part in content_parts:
+                        if isinstance(part, str):
+                            current_text += part
+                        elif isinstance(part, dict):
+                            # If we have accumulated text, add it first
+                            if current_text:
+                                final_parts.append(current_text)
+                                current_text = ""
+                            final_parts.append(part)
+                        else:
+                             print(f"WARN: Unknown part type in Google formatting: {type(part)}")
+                    # Add any remaining text
+                    if current_text:
+                         final_parts.append(current_text)
+
+                    if final_parts: # Only add if there are valid parts
+                        base_formatted.append({"role": role, "parts": final_parts})
+
             else:
                  # Skip messages with no content (e.g., empty user message?)
                  # Exception: Allow empty user message if it has attachments
                  if content_parts or (role == 'user' and msg.get("attachments")):
                     # If only attachments and no text, add a placeholder text for non-google models
                     if provider != 'google' and not any(p.get("type") == "text" for p in content_parts):
-                        content_parts.insert(0, {"type": "text", "text": "[Image Attachment]"}) # Placeholder text
+                        content_parts.insert(0, {"type": "text", "text": "[Attachment(s)]"}) # Placeholder text
                     base_formatted.append({"role": role, "content": content_parts})
 
 
@@ -500,22 +522,26 @@ class GenerationService:
                 continue
             # Skip consecutive messages of the same role (except system followed by user)
             if current_role == last_role and current_role != 'system':
-                 print(f"WARN: Skipping consecutive message with role {current_role}")
-                 continue
-             # Ensure user follows system or assistant/model
-            if last_role in ['system', 'assistant', 'model'] and current_role != 'user':
-                 print(f"WARN: Expected 'user' role after '{last_role}', got '{current_role}'. Skipping.")
-                 continue
-             # Ensure assistant/model follows user
-            if last_role == 'user' and current_role not in ['assistant', 'model']:
-                 print(f"WARN: Expected 'assistant' or 'model' role after 'user', got '{current_role}'. Skipping.")
-                 continue
+                 # Exception: Google allows consecutive 'model' roles in history sometimes? Be lenient for google.
+                 # Let's still skip consecutive user/assistant for others.
+                 if provider != 'google':
+                     print(f"WARN: Skipping consecutive message with role {current_role}")
+                     continue
+                 # If google, allow consecutive model roles if the content is different (basic check)
+                 elif current_role == 'model' and valid_sequence and valid_sequence[-1]['role'] == 'model' and msg['parts'] == valid_sequence[-1]['parts']:
+                     print(f"WARN: Skipping identical consecutive 'model' message for Google.")
+                     continue
 
             valid_sequence.append(msg)
             last_role = current_role
 
         # Google specific: Ensure last message is 'user' role if needed by API?
-        # Let's assume the API handles this or the sequence check is sufficient.
+        # Gemini API usually requires the *last* turn to be 'user'.
+        # Let's adjust if the last message is 'model' for Google.
+        if provider == 'google' and valid_sequence and valid_sequence[-1]['role'] == 'model':
+            print("WARN: Last message for Google is 'model', adding empty user message to satisfy API requirement (may affect results).")
+            valid_sequence.append({'role': 'user', 'parts': ['']}) # Add empty user message
+
 
         return valid_sequence # Use the potentially filtered sequence
 
