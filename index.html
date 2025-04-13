@@ -24,7 +24,7 @@
                 <div class="history-title">Recent Conversations</div>
             </div>
         </div>
-        
+
         <div class="theme-modal" id="theme-modal">
             <div class="theme-modal-content">
                 <h3>Appearance Settings</h3>
@@ -59,69 +59,76 @@
             </form>
         </div>
     </div>
-    
+
     <!-- Main Content -->
     <div class="main-content">
-        <div class="header">
-            <div class="character-select-container">
-                <button class="character-btn" id="character-btn">Characters</button>
-                <div class="character-popup" id="character-popup" style="display: none;">
-                    <select class="character-select" id="character-select">
-                        <option value="">No Character</option>
-                    </select>
-                    <button class="character-create-btn btn-primary" id="character-create-btn">Create New</button>
-                    <button class="character-edit-btn btn-secondary" id="character-edit-btn" disabled>Edit Selected</button>
-                    <button class="character-delete-btn btn-danger" id="character-delete-btn" disabled>Delete Selected</button>
-                </div>
-            </div>
-            <div class="model-select-container">
-                <select class="model-select" id="model-select"></select>
-            </div>
-            <div class="header-actions">
-                <button class="header-btn" id="clear-chat-btn" title="Clear chat">
-                    <i class="bi bi-trash"></i>
-                </button>
-                <button class="header-btn" id="gen-settings-btn" title="Generation Settings">
-                    <i class="bi bi-sliders"></i>
-                </button>
-                <div class="header-btn">
-                    <i id="settings-btn" class="bi bi-gear"></i>
-                </div>
-            </div>
-        </div>
-
         <div class="chat-container" id="chat-container">
+            <div class="header">
+                <div class="header-actions">
+                    <button class="header-btn" id="clear-chat-btn" title="Clear chat">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                    <button class="header-btn" id="gen-settings-btn" title="Generation Settings">
+                        <i class="bi bi-sliders"></i>
+                    </button>
+                    <div class="header-btn">
+                        <i id="settings-btn" class="bi bi-gear"></i>
+                    </div>
+                </div>
+            </div>
             <div class="welcome-container" id="welcome-container">
                 <div class="welcome-title">
                     <i class="bi bi-stars"></i> Welcome to Zeryo
                 </div>
             </div>
+            <br>
             <div class="messages-wrapper" id="messages-wrapper"></div>
         </div>
-
+        <br>
         <div class="input-area">
             <div class="input-container">
                 <div class="image-preview-container" id="image-preview-container"></div>
-                <div class="input-wrapper">
-                    <textarea id="message-input" placeholder="Message Zeryo..." rows="1"></textarea>
-                    <div class="input-buttons">
+                <textarea id="message-input" placeholder="Say, what's on your mind?" rows="1"></textarea>
+                <div class="input-controls-row">
+                    <div class="input-controls-left">
                         <button class="input-button" id="image-button" title="Attach image">
                             <i class="bi bi-image"></i>
                         </button>
                         <button class="input-button" id="file-button" title="Attach file">
-                            <i class="bi bi-file-earmark-text"></i>
+                             <i class="bi bi-file-earmark-text"></i>
                         </button>
+                        <!-- Character Selector MOVED here -->
+                        <div class="character-select-container">
+                             <button class="input-control-btn" id="character-btn" title="Select Character">
+                                 <i class="bi bi-person-lines-fill"></i>
+                             </button>
+                            <div class="character-popup" id="character-popup" style="display: none;">
+                                <select class="character-select" id="character-select">
+                                    <option value="">No Character</option>
+                                </select>
+                                <button class="character-create-btn btn-primary" id="character-create-btn">Create New</button>
+                                <button class="character-edit-btn btn-secondary" id="character-edit-btn" disabled>Edit Selected</button>
+                                <button class="character-delete-btn btn-danger" id="character-delete-btn" disabled>Delete Selected</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="input-controls-right">
+                         <!-- Model Selector MOVED here -->
+                         <div class="model-select-container">
+                             <select class="model-select" id="model-select"></select>
+                         </div>
                         <button class="input-button" id="stop-button" style="display:none;" title="Stop generating">
                             <i class="bi bi-stop-fill"></i>
                         </button>
-                        <button class="input-button send-button" id="send-button" title="Send message">
-                            <i class="bi bi-send-fill"></i>
+                        <button class="input-button send-button" id="send-button" title="Send message (Ctrl+Enter)">
+                            <i class="bi bi-arrow-up"></i> <!-- Changed Icon -->
                         </button>
                     </div>
                 </div>
-                <div class="input-footer">
-                    Shift+Enter for new line • Ctrl+Enter to send
-                </div>
+                 <!-- Input footer removed as per image -->
+                 <!-- <div class="input-footer">
+                     Shift+Enter for new line • Ctrl+Enter to send
+                 </div> -->
             </div>
         </div>
         <div class="gen-settings-modal" id="gen-settings-modal">

@@ -1,7 +1,12 @@
-// script.js
-
-// API Configuration
+// API Configuration (Backend Data API)
 const API_BASE = 'http://localhost:8000';
+
+// Global Config (Fetched from backend)
+let PROVIDER_CONFIG = {
+    openrouter_base_url: "https://openrouter.ai/api/v1",
+    local_base_url: "http://127.0.0.1:8080",
+    // Keys are now ONLY stored in state.apiKeys, populated by fetchProviderConfig
+};
 
 // DOM Elements
 const chatContainer = document.getElementById('chat-container');
@@ -13,7 +18,7 @@ const modelSelect = document.getElementById('model-select');
 const imageButton = document.getElementById('image-button');
 const fileButton = document.getElementById('file-button');
 const stopButton = document.getElementById('stop-button');
-const clearChatBtn = document.getElementById('clear-chat-btn'); // Will be repurposed to delete chat
+const clearChatBtn = document.getElementById('clear-chat-btn'); // Delete chat button
 const newChatBtn = document.getElementById('new-chat-btn');
 const sidebarToggle = document.getElementById('sidebar-toggle');
 const sidebar = document.getElementById('sidebar');
@@ -24,29 +29,34 @@ const chatHistoryContainer = document.querySelector('.chat-history');
 const state = {
     currentChatId: null,
     chats: [], // List of {chat_id, preview, timestamp_updated}
-    messages: [], // All messages for the current chat
+    messages: [], // All messages for the current chat { message_id, ..., children_ids: [] }
     models: [],
-    currentImages: [],
-    currentTextFiles: [],
-    streamController: null,
+    currentImages: [], // { base64, dataUrl, type, name }
+    currentTextFiles: [], // { name, content (formatted), type, rawContent }
+    streamController: null, // AbortController for fetch
     currentAssistantMessageDiv: null, // The div being actively streamed into
     currentCharacterId: null,
+    activeSystemPrompt: null, // Store the actual prompt text
     userHasScrolled: false,
     lastScrollTop: 0,
-    isAutoScrolling: true, // Start true for initial load scroll
-    activeBranchInfo: {}, // { parentMessageId: { activeIndex: number, totalBranches: number } } -> Derived from messages
-    generationContext: null, // Tracks the type and relevant IDs of the ongoing generation
+    isAutoScrolling: true,
+    activeBranchInfo: {}, // { parentMessageId: { activeIndex: number, totalBranches: number } } -> Derived from messages during render
+    apiKeys: { // Store keys fetched from backend /config endpoint
+        openrouter: null,
+        google: null,
+        local: null, // For local servers that might need a key (populated from local_api_key in backend config)
+    }
 };
 
 // Default generation arguments
 const defaultGenArgs = {
-    temperature: 0.7,
-    min_p: 0.05,
-    max_tokens: null, // Let model decide by default
-    top_p: null, // Add top_p, default to null
+    temperature: null,
+    min_p: null,
+    max_tokens: null,
+    top_p: null,
 };
 
-// Configure marked for markdown parsing
+// Configure marked
 marked.setOptions({
     breaks: true,
     gfm: true,
@@ -54,14 +64,12 @@ marked.setOptions({
     highlight: function(code, lang) {
         const language = hljs.getLanguage(lang) ? lang : 'plaintext';
         try {
-            // Ensure code is a string
             const codeString = String(code);
             return hljs.highlight(codeString, { language, ignoreIllegals: true }).value;
         } catch (error) {
             console.error("Highlighting error:", error);
-            // Ensure code is a string for fallback
             const codeString = String(code);
-            return hljs.highlightAuto(codeString).value; // Fallback
+            return hljs.highlightAuto(codeString).value;
         }
     }
 });
@@ -135,64 +143,50 @@ function renderMarkdown(text) {
         }
     });
 
-
     return html;
 }
 
-// handleThinkBlockToggle remains unchanged
+// handleThinkBlockToggle
 function handleThinkBlockToggle(e) {
     const toggleBtn = e.target.closest('.think-block-toggle');
     if (toggleBtn) {
         const block = toggleBtn.closest('.think-block');
         const content = block.querySelector('.think-content');
         const icon = toggleBtn.querySelector('i');
-        // Use visibility/height for smoother transition if CSS is set up for it
         const isHidden = content.style.display === 'none';
-        content.style.display = isHidden ? '' : 'none'; // Toggle visibility
+        content.style.display = isHidden ? '' : 'none';
         icon.className = isHidden ? 'bi bi-eye' : 'bi bi-eye-slash';
-        // Or use a class toggle if preferred: block.classList.toggle('collapsed');
     }
 }
 
 async function init() {
-    const savedGenArgs = localStorage.getItem('genArgs');
-    if (savedGenArgs) {
-        try {
-             Object.assign(defaultGenArgs, JSON.parse(savedGenArgs));
-        } catch { /* ignore parse error, use defaults */ }
-    }
-    // Ensure all expected keys exist after loading
-    defaultGenArgs.temperature = defaultGenArgs.temperature ?? 0.7;
-    defaultGenArgs.min_p = defaultGenArgs.min_p ?? 0.05;
-    defaultGenArgs.max_tokens = defaultGenArgs.max_tokens ?? null;
-    defaultGenArgs.top_p = defaultGenArgs.top_p ?? null;
-
-
-    await fetchModels();
-    await fetchChats(); // Fetches list and loads the first chat if available
+    // No longer load keys from storage here
+    await fetchProviderConfig(); // Fetch config AND API keys
+    await loadGenArgs();
+    // fetchModels is now called within fetchProviderConfig after keys are set
+    // await fetchModels();
+    await fetchChats();
     await populateCharacterSelect();
     setupCharacterEvents();
     setupEventListeners();
     adjustTextareaHeight();
     setupDropZone();
     setupThemeSwitch();
-    //setupInlineCodeCopy();
-    setupGenerationSettings(); // Setup after loading saved args
+    setupGenerationSettings();
+    // No longer need setupApiKeySettings
 
-    // Attempt to load last chat
+    // Load last chat or first chat
     const lastChatId = localStorage.getItem('lastChatId');
     if (lastChatId && state.chats.some(c => c.chat_id === lastChatId)) {
         await loadChat(lastChatId);
     } else if (state.chats.length > 0 && !state.currentChatId) {
-        // If no last chat or it's invalid, load the most recent one
         await loadChat(state.chats[0].chat_id);
     } else {
-        // No chats exist, ensure welcome screen is shown
         welcomeContainer.style.display = 'flex';
-        messagesWrapper.innerHTML = ''; // Clear any potential residue
+        messagesWrapper.innerHTML = '';
         state.currentChatId = null;
-        highlightCurrentChatInSidebar(); // Clear selection
-        displayActiveSystemPrompt(null); // Ensure no prompt shown
+        highlightCurrentChatInSidebar();
+        displayActiveSystemPrompt(null, null);
     }
 
      // Load last used character if no chat is loaded initially
@@ -200,180 +194,138 @@ async function init() {
         const savedCharacterId = localStorage.getItem('lastCharacterId');
         if (savedCharacterId) {
             document.getElementById('character-select').value = savedCharacterId;
-            // Fetch characters if needed to display prompt?
             const characters = await fetchCharacters();
-            displayActiveSystemPrompt(savedCharacterId, characters);
-            state.currentCharacterId = savedCharacterId; // Set state for new chat
+            const selectedChar = characters.find(c => c.character_id === savedCharacterId);
+            displayActiveSystemPrompt(selectedChar?.character_name, selectedChar?.sysprompt);
+            state.currentCharacterId = savedCharacterId;
+            state.activeSystemPrompt = selectedChar?.sysprompt;
         }
      }
-     applySidebarState(); // Apply sidebar state after other initializations
+     applySidebarState();
 }
 
-function setupGenerationSettings() {
-    const genSettingsBtn = document.getElementById('gen-settings-btn');
-    const modal = document.getElementById('gen-settings-modal');
-    const applyBtn = document.getElementById('apply-gen-settings');
-    const cancelBtn = document.getElementById('cancel-gen-settings');
 
-    genSettingsBtn.addEventListener('click', () => {
-        updateSlidersUI(); // Update UI with current values when opening
-        modal.style.display = 'flex';
-    });
+// --- Config & Model Fetching (MODIFIED) ---
 
-    applyBtn.addEventListener('click', () => {
-        // Read values from UI and update defaultGenArgs
-        defaultGenArgs.temperature = document.getElementById('temp-none').checked ? null : parseFloat(document.getElementById('temp-slider').value);
-        defaultGenArgs.min_p = document.getElementById('minp-none').checked ? null : parseFloat(document.getElementById('minp-slider').value);
-        defaultGenArgs.max_tokens = document.getElementById('maxt-none').checked ? null : parseInt(document.getElementById('maxt-slider').value);
-        // Add top_p if slider exists
-        const topPSlider = document.getElementById('topp-slider');
-        if (topPSlider) {
-             defaultGenArgs.top_p = document.getElementById('topp-none').checked ? null : parseFloat(topPSlider.value);
-        }
+async function fetchProviderConfig() {
+    try {
+        const response = await fetch(`${API_BASE}/config`);
+        if (!response.ok) throw new Error(`Failed to fetch config: ${response.statusText}`);
+        const backendConfig = await response.json();
 
-        localStorage.setItem('genArgs', JSON.stringify(defaultGenArgs));
-        modal.style.display = 'none';
-    });
+        // Update base URLs
+        PROVIDER_CONFIG.openrouter_base_url = backendConfig.openrouter_base_url || PROVIDER_CONFIG.openrouter_base_url;
+        PROVIDER_CONFIG.local_base_url = backendConfig.local_base_url || PROVIDER_CONFIG.local_base_url;
 
-    cancelBtn.addEventListener('click', () => modal.style.display = 'none');
+        // *** NEW: Populate state.apiKeys directly from backend config ***
+        state.apiKeys.openrouter = backendConfig.openrouter || null;
+        state.apiKeys.google = backendConfig.google || null;
+        state.apiKeys.local = backendConfig.local_api_key || null; // Match backend key name 'local_api_key'
 
-    // Setup sliders and checkboxes
-    const settingsConfig = [
-        { prefix: 'temp', defaultVal: 0.7 },
-        { prefix: 'minp', defaultVal: 0.05 },
-        { prefix: 'maxt', defaultVal: 1024 }, // Default for UI if null
-        // Add top_p if the HTML includes elements with 'topp-' prefix
-        // { prefix: 'topp', defaultVal: 0.9 },
-    ];
+        console.log("Fetched provider config and populated API keys (values hidden).");
 
-    settingsConfig.forEach(({ prefix, defaultVal }) => {
-        const slider = document.getElementById(`${prefix}-slider`);
-        const valueSpan = document.getElementById(`${prefix}-value`);
-        const noneCheckbox = document.getElementById(`${prefix}-none`);
+        // Re-populate model select now that keys are confirmed
+        // This needs to happen *after* keys are loaded
+        await fetchModels(); // Refetch models to update based on key availability
 
-        if (!slider || !valueSpan || !noneCheckbox) return; // Skip if elements don't exist
-
-        slider.addEventListener('input', () => {
-            valueSpan.textContent = slider.value;
-            if (noneCheckbox.checked) {
-                 noneCheckbox.checked = false; // Uncheck 'None' if slider is moved
-                 slider.disabled = false;
-            }
-        });
-
-        noneCheckbox.addEventListener('change', () => {
-            slider.disabled = noneCheckbox.checked;
-            valueSpan.textContent = noneCheckbox.checked ? 'None' : slider.value;
-            if (noneCheckbox.checked) {
-                 // Optional: Reset slider to default when 'None' is checked?
-                 // slider.value = defaultVal;
-            }
-        });
-    });
-
-
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) modal.style.display = 'none';
-    });
-
-    // Function to set slider values based on current defaultGenArgs
-    function updateSlidersUI() {
-        settingsConfig.forEach(({ prefix }) => {
-             const slider = document.getElementById(`${prefix}-slider`);
-             const valueSpan = document.getElementById(`${prefix}-value`);
-             const noneCheckbox = document.getElementById(`${prefix}-none`);
-
-             if (!slider || !valueSpan || !noneCheckbox) return;
-
-             // Adjust key for lookup if needed (e.g., 'maxt' vs 'max_tokens')
-             const stateKey = prefix === 'maxt' ? 'max_tokens' : prefix;
-             const currentValue = defaultGenArgs[stateKey];
-
-            const isNone = currentValue === null || currentValue === undefined;
-
-            noneCheckbox.checked = isNone;
-            slider.disabled = isNone;
-            if (isNone) {
-                 valueSpan.textContent = 'None';
-                 // Keep slider value or reset to default? Let's keep it.
-                 // slider.value = slider.defaultValue; // Or the specific defaultVal
-            } else {
-                 slider.value = currentValue;
-                 valueSpan.textContent = currentValue;
-            }
-        });
+    } catch (error) {
+        console.error('Error fetching provider config:', error);
+        addSystemMessage("Failed to fetch API configuration from backend. Models requiring keys may be disabled.", "error");
+        // Ensure model select reflects potential missing keys even on error
+        populateModelSelect(); // Call even on error to show 'no models' or disable options
     }
 }
 
-// Fetch Available Models
+async function loadGenArgs() {
+    const savedGenArgs = localStorage.getItem('genArgs');
+    if (savedGenArgs) {
+        try { Object.assign(defaultGenArgs, JSON.parse(savedGenArgs)); }
+        catch { /* ignore parse error */ }
+    }
+    defaultGenArgs.temperature = defaultGenArgs.temperature ?? null;
+    defaultGenArgs.min_p = defaultGenArgs.min_p ?? null;
+    defaultGenArgs.max_tokens = defaultGenArgs.max_tokens ?? null;
+    defaultGenArgs.top_p = defaultGenArgs.top_p ?? null;
+}
+
 async function fetchModels() {
     try {
         const response = await fetch(`${API_BASE}/models`);
         if (!response.ok) throw new Error(`Failed to fetch models: ${response.statusText}`);
         state.models = await response.json();
-        // Sort models alphabetically by displayName?
         state.models.sort((a, b) => a.displayName.localeCompare(b.displayName));
-        populateModelSelect();
+        populateModelSelect(); // Populate select after fetching
     } catch (error) {
         console.error('Error fetching models:', error);
-        state.models = []; // Ensure it's an empty array on error
-        // Display error to user?
+        state.models = [];
+        populateModelSelect(); // Show error state in dropdown
     }
 }
 
 function populateModelSelect() {
-    modelSelect.innerHTML = ''; // Clear existing options
+    modelSelect.innerHTML = '';
     if (state.models.length === 0) {
-        const option = document.createElement('option');
-        option.value = '';
-        option.textContent = 'No models available';
-        option.disabled = true;
-        modelSelect.appendChild(option);
+        modelSelect.innerHTML = '<option value="" disabled>No models available</option>';
     } else {
         state.models.forEach(model => {
             const option = document.createElement('option');
-            option.value = model.name; // Use the 'name' field as the value
-            option.textContent = model.displayName;
-            option.dataset.supportsImages = model.supportsImages; // Store image support flag
-            option.dataset.provider = model.provider; // Store provider info
+            option.value = model.name;
+            option.dataset.modelIdentifier = model.model_identifier;
+            option.dataset.supportsImages = model.supportsImages;
+            option.dataset.provider = model.provider;
+
+            // Check if API key is available FOR THIS PROVIDER in state
+            const apiKeyAvailable = !!getApiKey(model.provider); // Use getApiKey helper
+
+            option.textContent = `${model.displayName}${apiKeyAvailable ? '' : ' (Key Missing)'}`;
+            option.disabled = !apiKeyAvailable;
+
             modelSelect.appendChild(option);
         });
-         // Try to restore last selected model
+
+        // Restore selection logic
         const lastModel = localStorage.getItem('lastModelName');
-        if (lastModel && state.models.some(m => m.name === lastModel)) {
+        const lastModelOption = Array.from(modelSelect.options).find(opt => opt.value === lastModel && !opt.disabled);
+        if (lastModelOption) {
             modelSelect.value = lastModel;
+        } else {
+            const firstEnabledOption = modelSelect.querySelector('option:not([disabled])');
+            if (firstEnabledOption) {
+                modelSelect.value = firstEnabledOption.value;
+                localStorage.setItem('lastModelName', modelSelect.value);
+            } else {
+                 modelSelect.value = '';
+            }
         }
     }
-    updateAttachButtons(); // Update buttons based on initially selected model
+    updateAttachButtons();
 }
 
-// Fetch Chat List
+
+// --- Chat Data Fetching & Rendering ---
+
 async function fetchChats() {
     try {
-        const response = await fetch(`${API_BASE}/chat/get_chats?limit=100`); // Fetch more chats
+        const response = await fetch(`${API_BASE}/chat/get_chats?limit=100`);
         if (!response.ok) throw new Error(`Failed to fetch chats: ${response.statusText}`);
         state.chats = await response.json();
-        renderChatList(); // Render the fetched list
-        // Don't automatically load chat here, let init decide based on lastChatId or first item
+        renderChatList();
     } catch (error) {
         console.error('Error fetching chats:', error);
         state.chats = [];
-        renderChatList(); // Render empty list or error state
+        renderChatList();
     }
 }
 
 function renderChatList() {
-    // Clear only the items, keep the title structure
     const historyItems = chatHistoryContainer.querySelectorAll('.history-item');
     historyItems.forEach(item => item.remove());
-
-    const historyTitle = chatHistoryContainer.querySelector('.history-title'); // Assuming this exists
+    const historyTitle = chatHistoryContainer.querySelector('.history-title');
 
     if (state.chats.length === 0) {
         if (historyTitle) historyTitle.textContent = 'No Recent Conversations';
-        // Optional: Add a placeholder message
         const noChatsMsg = document.createElement('div');
-        noChatsMsg.className = 'history-item dimmed'; // Dimmed class for styling
+        noChatsMsg.className = 'history-item dimmed';
         noChatsMsg.textContent = 'Start a new chat!';
         chatHistoryContainer.appendChild(noChatsMsg);
         return;
@@ -384,150 +336,131 @@ function renderChatList() {
     state.chats.forEach(chat => {
         const item = document.createElement('div');
         item.className = 'history-item';
-        item.dataset.chatId = chat.chat_id; // Store chat ID on the element
+        item.dataset.chatId = chat.chat_id;
 
-        // Simple structure: icon + text preview
         const icon = document.createElement('i');
         icon.className = 'bi bi-chat';
         const text = document.createElement('span');
-        text.textContent = chat.preview || `Chat ${chat.chat_id.substring(0, 6)}`; // Use preview or short ID
+        text.textContent = chat.preview || `Chat ${chat.chat_id.substring(0, 6)}`;
 
         item.appendChild(icon);
         item.appendChild(text);
 
         item.addEventListener('click', () => {
-             if (state.currentChatId !== chat.chat_id) { // Avoid reloading same chat
+             if (state.currentChatId !== chat.chat_id) {
                  loadChat(chat.chat_id);
              }
         });
 
-        // Highlight if it's the current chat
         if (chat.chat_id === state.currentChatId) {
-             item.classList.add('active'); // Use a class for styling active item
+             item.classList.add('active');
         }
 
         chatHistoryContainer.appendChild(item);
     });
 
-    // Ensure sidebar text visibility matches collapsed state
     const isCollapsed = sidebar.classList.contains('sidebar-collapsed');
     chatHistoryContainer.querySelectorAll('.history-item span, .history-title').forEach(el => {
          el.style.display = isCollapsed ? 'none' : '';
     });
 }
 
-
-// Highlight Current Chat in Sidebar (using the class)
 function highlightCurrentChatInSidebar() {
     const chatItems = chatHistoryContainer.querySelectorAll('.history-item');
     chatItems.forEach(item => {
-        if (item.dataset.chatId === state.currentChatId) {
-            item.classList.add('active');
-        } else {
-            item.classList.remove('active');
-        }
+        item.classList.toggle('active', item.dataset.chatId === state.currentChatId);
     });
 }
 
-
-// Load a Chat
 async function loadChat(chatId) {
-    if (!chatId) {
-         console.warn("loadChat called with null chatId");
-         startNewChat(); // Go to new chat state if ID is invalid
-         return;
-    }
+    if (!chatId) { console.warn("loadChat called with null chatId"); startNewChat(); return; }
     console.log(`Loading chat: ${chatId}`);
-    state.isAutoScrolling = true; // Enable autoscroll during load
-    state.userHasScrolled = false; // Reset scroll state
+    state.isAutoScrolling = true; state.userHasScrolled = false;
 
     try {
         const response = await fetch(`${API_BASE}/chat/${chatId}`);
         if (!response.ok) {
              if (response.status === 404) {
-                 console.error(`Chat not found: ${chatId}. Removing from list and local storage.`);
-                 // Remove from state.chats and rerender list
+                 console.error(`Chat not found: ${chatId}. Removing.`);
                  state.chats = state.chats.filter(c => c.chat_id !== chatId);
-                 renderChatList();
-                 localStorage.removeItem('lastChatId');
-                 // Load the next available chat or start new
-                 if (state.chats.length > 0) {
-                     await loadChat(state.chats[0].chat_id);
-                 } else {
-                     startNewChat();
-                 }
-             } else {
-                throw new Error(`Failed to load chat ${chatId}: ${response.statusText}`);
-             }
-             return; // Stop execution if chat failed to load
+                 renderChatList(); localStorage.removeItem('lastChatId');
+                 if (state.chats.length > 0) await loadChat(state.chats[0].chat_id); else startNewChat();
+             } else { throw new Error(`Failed to load chat ${chatId}: ${response.statusText}`); }
+             return;
         }
         const chat = await response.json();
 
         state.currentChatId = chatId;
-        // Filter out any system messages from the backend before storing
-        state.messages = (chat.messages || []).filter(m => m.role !== 'system');
+        state.messages = chat.messages || []; // *** Store fresh messages from backend ***
         state.currentCharacterId = chat.character_id;
+        state.activeSystemPrompt = null;
 
-        localStorage.setItem('lastChatId', chatId); // Save successfully loaded chat ID
-
-        // Update character select dropdown
+        localStorage.setItem('lastChatId', chatId);
         document.getElementById('character-select').value = state.currentCharacterId || '';
 
-        // Clear previous messages and render new ones
-        messagesWrapper.innerHTML = '';
-        welcomeContainer.style.display = 'none'; // Hide welcome message
-        renderActiveMessages(); // Render the active branch
+        if (state.currentCharacterId) {
+             try {
+                  const charResponse = await fetch(`${API_BASE}/chat/get_character/${state.currentCharacterId}`);
+                  if (charResponse.ok) {
+                       const activeChar = await charResponse.json();
+                       state.activeSystemPrompt = activeChar?.sysprompt || null;
+                       displayActiveSystemPrompt(activeChar?.character_name, state.activeSystemPrompt);
+                  } else {
+                      console.warn(`Failed to fetch character ${state.currentCharacterId} details for prompt.`);
+                      displayActiveSystemPrompt(null, null);
+                  }
+             } catch (charError) {
+                 console.error("Error fetching character details:", charError);
+                 displayActiveSystemPrompt(null, null);
+             }
+        } else {
+            displayActiveSystemPrompt(null, null);
+        }
 
-        highlightCurrentChatInSidebar(); // Update sidebar highlighting
-
-        // Fetch characters to display the correct system prompt banner
-        const characters = await fetchCharacters();
-        displayActiveSystemPrompt(state.currentCharacterId, characters);
+        messagesWrapper.innerHTML = ''; welcomeContainer.style.display = 'none';
+        renderActiveMessages(); // Render based on the freshly loaded state.messages
+        highlightCurrentChatInSidebar();
 
     } catch (error) {
         console.error('Error loading chat:', error);
-        // Show error to user? Revert to welcome screen?
         messagesWrapper.innerHTML = `<div class="system-message error">Failed to load chat: ${error.message}</div>`;
-        welcomeContainer.style.display = 'none';
-        state.currentChatId = null;
+        welcomeContainer.style.display = 'none'; state.currentChatId = null;
         highlightCurrentChatInSidebar();
     } finally {
-         // Scroll to bottom after rendering (use timeout for safety)
         setTimeout(() => {
-             if (state.isAutoScrolling) {
+             // Autoscroll only if user hasn't interfered during load/render
+             if (!state.userHasScrolled && chatContainer.scrollHeight > chatContainer.clientHeight) {
                 chatContainer.scrollTop = chatContainer.scrollHeight;
              }
-             state.isAutoScrolling = false; // Disable autoscroll after initial load
-        }, 100);
+             state.isAutoScrolling = false; // Disable after initial scroll attempt
+        }, 100); // Small delay for rendering
     }
 }
 
-// Renders only the messages on the active branch
 function renderActiveMessages() {
-    messagesWrapper.innerHTML = ''; // Clear existing messages
-    state.activeBranchInfo = {}; // Reset derived branch info
+    messagesWrapper.innerHTML = '';
+    state.activeBranchInfo = {};
 
     if (!state.messages || state.messages.length === 0) {
         console.log("No messages to render.");
         return;
     }
 
-    // 1. Build Parent-Child Map and Branch Info
     const messageMap = new Map(state.messages.map(msg => [msg.message_id, { ...msg, children: [] }]));
     const rootMessages = [];
 
     state.messages.forEach(msg => {
-        if (msg.role === 'system') return; // Skip system messages for rendering tree
+        if (msg.role === 'system') return;
 
         const msgNode = messageMap.get(msg.message_id);
-        if (!msgNode) return; // Skip if message somehow not in map
+        if (!msgNode) return;
 
         if (msg.parent_message_id && messageMap.has(msg.parent_message_id)) {
             messageMap.get(msg.parent_message_id).children.push(msgNode);
         } else if (!msg.parent_message_id) {
             rootMessages.push(msgNode);
         }
-        // Store branch info while iterating
+        // Derive branch info from backend data
          if (msg.child_message_ids && msg.child_message_ids.length > 1) {
               state.activeBranchInfo[msg.message_id] = {
                   activeIndex: msg.active_child_index ?? 0,
@@ -536,62 +469,52 @@ function renderActiveMessages() {
          }
     });
 
-     // Sort children by timestamp just in case API didn't guarantee order
      messageMap.forEach(node => {
          if (node.children.length > 0) {
              node.children.sort((a, b) => a.timestamp - b.timestamp);
-             // Update activeBranchInfo with sorted children count if it differs
               if (node.child_message_ids && node.child_message_ids.length > 1) {
+                  // Update totalBranches based on actual children found in map, respecting sort
+                  const mappedChildrenIds = node.children.map(c => c.message_id);
                   state.activeBranchInfo[node.message_id] = {
                       activeIndex: node.active_child_index ?? 0,
-                      totalBranches: node.children.length // Use actual children count
+                      totalBranches: mappedChildrenIds.length // Use count of children actually present
                   };
               }
          }
      });
 
-    // Sort root messages by timestamp
     rootMessages.sort((a, b) => a.timestamp - b.timestamp);
 
-    // 2. Traverse and Render Active Path(s)
     function renderBranch(messageNode) {
-        if (!messageNode || messageNode.role === 'system') return; // Skip null or system nodes
+        if (!messageNode || messageNode.role === 'system') return;
 
-        // Render the current message node
-        const contentDiv = addMessage(messageNode); // addMessage handles rendering the node itself
+        addMessage(messageNode); // Render the node itself
 
-        // Find the active child and recurse
-        const children = messageNode.children.filter(c => c.role !== 'system'); // Filter out system children if any sneak in
+        const children = messageNode.children.filter(c => c.role !== 'system');
         if (children && children.length > 0) {
             const activeIndex = messageNode.active_child_index ?? 0;
-            const activeChildNode = children[activeIndex < children.length ? activeIndex : 0]; // Fallback to 0
+            const activeChildNode = children[activeIndex < children.length ? activeIndex : 0];
             if (activeChildNode) {
                 renderBranch(activeChildNode);
             } else {
-                 console.warn(`Active child index ${activeIndex} out of bounds for message ${messageNode.message_id}`);
+                 console.warn(`Active child index ${activeIndex} out of bounds for message ${messageNode.message_id} children:`, children.map(c=>c.message_id));
             }
         }
     }
 
-    // Start rendering from each root message
     rootMessages.forEach(rootNode => renderBranch(rootNode));
 
-    // 3. Highlight code blocks after rendering
     requestAnimationFrame(() => {
          messagesWrapper.querySelectorAll('pre code').forEach(block => {
             try {
-                // Ensure parentElement exists before replacement
                 const preElement = block.parentElement;
                 if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
                      const codeText = block.textContent;
                      const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
                      const lang = langClass ? langClass.substring(9) : '';
-
-                     // Use the createCodeBlock helper with TEXT content
                      const wrapper = createCodeBlockWithContent(codeText, lang);
                      preElement.replaceWith(wrapper);
                 } else if (preElement && preElement.closest('.code-block-wrapper')) {
-                    // Already wrapped, just re-highlight
                     hljs.highlightElement(block);
                 }
             } catch (e) {
@@ -687,18 +610,16 @@ function createCodeBlockWithContent(codeText, lang = '') {
         if (isCollapsed) {
             icon.className = 'bi bi-chevron-down';
             collapseBtn.title = 'Expand code';
-            // Calculate lines only when collapsing
             const lines = newCode.textContent.split('\n').length;
-            // Handle potential trailing newline: if last line is empty, subtract 1
             const lineCount = newCode.textContent.endsWith('\n') ? lines - 1 : lines;
             collapseInfoSpan.textContent = `${lineCount} lines hidden`;
-            collapseInfoSpan.style.display = 'inline-block'; // Show info
-             newPre.style.display = 'none'; // Explicitly hide pre (CSS might do this too)
+            collapseInfoSpan.style.display = 'inline-block';
+             newPre.style.display = 'none';
         } else {
             icon.className = 'bi bi-chevron-up';
             collapseBtn.title = 'Collapse code';
-            collapseInfoSpan.style.display = 'none'; // Hide info
-            newPre.style.display = ''; // Show pre
+            collapseInfoSpan.style.display = 'none';
+            newPre.style.display = '';
         }
         e.stopPropagation();
     });
@@ -707,31 +628,24 @@ function createCodeBlockWithContent(codeText, lang = '') {
     return wrapper;
 }
 
-// addMessage renders a single message node and its controls (Updated with button logic)
+// addMessage (renders single node based on provided data)
 function addMessage(message) {
-    // --- Do not render system messages in the main flow ---
-    if (message.role === 'system') {
-        return null;
-    }
-
-    const role = message.role === 'llm' ? 'assistant' : message.role; // Normalize role
+    if (message.role === 'system') return null;
+    const role = message.role === 'llm' ? 'assistant' : message.role;
     const messageRow = document.createElement('div');
-    messageRow.className = `message-row ${role}-row`; // e.g., user-row, assistant-row
-    messageRow.dataset.messageId = message.message_id; // Add ID to the row for easier selection
+    messageRow.className = `message-row ${role}-row`;
+    messageRow.dataset.messageId = message.message_id;
 
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message';
 
     const avatarActionsDiv = document.createElement('div');
-    avatarActionsDiv.className = 'message-avatar-actions'; // Container for avatar and actions
+    avatarActionsDiv.className = 'message-avatar-actions';
 
-    // --- Message Actions (Buttons) ---
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'message-actions';
 
-    // --- START OF RESTORED BUTTON LOGIC ---
-
-    // Branch Navigation Controls (if applicable)
+    // Branch Navigation Controls (reads from state.activeBranchInfo derived in renderActiveMessages)
     const branchInfo = state.activeBranchInfo[message.message_id];
     if (branchInfo && branchInfo.totalBranches > 1) {
         const branchNav = document.createElement('div');
@@ -755,19 +669,16 @@ function addMessage(message) {
         nextBtn.onclick = () => setActiveBranch(message.message_id, branchInfo.activeIndex + 1);
         branchNav.appendChild(nextBtn);
 
-        actionsDiv.appendChild(branchNav); // Add branch controls first
+        actionsDiv.appendChild(branchNav);
     }
-
 
     // Standard Action Buttons
     const copyBtn = document.createElement('button');
     copyBtn.className = 'message-action-btn';
     copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
     copyBtn.title = 'Copy message text';
-    copyBtn.addEventListener('click', () => copyMessageContent(contentDiv, copyBtn)); // Pass contentDiv here
     actionsDiv.appendChild(copyBtn);
 
-    // Edit Button
     const editBtn = document.createElement('button');
     editBtn.className = 'message-action-btn';
     editBtn.innerHTML = '<i class="bi bi-pencil"></i>';
@@ -775,7 +686,6 @@ function addMessage(message) {
     editBtn.addEventListener('click', () => startEditing(message.message_id));
     actionsDiv.appendChild(editBtn);
 
-    // Regenerate, Branch, Continue Buttons (Only for Assistant messages)
     if (role === 'assistant') {
         const regenerateBtn = document.createElement('button');
         regenerateBtn.className = 'message-action-btn';
@@ -786,107 +696,92 @@ function addMessage(message) {
 
         const branchBtn = document.createElement('button');
         branchBtn.className = 'message-action-btn';
-        branchBtn.innerHTML = '<i class="bi bi-diagram-3"></i>'; // Branching icon
+        branchBtn.innerHTML = '<i class="bi bi-diagram-3"></i>';
         branchBtn.title = 'Regenerate as new branch';
         branchBtn.addEventListener('click', () => regenerateMessage(message.message_id, true));
         actionsDiv.appendChild(branchBtn);
 
         const continueBtn = document.createElement('button');
         continueBtn.className = 'message-action-btn';
-        continueBtn.innerHTML = '<i class="bi bi-arrow-bar-right"></i>'; // Or other continue icon
+        continueBtn.innerHTML = '<i class="bi bi-arrow-bar-right"></i>';
         continueBtn.title = 'Continue generating this response';
         continueBtn.addEventListener('click', () => continueMessage(message.message_id));
         actionsDiv.appendChild(continueBtn);
     }
 
-    // Delete Button
     const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'message-action-btn delete-btn'; // Specific class for styling maybe
+    deleteBtn.className = 'message-action-btn delete-btn';
     deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
     deleteBtn.title = 'Delete message (and descendants)';
     deleteBtn.addEventListener('click', () => deleteMessage(message.message_id));
     actionsDiv.appendChild(deleteBtn);
 
-    // --- END OF RESTORED BUTTON LOGIC ---
-
-
-    // --- Message Content ---
+    // Message Content
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
-    contentDiv.dataset.raw = message.message; // Store raw markdown/text
+    contentDiv.dataset.raw = message.message;
+
+    copyBtn.addEventListener('click', () => copyMessageContent(contentDiv, copyBtn));
 
     if (role === 'user') {
-        // For user messages, display raw text respecting whitespace/newlines
         contentDiv.textContent = message.message;
         contentDiv.style.whiteSpace = 'pre-wrap';
-    } else { // Assistant/LLM
+    } else {
         contentDiv.innerHTML = renderMarkdown(message.message);
-         // Process code blocks after initial renderMarkdown
          contentDiv.querySelectorAll('pre code').forEach(block => {
             const preElement = block.parentElement;
             if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
                  const codeText = block.textContent;
                  const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
                  const lang = langClass ? langClass.substring(9) : '';
-                 const wrapper = createCodeBlockWithContent(codeText, lang); // Use helper function
+                 const wrapper = createCodeBlockWithContent(codeText, lang);
                  preElement.replaceWith(wrapper);
             }
          });
     }
 
-    // --- Attachments Display ---
+    // Attachments Display
     if (message.attachments && message.attachments.length > 0) {
         const attachmentsContainer = document.createElement('div');
-        attachmentsContainer.className = 'attachments-container'; // Use the new CSS class
+        attachmentsContainer.className = 'attachments-container';
 
         message.attachments.forEach(attachment => {
-            // Store raw content if available (for popup viewer)
-            const rawContent = attachment.rawContent || null;
+            let rawContent = attachment.content;
+            if (attachment.type === 'file') {
+                 const match = attachment.content.match(/^.*:\n```[^\n]*\n([\s\S]*)\n```$/);
+                 if (match && match[1]) { rawContent = match[1]; }
+                 else { console.warn("Could not parse raw content from formatted file attachment:", attachment.name); }
+            }
 
             if (attachment.type === 'image') {
                 const imgWrapper = document.createElement('div');
-                imgWrapper.className = 'attachment-preview image-preview-wrapper'; // Use CSS classes
-                // Pass attachment data (including potential rawContent) to popup
+                imgWrapper.className = 'attachment-preview image-preview-wrapper';
                 imgWrapper.addEventListener('click', () => viewAttachmentPopup({...attachment, rawContent}));
-
                 const img = document.createElement('img');
                 img.src = `data:image/jpeg;base64,${attachment.content}`;
-                img.alt = attachment.name || 'Attached image'; // Use name if available
+                img.alt = attachment.name || 'Attached image';
                 imgWrapper.appendChild(img);
                 attachmentsContainer.appendChild(imgWrapper);
             } else if (attachment.type === 'file') {
                 const fileWrapper = document.createElement('div');
-                fileWrapper.className = 'attachment-preview file-preview-wrapper'; // Use CSS classes
-                // Pass attachment data (including potential rawContent) to popup
+                fileWrapper.className = 'attachment-preview file-preview-wrapper';
                 fileWrapper.addEventListener('click', () => viewAttachmentPopup({...attachment, rawContent}));
-
-                const filename = attachment.name || extractFilename(attachment.content) || 'Attached File';
-                // Inner structure for file preview (icon + name)
+                const filename = attachment.name || 'Attached File';
                 fileWrapper.innerHTML = `<i class="bi bi-file-earmark-text"></i> <span>${filename}</span>`;
                 attachmentsContainer.appendChild(fileWrapper);
             }
         });
-        contentDiv.appendChild(attachmentsContainer); // Append attachments below main content
+        contentDiv.appendChild(attachmentsContainer);
     }
-    // --- End Attachments Display ---
 
+    messageDiv.appendChild(contentDiv);
+    avatarActionsDiv.appendChild(actionsDiv);
+    messageDiv.appendChild(avatarActionsDiv);
+    messageRow.appendChild(messageDiv);
+    messagesWrapper.appendChild(messageRow);
 
-    messageDiv.appendChild(contentDiv); // Add content div
-
-    // Add Actions below content (Now actionsDiv is populated)
-    avatarActionsDiv.appendChild(actionsDiv); // Add actions to the avatar/actions container
-    messageDiv.appendChild(avatarActionsDiv); // Append the container to the message div
-
-
-    messageRow.appendChild(messageDiv); // Append the main message div to the row
-    messagesWrapper.appendChild(messageRow); // Append the row to the main wrapper
-
-    // Return the contentDiv for potential streaming updates
     return contentDiv;
 }
-
-
-// --- Branching Logic ---
 
 async function setActiveBranch(parentMessageId, newIndex) {
      console.log(`Setting active branch for parent ${parentMessageId} to index ${newIndex}`);
@@ -903,26 +798,8 @@ async function setActiveBranch(parentMessageId, newIndex) {
              throw new Error(`Failed to set active branch: ${errorData.detail || response.statusText}`);
          }
 
-         // Update local state message first (important!)
-         const parentMessage = state.messages.find(m => m.message_id === parentMessageId);
-         if (parentMessage) {
-             parentMessage.active_child_index = newIndex;
-         } else {
-              console.error(`Parent message ${parentMessageId} not found in local state after API call.`);
-              // Fallback to full reload if state is inconsistent
-              await loadChat(state.currentChatId);
-              return;
-         }
-
-
-         // Re-render the messages from the point of change downwards
-         // For simplicity, let's reload the whole chat view for now
-          renderActiveMessages(); // This uses the updated state.messages
-          // Optional: scroll to the parent message after re-render?
-          const parentRow = messagesWrapper.querySelector(`.message-row[data-message-id="${parentMessageId}"]`);
-          if (parentRow) {
-               // parentRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-          }
+         // *** Reload chat state from backend to reflect the change ***
+         await loadChat(state.currentChatId);
 
      } catch (error) {
          console.error('Error setting active branch:', error);
@@ -930,448 +807,7 @@ async function setActiveBranch(parentMessageId, newIndex) {
      }
 }
 
-
-// --- Continue / Regenerate ---
-
-// Continue Message (update catch block for saving partial)
-async function continueMessage(messageId) {
-    if (!state.currentChatId || state.streamController) return; // Prevent parallel generations
-
-    const message = state.messages.find(m => m.message_id === messageId);
-    if (!message || message.role !== 'llm') { // Ensure it's an assistant message
-        addSystemMessage("Error: Can only continue assistant messages.", "error");
-        return;
-    }
-
-    const messageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageId}"]`);
-    const contentDiv = messageRow?.querySelector('.message-content');
-    if (!contentDiv) {
-        addSystemMessage(`Error: Could not find message content div for ${messageId}.`, "error");
-        return;
-    }
-
-    let existingContent = message.message; // Use state message content
-    contentDiv.dataset.raw = existingContent; // Ensure raw data is up-to-date
-
-    console.log(`Continuing message ${messageId}`);
-
-    state.streamController = new AbortController();
-    // Set context for saving on abort
-    state.generationContext = { type: 'continue', messageId: messageId };
-
-    stopButton.style.display = 'flex';
-    sendButton.disabled = true; // Disable send while generating
-    state.isAutoScrolling = true; // Re-enable auto-scroll for continuation
-    state.userHasScrolled = false;
-
-    const scrollHandler = createScrollHandler();
-    chatContainer.addEventListener('scroll', scrollHandler);
-
-    let fullText = existingContent; // Start with existing content
-    let continuationText = ''; // Only the newly streamed part
-
-    try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/continue/${messageId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model_name: modelSelect.value, // Use current UI model
-                streaming: true,
-                gen_args: defaultGenArgs,
-                provider: state.models.find(m => m.name === modelSelect.value)?.provider
-            }),
-            signal: state.streamController.signal
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text().catch(() => `HTTP ${response.status}`);
-            throw new Error(`Failed to continue message: ${errorText}`);
-        }
-
-        const reader = response.body.getReader();
-        const textDecoder = new TextDecoder();
-        contentDiv.classList.add('streaming'); // Add streaming indicator
-
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-                 console.log(`Continue stream for ${messageId} finished.`);
-                 break; // Handled by [DONE] signal from API
-            }
-            if (state.streamController?.signal.aborted) {
-                 console.log(`Continue stream read aborted.`);
-                 break; // Exit loop, handle in catch
-            }
-
-            const textChunk = textDecoder.decode(value, { stream: true });
-            const lines = textChunk.split('\n').filter(line => line.trim());
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.substring(6).trim();
-                    if (data === '[DONE]') {
-                         // API indicates completion. Reload chat to get final state.
-                         console.log(`Received [DONE] for continue ${messageId}. Reloading chat.`);
-                         await loadChat(state.currentChatId); // Reload to get final state
-                         // Clear context after successful completion and reload
-                         state.generationContext = null;
-                         return; // Exit the handler
-                    }
-                     try {
-                         const json = JSON.parse(data);
-                         if (json.error) {
-                            throw new Error(json.error);
-                         }
-                          // Check for cancellation status from backend
-                         if (json.status === 'cancelled') {
-                             console.log("Backend confirmed cancellation for continue.");
-                             continue; // Let abort signal handle flow
-                         }
-                         const content = json.content || '';
-                         if (content && content !== ': OPENROUTER PROCESSING') { // Filter OpenRouter ping
-                             continuationText += content;
-                             fullText = existingContent + continuationText; // Update full text
-
-                             // Update UI by appending to existing content
-                             contentDiv.innerHTML = renderMarkdown(fullText);
-                             contentDiv.dataset.raw = fullText; // Update raw data too
-
-                            // Process code blocks AFTER innerHTML update
-                             contentDiv.querySelectorAll('pre code').forEach(block => {
-                                 const preElement = block.parentElement;
-                                 if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
-                                      const codeText = block.textContent;
-                                      const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
-                                      const lang = langClass ? langClass.substring(9) : '';
-                                      const wrapper = createCodeBlockWithContent(codeText, lang);
-                                      preElement.replaceWith(wrapper);
-                                 } else if (preElement && preElement.closest('.code-block-wrapper code') && !block.classList.contains('hljs')) {
-                                      try { hljs.highlightElement(block); } catch(e) { console.error("Error highlighting continue block mid-stream:", e); }
-                                 }
-                             });
-
-
-                             if (!state.userHasScrolled && state.isAutoScrolling) {
-                                 scrollToBottom();
-                             }
-                         }
-                         if (json.complete && json.message_id === messageId) {
-                              // Server confirmed save, but wait for [DONE] before reload
-                              console.log(`Server confirmed continuation saved for ${messageId}`);
-                         }
-                     } catch (e) {
-                          console.warn('Failed to parse continue stream chunk:', data, e);
-                          fullText += `\n\n*Error parsing stream data*`;
-                          contentDiv.innerHTML = renderMarkdown(fullText);
-                          contentDiv.dataset.raw = fullText;
-                     }
-                }
-            }
-        }
-        // If loop finishes without [DONE]
-         console.log("Continue stream loop finished without [DONE] signal. Reloading chat state.");
-         await loadChat(state.currentChatId);
-
-    } catch (error) {
-        if (error.name === 'AbortError') {
-             console.log("Continue generation stopped by user.");
-            // --- SAVE PARTIAL TEXT ---
-            const partialText = fullText; // Use the accumulated text
-            const context = state.generationContext;
-
-            if (partialText && partialText.trim() && context && context.type === 'continue' && context.messageId) {
-                 // Only save if different from original? Optional optimization.
-                 if (partialText !== existingContent) {
-                     try {
-                         console.log("Attempting to save partial continuation...");
-                         // Endpoint to save partial text for an EXISTING message
-                         const saveUrl = `${API_BASE}/chat/${state.currentChatId}/save_edit_result/${context.messageId}`;
-                         const payload = { message: partialText };
-
-                          console.log(`Saving partial edit to ${saveUrl}`);
-                          const saveResponse = await fetch(saveUrl, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify(payload)
-                          });
-                          if (!saveResponse.ok) {
-                               const err = await saveResponse.text().catch(() => `HTTP ${saveResponse.status}`);
-                               throw new Error(`Failed to save partial edit result: ${err}`);
-                          }
-                          console.log("Partial continuation saved successfully via API.");
-                     } catch (saveError) {
-                          console.error("Error saving partial continuation via API:", saveError);
-                          addSystemMessage("Could not save the partial response.", "error");
-                     }
-                 } else {
-                      console.log("Partial text same as original, not saving.");
-                 }
-            } else {
-                console.warn("Partial text empty or context invalid for saving continue.", { partialText, context });
-            }
-            // --- END SAVE PARTIAL TEXT ---
-
-            // Always reload chat state after abort to sync with backend
-            await loadChat(state.currentChatId);
-
-        } else {
-             // Handle non-abort errors
-            console.error('Continue error:', error);
-            // Append error message to the div? Or show system message?
-            fullText += `\n\n*Error continuing: ${error.message}*`;
-            contentDiv.innerHTML = renderMarkdown(fullText);
-            contentDiv.dataset.raw = fullText;
-            addSystemMessage(`Error continuing generation: ${error.message}`, "error");
-            await loadChat(state.currentChatId); // Reload to ensure consistent state
-        }
-    } finally {
-        stopButton.style.display = 'none';
-        sendButton.disabled = false;
-        messageInput.disabled = false;
-        state.streamController = null;
-        state.generationContext = null; // Clear context
-        state.isAutoScrolling = false; // Disable auto-scroll after finishing/aborting
-        chatContainer.removeEventListener('scroll', scrollHandler);
-        // Ensure streaming class is removed
-        if (contentDiv) contentDiv.classList.remove('streaming');
-    }
-}
-
-// Regenerate Message (update catch block for saving partial)
-async function regenerateMessage(messageId, newBranch = false) {
-    if (!state.currentChatId || state.streamController) return;
-
-    const messageToRegen = state.messages.find(m => m.message_id === messageId);
-    if (!messageToRegen || messageToRegen.role !== 'llm') { // Can only regen assistant messages
-        addSystemMessage("Error: Can only regenerate assistant messages.", "error");
-        return;
-    }
-    const parentMessage = state.messages.find(m => m.message_id === messageToRegen.parent_message_id);
-    if (!parentMessage) {
-         addSystemMessage("Error: Cannot regenerate message without a parent.", "error");
-         return;
-    }
-
-    console.log(`Regenerating message ${messageId} (new branch: ${newBranch})`);
-
-    // Find the content div of the message being regenerated/replaced
-    const targetMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageId}"]`);
-    // Target div only relevant if NOT branching
-    const contentDiv = (!newBranch && targetMessageRow) ? targetMessageRow.querySelector('.message-content') : null;
-
-    if (!contentDiv && !newBranch) { // If replacing, we need the div
-         addSystemMessage(`Error: Cannot find content div for message ${messageId} to replace.`, "error");
-         return;
-    }
-
-    state.streamController = new AbortController();
-     // Set context for saving on abort
-    state.generationContext = { type: 'regen', messageId: messageId, newBranch: newBranch, parentMessageId: parentMessage.message_id };
-
-    stopButton.style.display = 'flex';
-    sendButton.disabled = true;
-    state.isAutoScrolling = true;
-    state.userHasScrolled = false;
-
-    const scrollHandler = createScrollHandler();
-    chatContainer.addEventListener('scroll', scrollHandler);
-
-    let fullText = ''; // Accumulate new text
-    let currentTargetDiv = contentDiv; // Start with original div if replacing
-
-    if (newBranch) {
-         // If branching, we don't update the original div directly.
-         // We wait for the [DONE] signal which includes the new message ID, then reload.
-         console.log("Regenerating as new branch. Waiting for completion...");
-         // Optionally add a temporary "Generating new branch..." indicator near the original message?
-    } else if (currentTargetDiv) {
-         // If replacing, clear the target div and add streaming indicator
-         currentTargetDiv.innerHTML = '';
-         currentTargetDiv.dataset.raw = '';
-         currentTargetDiv.classList.add('streaming');
-    }
-
-
-    try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/regenerate/${messageId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model_name: modelSelect.value, // Use current UI model
-                streaming: true,
-                gen_args: defaultGenArgs,
-                new_branch: newBranch, // Pass the flag
-                provider: state.models.find(m => m.name === modelSelect.value)?.provider
-            }),
-            signal: state.streamController.signal
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text().catch(() => `HTTP ${response.status}`);
-            throw new Error(`Failed to regenerate: ${errorText}`);
-        }
-
-        const reader = response.body.getReader();
-        const textDecoder = new TextDecoder();
-        let finalMessageId = null; // Could be original ID or new branch ID
-
-        while (true) {
-            const { done, value } = await reader.read();
-             if (done) {
-                 console.log(`Regen stream for ${messageId} finished.`);
-                 break; // Wait for [DONE]
-             }
-             if (state.streamController?.signal.aborted) {
-                  console.log(`Regen stream read aborted.`);
-                  break; // Handle in catch
-             }
-
-            const textChunk = textDecoder.decode(value, {stream: true});
-            const lines = textChunk.split('\n').filter(line => line.trim());
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.substring(6).trim();
-                     if (data === '[DONE]') {
-                          console.log(`Received [DONE] for regenerate ${messageId}. Reloading chat.`);
-                          await loadChat(state.currentChatId); // Reload to get final state (new branch or replaced content)
-                          // Clear context after successful completion and reload
-                          state.generationContext = null;
-                          return; // Exit handler
-                     }
-                     try {
-                         const json = JSON.parse(data);
-                         if (json.error) {
-                            throw new Error(json.error);
-                         }
-                         // Check for cancellation status from backend
-                         if (json.status === 'cancelled') {
-                             console.log("Backend confirmed cancellation for regenerate.");
-                             continue; // Let abort signal handle flow
-                         }
-
-                         if (json.complete && json.message_id) {
-                              finalMessageId = json.message_id;
-                              console.log(`Server confirmed regeneration saved for ${finalMessageId}`);
-                         }
-
-                         const content = json.content || '';
-                         if (content && content !== ': OPENROUTER PROCESSING') {
-                             fullText += content;
-                             // Only update UI if *replacing* the message
-                             if (!newBranch && currentTargetDiv) {
-                                 currentTargetDiv.innerHTML = renderMarkdown(fullText);
-                                 currentTargetDiv.dataset.raw = fullText;
-
-                                // Process code blocks AFTER innerHTML update
-                                 currentTargetDiv.querySelectorAll('pre code').forEach(block => {
-                                     const preElement = block.parentElement;
-                                     if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
-                                          const codeText = block.textContent;
-                                          const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
-                                          const lang = langClass ? langClass.substring(9) : '';
-                                          const wrapper = createCodeBlockWithContent(codeText, lang);
-                                          preElement.replaceWith(wrapper);
-                                     } else if (preElement && preElement.closest('.code-block-wrapper code') && !block.classList.contains('hljs')) {
-                                           try { hljs.highlightElement(block); } catch(e) { console.error("Error highlighting regen block mid-stream:", e); }
-                                     }
-                                 });
-
-                                 if (!state.userHasScrolled && state.isAutoScrolling) {
-                                     scrollToBottom();
-                                 }
-                             }
-                         }
-                     } catch (e) {
-                          console.warn('Failed to parse regen stream chunk:', data, e);
-                           if (!newBranch && currentTargetDiv) {
-                                fullText += `\n\n*Error parsing stream data*`;
-                                currentTargetDiv.innerHTML = renderMarkdown(fullText);
-                                currentTargetDiv.dataset.raw = fullText;
-                           }
-                     }
-                }
-            }
-        }
-        // If loop finishes without [DONE]
-        console.log("Regen stream loop finished without [DONE] signal. Reloading chat state.");
-        await loadChat(state.currentChatId);
-
-    } catch (error) {
-        if (error.name === 'AbortError') {
-            console.log("Regeneration stopped by user.");
-            // --- SAVE PARTIAL TEXT ---
-            const partialText = fullText;
-            const context = state.generationContext;
-
-            if (partialText && partialText.trim() && context && context.type === 'regen') {
-                 try {
-                     console.log("Attempting to save partial regeneration...");
-                     let saveUrl = '';
-                     let payload = { message: partialText };
-
-                     if (context.newBranch && context.parentMessageId) {
-                         // Save as a new message under the original parent if branching was intended
-                         saveUrl = `${API_BASE}/chat/${state.currentChatId}/save_generation_result/${context.parentMessageId}`;
-                          console.log(`Saving partial NEW branch to ${saveUrl}`);
-                     } else if (!context.newBranch && context.messageId) {
-                          // Save by editing the message that was being replaced
-                          saveUrl = `${API_BASE}/chat/${state.currentChatId}/save_edit_result/${context.messageId}`;
-                           console.log(`Saving partial REPLACEMENT to ${saveUrl}`);
-                     } else {
-                          console.warn("Invalid context for saving partial regeneration.", context);
-                     }
-
-                     if (saveUrl) {
-                          const saveResponse = await fetch(saveUrl, {
-                              method: 'POST',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify(payload)
-                          });
-                          if (!saveResponse.ok) {
-                               const err = await saveResponse.text().catch(() => `HTTP ${saveResponse.status}`);
-                               throw new Error(`Failed to save partial regen result: ${err}`);
-                          }
-                          console.log("Partial regeneration saved successfully via API.");
-                     }
-                 } catch (saveError) {
-                      console.error("Error saving partial regeneration via API:", saveError);
-                      addSystemMessage("Could not save the partial response.", "error");
-                 }
-            } else {
-                 console.warn("Partial text empty or context invalid for saving regen.", { partialText, context });
-            }
-            // --- END SAVE PARTIAL TEXT ---
-
-            // Always reload chat state after abort
-            await loadChat(state.currentChatId);
-
-        } else {
-             // Handle non-abort errors
-            console.error('Regeneration error:', error);
-            if (!newBranch && contentDiv) { // Show error in original div if replacing
-                 contentDiv.innerHTML = renderMarkdown(`*Error regenerating: ${error.message}*`);
-                 contentDiv.dataset.raw = `Error regenerating: ${error.message}`;
-                 contentDiv.classList.remove('streaming');
-            } else { // Show system message if branching or div not found
-                 addSystemMessage(`Error regenerating response: ${error.message}`, "error");
-            }
-            await loadChat(state.currentChatId); // Reload state after error
-        }
-    } finally {
-        stopButton.style.display = 'none';
-        sendButton.disabled = false;
-        messageInput.disabled = false;
-        state.streamController = null;
-        state.generationContext = null; // Clear context
-        state.isAutoScrolling = false;
-        chatContainer.removeEventListener('scroll', scrollHandler);
-        // Ensure streaming class is removed if replacing
-        if (!newBranch && contentDiv) contentDiv.classList.remove('streaming');
-    }
-}
-
-
+// --- Edit/Delete Message (MODIFIED) ---
 async function deleteMessage(messageId) {
     if (!state.currentChatId) return;
 
@@ -1384,16 +820,17 @@ async function deleteMessage(messageId) {
 
     try {
         const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/delete_message/${messageId}`, {
-            method: 'POST' // Changed to POST as DELETE with body can be problematic
+            method: 'POST' // Changed to POST
         });
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
             throw new Error(`Failed to delete message: ${errorData.detail || response.statusText}`);
         }
-        // Remove the message row immediately for responsiveness? Or just reload?
-        // Let's reload for simplicity and guaranteed consistency.
+
+        // *** Reload chat state from backend after successful delete ***
         await loadChat(state.currentChatId);
         await fetchChats(); // Update sidebar as well
+
     } catch (error) {
         console.error('Error deleting message:', error);
         alert(`Failed to delete message: ${error.message}`);
@@ -1410,34 +847,33 @@ function startEditing(messageId) {
     const message = state.messages.find(m => m.message_id === messageId);
     if (!message) return;
 
-    // Store original state to restore on cancel
     const originalContentHTML = contentDiv.innerHTML;
     const originalActionsDisplay = actionsDiv ? actionsDiv.style.display : '';
 
     contentDiv.classList.add('editing');
-    if (actionsDiv) actionsDiv.style.display = 'none'; // Hide actions while editing
-    contentDiv.innerHTML = ''; // Clear current content
+    if (actionsDiv) actionsDiv.style.display = 'none';
+    contentDiv.innerHTML = '';
 
     const textarea = document.createElement('textarea');
     textarea.className = 'edit-textarea';
-    textarea.value = message.message; // Edit the raw message text
-    textarea.rows = Math.min(20, Math.max(3, message.message.split('\n').length + 1)); // Auto-size roughly
+    textarea.value = message.message;
+    textarea.rows = Math.min(20, Math.max(3, message.message.split('\n').length + 1));
 
     const buttonContainer = document.createElement('div');
     buttonContainer.className = 'edit-buttons';
 
     const saveButton = document.createElement('button');
     saveButton.textContent = 'Save';
-    saveButton.className = 'btn-primary'; // Use theme button class
+    saveButton.className = 'btn-primary';
     saveButton.onclick = () => saveEdit(messageId, textarea.value, message.role);
 
     const cancelButton = document.createElement('button');
     cancelButton.textContent = 'Cancel';
-    cancelButton.className = 'btn-secondary'; // Use theme button class
+    cancelButton.className = 'btn-secondary';
     cancelButton.onclick = () => {
         contentDiv.classList.remove('editing');
-        contentDiv.innerHTML = originalContentHTML; // Restore original rendered HTML
-        if (actionsDiv) actionsDiv.style.display = originalActionsDisplay; // Restore actions visibility
+        contentDiv.innerHTML = originalContentHTML;
+        if (actionsDiv) actionsDiv.style.display = originalActionsDisplay;
     };
 
     buttonContainer.appendChild(saveButton);
@@ -1447,25 +883,30 @@ function startEditing(messageId) {
     contentDiv.appendChild(buttonContainer);
 
     textarea.focus();
-    textarea.selectionStart = textarea.selectionEnd = textarea.value.length; // Move cursor to end
+    textarea.selectionStart = textarea.selectionEnd = textarea.value.length;
 }
 
 async function saveEdit(messageId, newText, role) {
-    // Role shouldn't change on edit, but we pass it for the API model
      const originalMessage = state.messages.find(m => m.message_id === messageId);
-     if (!originalMessage) return; // Should not happen
+     if (!originalMessage) return;
 
     console.log(`Saving edit for message ${messageId}`);
 
+    // Preserve original attachments when editing text
+    const attachmentsForSave = (originalMessage.attachments || []).map(att => ({
+        type: att.type,
+        content: att.content,
+        name: att.name
+    }));
+
     try {
         const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
-            method: 'POST', // Changed to POST as PUT often expects full resource replacement
+            method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                  message: newText,
-                 role: role, // Pass the original role
-                 model_name: originalMessage.model_name, // Preserve original model if assistant
-                 attachments: originalMessage.attachments // Preserve original attachments
+                 model_name: originalMessage.model_name, // Preserve original model
+                 attachments: attachmentsForSave // Send original attachments
             })
         });
         if (!response.ok) {
@@ -1473,40 +914,20 @@ async function saveEdit(messageId, newText, role) {
             throw new Error(`Failed to edit message: ${errorData.detail || response.statusText}`);
         }
 
-        // Reload the chat to reflect the changes accurately
+        // *** Reload the chat to reflect the changes accurately ***
         await loadChat(state.currentChatId);
 
     } catch (error) {
         console.error('Error editing message:', error);
         alert(`Failed to save changes: ${error.message}`);
-        // Optionally restore original content on failure? The reload above handles consistency.
     }
-}
-
-
-function extractFilename(content) {
-    // Look for patterns like "filename.txt:\n```" or similar
-    // This is heuristic and might need adjustment based on how filenames are embedded
-     if (!content) return null;
-    const lines = content.split('\n');
-    // Basic check: first line contains ':', second line starts with ```
-    if (lines.length > 1 && lines[0].includes(':') && lines[1].startsWith('```')) {
-         const potentialFilename = lines[0].substring(0, lines[0].lastIndexOf(':')).trim();
-         // Avoid overly long or weird "filenames"
-         if (potentialFilename.length > 0 && potentialFilename.length < 100 && !potentialFilename.includes('\n')) {
-            return potentialFilename;
-         }
-    }
-    // Fallback or add more specific patterns if needed
-    return null; // Return null if no reliable pattern matches
 }
 
 function copyMessageContent(contentDiv, buttonElement) {
-    const rawText = contentDiv.dataset.raw || contentDiv.textContent; // Get raw text stored earlier
+    const rawText = contentDiv.dataset.raw || contentDiv.textContent;
     if (!rawText) return;
 
     navigator.clipboard.writeText(rawText).then(() => {
-         // Provide feedback on the button clicked
          const originalHTML = buttonElement.innerHTML;
          buttonElement.innerHTML = '<i class="bi bi-check-lg"></i>';
          buttonElement.disabled = true;
@@ -1516,31 +937,9 @@ function copyMessageContent(contentDiv, buttonElement) {
         }, 1500);
     }).catch(err => {
         console.error('Failed to copy message content:', err);
-        alert('Failed to copy text.'); // Provide feedback to user
+        alert('Failed to copy text.');
     });
 }
-
-// Copy inline code
-/*
-function setupInlineCodeCopy() {
-    messagesWrapper.addEventListener('click', (e) => {
-        // Check if the click target is a <code> element NOT inside a <pre>
-        if (e.target.tagName === 'CODE' && e.target.closest('pre') === null) {
-            const text = e.target.textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                // Visual feedback: temporary highlight
-                 e.target.style.transition = 'background-color 0.1s ease-in-out';
-                e.target.style.backgroundColor = 'var(--bg-secondary)'; // Use theme color
-                setTimeout(() => {
-                    e.target.style.backgroundColor = ''; // Revert to original or CSS default
-                }, 250); // Shorter feedback duration
-            }).catch(err => {
-                 console.error("Failed to copy inline code:", err);
-            });
-        }
-    });
-}
-*/
 
 // --- Event Listeners Setup ---
 function setupEventListeners() {
@@ -1548,159 +947,99 @@ function setupEventListeners() {
     messageInput.addEventListener('input', adjustTextareaHeight);
     sendButton.addEventListener('click', sendMessage);
     stopButton.addEventListener('click', stopStreaming);
-    // clearChatBtn repurposed for delete
-    clearChatBtn.title = 'Delete current chat'; // Update title
-    clearChatBtn.onclick = deleteCurrentChat; // Assign new handler
+    clearChatBtn.title = 'Delete current chat';
+    clearChatBtn.onclick = deleteCurrentChat;
     newChatBtn.addEventListener('click', startNewChat);
     imageButton.addEventListener('click', () => openFileSelector('image/*'));
-    fileButton.addEventListener('click', () => openFileSelector('.txt,.py,.js,.ts,.html,.css,.json,.md,.yaml,.sql,.java,.c,.cpp,.cs,.go,.php,.rb,.swift,.kt,.rs,.toml')); // Common text/code extensions
+    fileButton.addEventListener('click', () => openFileSelector('.txt,.py,.js,.ts,.html,.css,.json,.md,.yaml,.sql,.java,.c,.cpp,.cs,.go,.php,.rb,.swift,.kt,.rs,.toml'));
     sidebarToggle.addEventListener('click', toggleSidebar);
-    modelSelect.addEventListener('change', handleModelChange); // Added handler
+    modelSelect.addEventListener('change', handleModelChange);
     document.addEventListener('paste', handlePaste);
-    // Think block toggle might need to be delegated if messagesWrapper is cleared often
     messagesWrapper.addEventListener('click', handleThinkBlockToggle);
+    // Settings button now opens theme modal (API key settings removed)
+    document.getElementById('settings-btn').addEventListener('click', () => {
+        document.getElementById('theme-modal').style.display = 'flex';
+    });
 }
 
 function handleModelChange() {
      updateAttachButtons();
-     // Save selected model to local storage
      localStorage.setItem('lastModelName', modelSelect.value);
 }
 
-// Scroll handler factory
 function createScrollHandler() {
-     // Closure to keep track of scroll state for this specific generation
      let localUserScrolled = false;
      let localLastScrollTop = chatContainer.scrollTop;
-
      return () => {
          const currentScrollTop = chatContainer.scrollTop;
          const scrollHeight = chatContainer.scrollHeight;
          const clientHeight = chatContainer.clientHeight;
          const scrollDirection = currentScrollTop > localLastScrollTop ? 'down' : 'up';
          localLastScrollTop = currentScrollTop;
-
-         // If user scrolls up significantly from the bottom, set userHasScrolled
-         if (scrollDirection === 'up' && currentScrollTop < scrollHeight - clientHeight - 100) { // 100px threshold
+         if (scrollDirection === 'up' && currentScrollTop < scrollHeight - clientHeight - 100) {
              localUserScrolled = true;
-             state.userHasScrolled = true; // Update global state too if needed
-             state.isAutoScrolling = false; // Disable global autoscroll
-         } else if (scrollDirection === 'down' && currentScrollTop >= scrollHeight - clientHeight - 5) { // Close to bottom
-             // If user scrolls back down near the bottom, re-enable autoscroll only if *they* initiated it
-             // We generally want auto-scroll unless they deliberately scrolled up.
-              // Let's simplify: auto-scroll is disabled *only* if they scroll up significantly.
-              // It stays disabled until the next message send/generation starts.
-              // So, no re-enabling here.
+             state.userHasScrolled = true;
+             state.isAutoScrolling = false;
          }
-
-         // Update global state based on local state if necessary, or manage scrolling directly here
-          if (localUserScrolled) {
-              state.isAutoScrolling = false;
-          }
      };
 }
 
-
 function handleInputKeydown(e) {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
-        e.preventDefault(); // Prevent newline default
+        e.preventDefault();
         sendMessage();
     } else if (e.key === 'Enter' && e.ctrlKey) {
-         e.preventDefault(); // Prevent potential form submission if inside one
-         sendMessage(); // Send on Ctrl+Enter
+         e.preventDefault();
+         sendMessage();
     }
-    // Shift+Enter is implicitly handled by allowing the default newline behavior
 }
 
 function adjustTextareaHeight() {
-    const inputArea = document.querySelector('.input-area'); // Target the container
-    const inputContainer = document.querySelector('.input-container');
-    const initialTextareaHeight = 24; // Match CSS line-height or min-height
-    const maxHeight = 300; // Max height for the textarea in pixels
-
-    messageInput.style.height = 'auto'; // Temporarily shrink to measure scrollHeight
+    const initialTextareaHeight = 24;
+    const maxHeight = 300;
+    messageInput.style.height = 'auto';
     let newScrollHeight = messageInput.scrollHeight;
-
-    // Account for padding and border if box-sizing is border-box (usually is)
-    const style = window.getComputedStyle(messageInput);
-    const paddingTop = parseFloat(style.paddingTop);
-    const paddingBottom = parseFloat(style.paddingBottom);
-    // Border calculation can be complex, often 1px top/bottom
-    // Let's use scrollHeight directly, but cap it.
-
     let newHeight = Math.max(initialTextareaHeight, newScrollHeight);
     newHeight = Math.min(newHeight, maxHeight);
-
     messageInput.style.height = `${newHeight}px`;
-
-    // Adjust overall input area padding/height based on textarea size
-    // This is complex. Let's adjust the bottom padding of the chat container instead.
-    const basePaddingBottom = 100; // Base padding when textarea is minimal
+    const basePaddingBottom = 100;
     const extraPadding = Math.max(0, newHeight - initialTextareaHeight);
     chatContainer.style.paddingBottom = `${basePaddingBottom + extraPadding}px`;
-    // Scroll to bottom if focused? Maybe not, could be annoying.
 }
 
-
 function toggleSidebar() {
-    const characterBtn = document.getElementById('character-btn');
     const isCollapsed = sidebar.classList.toggle('sidebar-collapsed');
     const icon = sidebarToggle.querySelector('i');
     const textElements = sidebar.querySelectorAll('.sidebar-title span, .new-chat-btn span, .history-item span, .history-title');
-    const mainContent = document.querySelector('.main-content'); // Get main content area
-
     icon.className = `bi bi-chevron-${isCollapsed ? 'right' : 'left'}`;
-
-    // Adjust layout based on collapsed state using CSS custom property
     document.documentElement.style.setProperty('--sidebar-width', isCollapsed ? '0px' : '260px');
-    mainContent.style.marginLeft = '0px'//isCollapsed ? '0px' : '260px'; // Sync margin
-
-
-    // Hide/show text elements within the sidebar
     textElements.forEach(el => {
-         el.style.display = isCollapsed ? 'none' : ''; // Use '' to revert to CSS default (inline/block etc.)
+         el.style.display = isCollapsed ? 'none' : '';
     });
-
-    // Adjust character button position relative to sidebar toggle
-    //sidebarToggle.style.left = isCollapsed ? '0px' : '260px';
-    characterBtn.style.marginLeft = isCollapsed ? '32px' : '0px';
-
-    // Save state?
-    //localStorage.setItem('sidebarCollapsed', isCollapsed);
+    localStorage.setItem('sidebarCollapsed', isCollapsed);
 }
 
-// Apply sidebar state on load
 function applySidebarState() {
      const isCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
      const icon = sidebarToggle.querySelector('i');
      const textElements = sidebar.querySelectorAll('.sidebar-title span, .new-chat-btn span, .history-item span, .history-title');
-     const mainContent = document.querySelector('.main-content'); // Get main content area
-
      if (isCollapsed) {
-         // Don't toggle, directly set the state
           sidebar.classList.add('sidebar-collapsed');
           icon.className = `bi bi-chevron-right`;
           textElements.forEach(el => { el.style.display = 'none'; });
           document.documentElement.style.setProperty('--sidebar-width', '0px');
-          //mainContent.style.marginLeft = '0px'; // Set initial margin
-          //sidebarToggle.style.left = '0px';
      } else {
           sidebar.classList.remove('sidebar-collapsed');
           icon.className = `bi bi-chevron-left`;
           textElements.forEach(el => { el.style.display = ''; });
           document.documentElement.style.setProperty('--sidebar-width', '260px');
-          //mainContent.style.marginLeft = '260px'; // Set initial margin
-          //sidebarToggle.style.left = '260px';
      }
 }
-
 
 function updateAttachButtons() {
     const selectedOption = modelSelect.options[modelSelect.selectedIndex];
     const supportsImages = selectedOption ? selectedOption.dataset.supportsImages === 'true' : false;
-
     imageButton.style.display = supportsImages ? 'flex' : 'none';
-    // File button is always shown for now
     fileButton.style.display = 'flex';
 }
 
@@ -1726,8 +1065,7 @@ function handleFiles(files) {
         if (file.type.startsWith('image/') && supportsImages) {
             processImageFile(file);
         } else if (file.type.startsWith('text/') || /\.(txt|py|js|ts|html|css|json|md|yaml|sql|java|c|cpp|cs|go|php|rb|swift|kt|rs|toml)$/i.test(file.name)) {
-            // Check file size? Limit to e.g., 1MB?
-            if (file.size > 1 * 1024 * 1024) {
+            if (file.size > 1 * 1024 * 1024) { // 1MB limit
                  alert(`File "${file.name}" is too large (max 1MB).`);
                  return;
             }
@@ -1758,8 +1096,7 @@ function processImageFile(file) {
 
 function addImagePreview(imageData) {
     const wrapper = document.createElement('div');
-    // Use common preview class AND specific image class
-    wrapper.className = 'image-preview-wrapper attached-file-preview';
+    wrapper.className = 'image-preview-wrapper attached-file-preview'; // Common + specific class
 
     const img = document.createElement('img');
     img.src = imageData.dataUrl;
@@ -1779,17 +1116,16 @@ function addImagePreview(imageData) {
     adjustTextareaHeight(); // Re-adjust height after adding preview
 }
 
-
 function processTextFile(file) {
     const reader = new FileReader();
     reader.onload = (e) => {
         const content = e.target.result;
         const filename = file.name;
-        // Format for sending to API (include filename)
-        // Determine language from extension for ``` block
+        // Format for sending to API (include filename and code block)
         const extension = filename.split('.').pop() || 'text';
         const formattedContent = `${filename}:\n\`\`\`${extension}\n${content}\n\`\`\``;
-        const fileData = { name: filename, content: formattedContent, type: 'file', rawContent: content }; // Store raw content too
+        // Store raw content for potential viewing and formatted for sending
+        const fileData = { name: filename, content: formattedContent, type: 'file', rawContent: content };
         state.currentTextFiles.push(fileData);
         addFilePreview(fileData);
     };
@@ -1802,8 +1138,7 @@ function processTextFile(file) {
 
 function addFilePreview(fileData) {
     const wrapper = document.createElement('div');
-    // Use common preview class AND specific file class
-    wrapper.className = 'file-preview-wrapper attached-file-preview';
+    wrapper.className = 'file-preview-wrapper attached-file-preview'; // Common + specific class
 
     const fileInfo = document.createElement('div');
     fileInfo.className = 'file-info'; // Inner div for content if needed by CSS
@@ -1822,215 +1157,27 @@ function addFilePreview(fileData) {
     adjustTextareaHeight(); // Re-adjust height
 }
 
-// Helper to create standardized remove button (Added position styling)
-// No changes needed here, just ensure the CSS for .remove-attachment exists
+// Helper to create standardized remove button
 function createRemoveButton(onClickCallback) {
     const removeButton = document.createElement('button');
     removeButton.className = 'remove-attachment'; // Use this class for CSS targeting
     removeButton.innerHTML = '<i class="bi bi-x"></i>';
     removeButton.title = 'Remove attachment';
     removeButton.type = 'button'; // Ensure it doesn't submit forms
-    // Add inline styles for positioning as CSS cannot be changed
-    // --- CSS is now handling this styling via the .remove-attachment class ---
-    // removeButton.style.cssText = `...`; // Remove inline styles if CSS handles it
 
     removeButton.addEventListener('click', (e) => {
         e.stopPropagation(); // Prevent triggering preview click
         onClickCallback();
     });
-    // Remove hover effects if CSS handles them
-    // removeButton.addEventListener('mouseover', () => { ... });
-    // removeButton.addEventListener('mouseout', () => { ... });
     return removeButton;
 }
 
-// addMessage renders a single message node and its controls (Updated with button logic)
-function addMessage(message) {
-    // --- Do not render system messages in the main flow ---
-    if (message.role === 'system') {
-        return null;
-    }
-
-    const role = message.role === 'llm' ? 'assistant' : message.role; // Normalize role
-    const messageRow = document.createElement('div');
-    messageRow.className = `message-row ${role}-row`; // e.g., user-row, assistant-row
-    messageRow.dataset.messageId = message.message_id; // Add ID to the row for easier selection
-
-    const messageDiv = document.createElement('div');
-    messageDiv.className = 'message';
-
-    const avatarActionsDiv = document.createElement('div');
-    avatarActionsDiv.className = 'message-avatar-actions'; // Container for avatar and actions
-
-    // --- Message Actions (Buttons) ---
-    const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'message-actions';
-
-    // --- START OF RESTORED BUTTON LOGIC ---
-
-    // Branch Navigation Controls (if applicable)
-    const branchInfo = state.activeBranchInfo[message.message_id];
-    if (branchInfo && branchInfo.totalBranches > 1) {
-        const branchNav = document.createElement('div');
-        branchNav.className = 'branch-nav';
-
-        const prevBtn = document.createElement('button');
-        prevBtn.innerHTML = '<i class="bi bi-chevron-left"></i>';
-        prevBtn.disabled = branchInfo.activeIndex === 0;
-        prevBtn.title = 'Previous response branch';
-        prevBtn.onclick = () => setActiveBranch(message.message_id, branchInfo.activeIndex - 1);
-        branchNav.appendChild(prevBtn);
-
-        const branchStatus = document.createElement('span');
-        branchStatus.textContent = `${branchInfo.activeIndex + 1}/${branchInfo.totalBranches}`;
-        branchNav.appendChild(branchStatus);
-
-        const nextBtn = document.createElement('button');
-        nextBtn.innerHTML = '<i class="bi bi-chevron-right"></i>';
-        nextBtn.disabled = branchInfo.activeIndex >= branchInfo.totalBranches - 1;
-        nextBtn.title = 'Next response branch';
-        nextBtn.onclick = () => setActiveBranch(message.message_id, branchInfo.activeIndex + 1);
-        branchNav.appendChild(nextBtn);
-
-        actionsDiv.appendChild(branchNav); // Add branch controls first
-    }
-
-
-    // Standard Action Buttons
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'message-action-btn';
-    copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
-    copyBtn.title = 'Copy message text';
-    copyBtn.addEventListener('click', () => copyMessageContent(contentDiv, copyBtn)); // Pass contentDiv here
-    actionsDiv.appendChild(copyBtn);
-
-    // Edit Button
-    const editBtn = document.createElement('button');
-    editBtn.className = 'message-action-btn';
-    editBtn.innerHTML = '<i class="bi bi-pencil"></i>';
-    editBtn.title = 'Edit message';
-    editBtn.addEventListener('click', () => startEditing(message.message_id));
-    actionsDiv.appendChild(editBtn);
-
-    // Regenerate, Branch, Continue Buttons (Only for Assistant messages)
-    if (role === 'assistant') {
-        const regenerateBtn = document.createElement('button');
-        regenerateBtn.className = 'message-action-btn';
-        regenerateBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i>';
-        regenerateBtn.title = 'Regenerate this response (Replace)';
-        regenerateBtn.addEventListener('click', () => regenerateMessage(message.message_id, false));
-        actionsDiv.appendChild(regenerateBtn);
-
-        const branchBtn = document.createElement('button');
-        branchBtn.className = 'message-action-btn';
-        branchBtn.innerHTML = '<i class="bi bi-diagram-3"></i>'; // Branching icon
-        branchBtn.title = 'Regenerate as new branch';
-        branchBtn.addEventListener('click', () => regenerateMessage(message.message_id, true));
-        actionsDiv.appendChild(branchBtn);
-
-        const continueBtn = document.createElement('button');
-        continueBtn.className = 'message-action-btn';
-        continueBtn.innerHTML = '<i class="bi bi-arrow-bar-right"></i>'; // Or other continue icon
-        continueBtn.title = 'Continue generating this response';
-        continueBtn.addEventListener('click', () => continueMessage(message.message_id));
-        actionsDiv.appendChild(continueBtn);
-    }
-
-    // Delete Button
-    const deleteBtn = document.createElement('button');
-    deleteBtn.className = 'message-action-btn delete-btn'; // Specific class for styling maybe
-    deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
-    deleteBtn.title = 'Delete message (and descendants)';
-    deleteBtn.addEventListener('click', () => deleteMessage(message.message_id));
-    actionsDiv.appendChild(deleteBtn);
-
-    // --- END OF RESTORED BUTTON LOGIC ---
-
-
-    // --- Message Content ---
-    const contentDiv = document.createElement('div');
-    contentDiv.className = 'message-content';
-    contentDiv.dataset.raw = message.message; // Store raw markdown/text
-
-    if (role === 'user') {
-        // For user messages, display raw text respecting whitespace/newlines
-        contentDiv.textContent = message.message;
-        contentDiv.style.whiteSpace = 'pre-wrap';
-    } else { // Assistant/LLM
-        contentDiv.innerHTML = renderMarkdown(message.message);
-         // Process code blocks after initial renderMarkdown
-         contentDiv.querySelectorAll('pre code').forEach(block => {
-            const preElement = block.parentElement;
-            if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
-                 const codeText = block.textContent;
-                 const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
-                 const lang = langClass ? langClass.substring(9) : '';
-                 const wrapper = createCodeBlockWithContent(codeText, lang); // Use helper function
-                 preElement.replaceWith(wrapper);
-            }
-         });
-    }
-
-    // --- Attachments Display ---
-    if (message.attachments && message.attachments.length > 0) {
-        const attachmentsContainer = document.createElement('div');
-        attachmentsContainer.className = 'attachments-container'; // Use the new CSS class
-
-        message.attachments.forEach(attachment => {
-            // Store raw content if available (for popup viewer)
-            const rawContent = attachment.rawContent || null;
-
-            if (attachment.type === 'image') {
-                const imgWrapper = document.createElement('div');
-                imgWrapper.className = 'attachment-preview image-preview-wrapper'; // Use CSS classes
-                // Pass attachment data (including potential rawContent) to popup
-                imgWrapper.addEventListener('click', () => viewAttachmentPopup({...attachment, rawContent}));
-
-                const img = document.createElement('img');
-                img.src = `data:image/jpeg;base64,${attachment.content}`;
-                img.alt = attachment.name || 'Attached image'; // Use name if available
-                imgWrapper.appendChild(img);
-                attachmentsContainer.appendChild(imgWrapper);
-            } else if (attachment.type === 'file') {
-                const fileWrapper = document.createElement('div');
-                fileWrapper.className = 'attachment-preview file-preview-wrapper'; // Use CSS classes
-                // Pass attachment data (including potential rawContent) to popup
-                fileWrapper.addEventListener('click', () => viewAttachmentPopup({...attachment, rawContent}));
-
-                const filename = attachment.name || extractFilename(attachment.content) || 'Attached File';
-                // Inner structure for file preview (icon + name)
-                fileWrapper.innerHTML = `<i class="bi bi-file-earmark-text"></i> <span>${filename}</span>`;
-                attachmentsContainer.appendChild(fileWrapper);
-            }
-        });
-        contentDiv.appendChild(attachmentsContainer); // Append attachments below main content
-    }
-    // --- End Attachments Display ---
-
-
-    messageDiv.appendChild(contentDiv); // Add content div
-
-    // Add Actions below content (Now actionsDiv is populated)
-    avatarActionsDiv.appendChild(actionsDiv); // Add actions to the avatar/actions container
-    messageDiv.appendChild(avatarActionsDiv); // Append the container to the message div
-
-
-    messageRow.appendChild(messageDiv); // Append the main message div to the row
-    messagesWrapper.appendChild(messageRow); // Append the row to the main wrapper
-
-    // Return the contentDiv for potential streaming updates
-    return contentDiv;
-}
-
-// View attachment in popup (updated to use rawContent)
+// View attachment in popup
 function viewAttachmentPopup(attachment) {
      const popup = document.createElement('div');
      popup.className = 'attachment-popup-overlay';
      popup.addEventListener('click', (e) => {
-         // Close if clicked outside the content area
-         if (e.target === popup) {
-             popup.remove();
-         }
+         if (e.target === popup) popup.remove(); // Close if clicked outside
      });
 
      const container = document.createElement('div');
@@ -2050,62 +1197,14 @@ function viewAttachmentPopup(attachment) {
          contentElement.className = 'attachment-popup-image';
      } else if (attachment.type === 'file') {
          contentElement = document.createElement('pre');
-         // Use the rawContent passed from addMessage if available
-         let rawFileContent = attachment.rawContent;
-         if (rawFileContent === null || rawFileContent === undefined) {
-             // Fallback: Attempt to parse back from formatted content if rawContent wasn't stored/passed
-             console.warn("Raw content not available for file popup, attempting parse fallback.");
-             rawFileContent = attachment.content ? attachment.content.replace(/^.*:\n```[^\n]*\n/, '').replace(/\n```$/, '') : null;
-         }
-          contentElement.textContent = rawFileContent !== null ? rawFileContent : "Could not load file content."; // Display raw content
-          contentElement.className = 'attachment-popup-text';
-     } else {
-          contentElement = document.createElement('div');
-          contentElement.textContent = 'Unsupported attachment type.';
-     }
-
-     container.appendChild(closeBtn);
-     container.appendChild(contentElement);
-     popup.appendChild(container);
-     document.body.appendChild(popup);
-}
-
-// View attachment in popup
-function viewAttachmentPopup(attachment) {
-     const popup = document.createElement('div');
-     popup.className = 'attachment-popup-overlay';
-     popup.addEventListener('click', (e) => {
-         // Close if clicked outside the content area
-         if (e.target === popup) {
-             popup.remove();
-         }
-     });
-
-     const container = document.createElement('div');
-     container.className = 'attachment-popup-container';
-
-     const closeBtn = document.createElement('button');
-     closeBtn.className = 'attachment-popup-close';
-     closeBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
-     closeBtn.title = 'Close viewer';
-     closeBtn.addEventListener('click', () => popup.remove());
-
-     let contentElement;
-     if (attachment.type === 'image') {
-         contentElement = document.createElement('img');
-         contentElement.src = `data:image/jpeg;base64,${attachment.content}`;
-         contentElement.alt = 'Image attachment';
-         contentElement.className = 'attachment-popup-image';
-     } else if (attachment.type === 'file') {
-         contentElement = document.createElement('pre');
-         // Display the *raw* content, not the formatted version with backticks
-         // Need to parse it back here or use stored raw content
-         let rawFileContent = attachment.rawContent; // Prefer stored raw content if available
-         if (!rawFileContent && attachment.content) {
-              // Attempt to parse back if rawContent wasn't stored/passed
-              rawFileContent = attachment.content.replace(/^.*:\n```[^\n]*\n/, '').replace(/\n```$/, '');
-         }
-          contentElement.textContent = rawFileContent || "Could not load file content."; // Display raw content
+         // Use rawContent if passed, otherwise fallback to stored content (which might be formatted)
+         let displayContent = attachment.rawContent !== undefined ? attachment.rawContent : attachment.content;
+         // If falling back to formatted content, try parsing it back one last time
+          if (attachment.rawContent === undefined && attachment.content) {
+              const match = attachment.content.match(/^.*:\n```[^\n]*\n([\s\S]*)\n```$/);
+              if (match && match[1]) displayContent = match[1];
+          }
+          contentElement.textContent = displayContent !== null ? displayContent : "Could not load file content.";
           contentElement.className = 'attachment-popup-text';
      } else {
           contentElement = document.createElement('div');
@@ -2122,7 +1221,7 @@ function viewAttachmentPopup(attachment) {
 function handlePaste(e) {
     const selectedOption = modelSelect.options[modelSelect.selectedIndex];
     const supportsImages = selectedOption ? selectedOption.dataset.supportsImages === 'true' : false;
-    if (!supportsImages) return; // Only handle paste if images are supported by model
+    if (!supportsImages) return; // Only handle paste if images are supported
 
     const items = e.clipboardData.items;
     if (!items) return;
@@ -2140,11 +1239,11 @@ function handlePaste(e) {
 
 // --- Drag and Drop ---
 function setupDropZone() {
-    const dropZone = document.body; // Or a more specific element like chatContainer
+    const dropZone = document.body; // Or a more specific element
 
     ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
         dropZone.addEventListener(eventName, preventDefaults, false);
-        document.body.addEventListener(eventName, preventDefaults, false); // Prevent browser default drop anywhere
+        document.body.addEventListener(eventName, preventDefaults, false);
     });
 
     function preventDefaults(e) {
@@ -2153,16 +1252,11 @@ function setupDropZone() {
     }
 
     ['dragenter', 'dragover'].forEach(eventName => {
-        dropZone.addEventListener(eventName, () => {
-             // Add visual indicator class to the drop zone (e.g., body or input area)
-             document.body.classList.add('dragover-active');
-        }, false);
+        dropZone.addEventListener(eventName, () => document.body.classList.add('dragover-active'), false);
     });
 
     ['dragleave', 'drop'].forEach(eventName => {
-        dropZone.addEventListener(eventName, () => {
-             document.body.classList.remove('dragover-active');
-        }, false);
+        dropZone.addEventListener(eventName, () => document.body.classList.remove('dragover-active'), false);
     });
 
     dropZone.addEventListener('drop', (e) => {
@@ -2174,425 +1268,1098 @@ function setupDropZone() {
     });
 }
 
-// --- Send Message & Generate Response ---
+// --- NEW: Frontend Generation Logic (MODIFIED) ---
+
+// Helper to get API key for a provider (uses state populated by backend)
+function getApiKey(provider) {
+    const lowerProvider = provider.toLowerCase();
+    const key = state.apiKeys[lowerProvider];
+    // Allow local without key explicitly set
+    if (!key && lowerProvider !== 'local') {
+        console.warn(`API Key for ${provider} is missing in state.`);
+        return null; // Return null if key is missing
+    }
+    // console.log(`Using API Key for ${provider}: ${key ? 'Present' : 'Absent (Local OK)'}`); // Debug log
+    return key;
+}
+
+
+// Helper to format messages for different providers
+function formatMessagesForProvider(messages, provider) {
+    console.log(`Formatting ${messages.length} messages for provider: ${provider}`);
+    const formatted = [];
+    for (const msg of messages) {
+        let role = msg.role; // user, llm, system
+        let contentParts = [];
+
+        // Normalize role names
+        if (provider === 'google') {
+            role = (role === 'llm') ? 'model' : (role === 'assistant' ? 'model' : role);
+        } else {
+            role = (role === 'llm') ? 'assistant' : role;
+        }
+
+        // Add text content first
+        if (msg.message && msg.message.trim() !== "") {
+            if (provider === 'google') {
+                contentParts.push(msg.message);
+            } else {
+                contentParts.push({ type: "text", text: msg.message });
+            }
+        }
+
+        // Add attachments
+        for (const attachment of msg.attachments || []) {
+            if (attachment.type === 'image') {
+                if (attachment.content) {
+                    if (provider === 'google') {
+                        contentParts.push({ inline_data: { mime_type: "image/jpeg", data: attachment.content } });
+                    } else {
+                        contentParts.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${attachment.content}` } });
+                    }
+                } else { console.warn("Skipping image attachment with missing content:", attachment.name); }
+            } else if (attachment.type === 'file') {
+                const fileContent = attachment.content; // Pre-formatted content
+                if (fileContent) {
+                    if (provider === 'google') {
+                        if (contentParts.length > 0 && typeof contentParts[contentParts.length - 1] === 'string') {
+                            contentParts[contentParts.length - 1] += `\n${fileContent}`;
+                        } else { contentParts.push(fileContent); }
+                    } else {
+                        const lastTextPart = contentParts.findLast(p => p.type === 'text');
+                        if (lastTextPart) { lastTextPart.text += `\n${fileContent}`; }
+                        else { contentParts.push({ type: "text", text: fileContent }); }
+                    }
+                } else { console.warn("Skipping file attachment with missing content:", attachment.name); }
+            }
+        }
+
+        // Construct final message object
+        if (contentParts.length > 0) {
+            if (provider === 'google') {
+                const finalParts = []; let currentText = "";
+                contentParts.forEach(part => {
+                    if (typeof part === 'string') currentText += part;
+                    else if (typeof part === 'object' && part !== null) {
+                        if (currentText) finalParts.push(currentText); currentText = "";
+                        finalParts.push(part);
+                    }
+                });
+                if (currentText) finalParts.push(currentText);
+                if (finalParts.length > 0) { formatted.push({ role: role, parts: finalParts }); }
+            } else {
+                if (role === 'user' && contentParts.every(p => p.type === 'image_url') && !contentParts.some(p => p.type === 'text')) {
+                    contentParts.unshift({ type: 'text', text: '[Image(s)]' });
+                }
+                formatted.push({ role: role, content: contentParts });
+            }
+        } else if (role === 'user' && msg.attachments?.length > 0) {
+             if (provider === 'google') { console.warn("Skipping user message with only attachments for Google (needs text)."); }
+             else {
+                 contentParts.push({ type: 'text', text: '[Attachment(s)]' });
+                 formatted.push({ role: role, content: contentParts });
+             }
+        } else { console.log(`Skipping message with no content parts (Role: ${role})`); }
+    }
+
+     // Provider specific validation/cleaning
+     const cleaned = [];
+     let lastRole = null;
+     for (const msg of formatted) {
+          if (msg.role !== 'system' && msg.role === lastRole && provider !== 'google' && msg.role !== 'model') {
+              console.warn(`Skipping consecutive message with role ${msg.role} for ${provider}`); continue;
+          }
+          if (provider !== 'google' && Array.isArray(msg.content) && msg.content.length === 0) {
+               console.warn(`Skipping message with empty content array (Role: ${msg.role})`); continue;
+          }
+           if (provider === 'google' && Array.isArray(msg.parts) && msg.parts.length === 0) {
+                console.warn(`Skipping message with empty parts array (Role: ${msg.role})`); continue;
+           }
+          cleaned.push(msg);
+          lastRole = msg.role;
+     }
+      if (provider === 'google' && cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'model') {
+           console.warn("Last message is 'model' for Google, API might require 'user'.");
+       }
+
+    return cleaned;
+}
+
+
+// Core function to handle streaming fetch to LLM providers
+async function streamLLMResponse(provider, modelIdentifier, messages, genArgs, onChunk, onComplete, onError) {
+    console.log(`streamLLMResponse called for provider: ${provider}, model: ${modelIdentifier}`);
+    const apiKey = getApiKey(provider);
+    const lowerProvider = provider.toLowerCase();
+
+    if (!apiKey && lowerProvider !== 'local') {
+        onError(new Error(`API Key for ${provider} not configured.`));
+        return;
+    }
+
+    let url = '';
+    let headers = { 'Content-Type': 'application/json' };
+    let body = {};
+    const filteredGenArgs = {};
+    for (const key in genArgs) {
+        if (genArgs[key] !== null && genArgs[key] !== undefined) {
+            filteredGenArgs[key] = genArgs[key];
+        }
+    }
+
+    // --- Provider Specific Setup ---
+    if (lowerProvider === 'openrouter') {
+        url = `${PROVIDER_CONFIG.openrouter_base_url}/chat/completions`;
+        headers['Authorization'] = `Bearer ${apiKey}`;
+        headers['HTTP-Referer'] = window.location.origin; // Recommended
+        headers['X-Title'] = "Zeryo Chat"; // Recommended
+        body = {
+            model: modelIdentifier,
+            messages: formatMessagesForProvider(messages, lowerProvider),
+            stream: true,
+            ...filteredGenArgs // Spread filtered genArgs
+        };
+    } else if (lowerProvider === 'google') {
+        url = `https://generativelanguage.googleapis.com/v1beta/models/${modelIdentifier}:streamGenerateContent?key=${apiKey}&alt=sse`; // Use SSE endpoint
+        const formattedMsgs = formatMessagesForProvider(messages, lowerProvider);
+        const generationConfig = {};
+        if (filteredGenArgs.temperature !== undefined) generationConfig.temperature = filteredGenArgs.temperature;
+        if (filteredGenArgs.top_p !== undefined) generationConfig.topP = filteredGenArgs.top_p;
+        if (filteredGenArgs.max_tokens !== undefined) generationConfig.maxOutputTokens = filteredGenArgs.max_tokens;
+
+        body = {
+            contents: formattedMsgs,
+            generationConfig: generationConfig,
+            // safetySettings: [] // Add safety settings if needed
+        };
+    } else if (lowerProvider === 'local') {
+        url = `${PROVIDER_CONFIG.local_base_url.replace(/\/$/, '')}/v1/chat/completions`;
+        if (state.apiKeys.local) { // Use local key if provided
+             headers['Authorization'] = `Bearer ${state.apiKeys.local}`;
+        }
+        body = {
+            model: modelIdentifier,
+            messages: formatMessagesForProvider(messages, lowerProvider),
+            stream: true,
+            ...filteredGenArgs
+        };
+    } else {
+        onError(new Error(`Unsupported provider: ${provider}`));
+        return;
+    }
+    // --- (End Provider Setup) ---
+
+
+    // --- Perform Fetch ---
+    state.streamController = new AbortController();
+    try {
+        console.log("Making fetch request to:", url);
+        // console.log("Request body:", JSON.stringify(body, null, 2)); // DEBUG: Be careful logging potentially large bodies
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: headers,
+            body: JSON.stringify(body),
+            signal: state.streamController.signal
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text().catch(() => `HTTP ${response.status}`);
+             let errorDetail = errorText;
+             try {
+                const errorJson = JSON.parse(errorText);
+                errorDetail = errorJson.error?.message || errorJson.detail || JSON.stringify(errorJson.error) || errorText;
+             } catch {}
+            throw new Error(`API Error (${response.status}): ${errorDetail}`);
+        }
+
+        if (!response.body) {
+            throw new Error("Response body is missing.");
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                console.log("LLM Stream finished reading.");
+                break;
+            }
+            if (state.streamController?.signal.aborted) {
+                 console.log("Frontend stream reading aborted by AbortController.");
+                 throw new Error("Aborted"); // Trigger catch block for abort handling
+             }
+
+            buffer += decoder.decode(value, { stream: true });
+
+            // Process buffer line by line based on SSE format
+            let newlineIndex;
+            while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
+                 const line = buffer.substring(0, newlineIndex).trim();
+                 buffer = buffer.substring(newlineIndex + 1);
+
+                 if (line.startsWith('data:')) {
+                     const data = line.substring(5).trim();
+                      if (data === '[DONE]') {
+                           console.log("Received [DONE] marker from SSE stream.");
+                      } else if (data) {
+                           try {
+                                const json = JSON.parse(data);
+                                let content = '';
+                                // --- Extract content based on provider format ---
+                                if (lowerProvider === 'google') {
+                                     // Google SSE format
+                                     content = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
+                                      if (!content && json.error) {
+                                           throw new Error(`Google API Error: ${json.error.message}`);
+                                      }
+                                } else {
+                                     // OpenAI / OpenRouter / Local format
+                                     content = json.choices?.[0]?.delta?.content || '';
+                                      if (!content && json.error) {
+                                           throw new Error(`API Error in stream: ${json.error.message || JSON.stringify(json.error)}`);
+                                      }
+                                }
+                                // --- ---
+
+                                if (content) {
+                                    onChunk(content);
+                                }
+                           } catch (e) {
+                                console.warn("Failed to parse SSE data chunk:", data, e);
+                           }
+                      }
+                 }
+            }
+        }
+        onComplete(); // Signal normal completion
+
+    } catch (error) {
+        if (error.message === 'Aborted') {
+             console.log("Stream fetch aborted.");
+        } else {
+             console.error(`LLM Streaming Error (${provider}):`, error);
+        }
+        onError(error); // Pass error (abort or other)
+    } finally {
+        state.streamController = null;
+    }
+}
+
+
+// --- Send Message Flow (Frontend Generation) (MODIFIED) ---
 
 async function sendMessage() {
     const messageText = messageInput.value.trim();
     const attachments = [
-        // Map stored image data to API format
-        ...state.currentImages.map(img => ({ type: 'image', content: img.base64 })),
-        // Map stored text file data to API format
-        ...state.currentTextFiles.map(file => ({ type: 'file', content: file.content, name: file.name })) // Include name if API uses it
+        ...state.currentImages.map(img => ({ type: 'image', content: img.base64, name: img.name })),
+        ...state.currentTextFiles.map(file => ({ type: 'file', content: file.content, name: file.name })) // rawContent not needed for backend save
     ];
 
-    if (!messageText && attachments.length === 0) {
-         console.log("Empty message and no attachments, not sending.");
-         return; // Don't send empty messages
+    if (!messageText && attachments.length === 0) return;
+    if (state.streamController) { console.log("Already generating"); return; }
+
+    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
+    if (!selectedOption || selectedOption.disabled) {
+         alert("Please select a valid model with an available API key."); return;
     }
-     if (state.streamController) {
-          console.log("Already generating, please wait.");
-          // Optionally provide user feedback (e.g., shake button)
-          return;
-     }
+    const provider = selectedOption?.dataset.provider;
+    if (!provider || (!getApiKey(provider) && provider.toLowerCase() !== 'local')) {
+        alert(`API Key for ${provider} is missing or model invalid. Please check Settings or model selection.`); return;
+    }
 
-    // Disable input and show loading state
-    sendButton.disabled = true;
-    sendButton.innerHTML = '<div class="spinner"></div>'; // Loading indicator
-    messageInput.disabled = true;
-    stopButton.style.display = 'none'; // Hide stop button initially
-
-    // Clear input area *after* grabbing values
+    // Clear input area immediately
+    const currentInputText = messageInput.value; // Save in case of error
     messageInput.value = '';
-    state.currentImages = [];
-    state.currentTextFiles = [];
-    imagePreviewContainer.innerHTML = '';
-    adjustTextareaHeight(); // Adjust height after clearing input and previews
+    state.currentImages = []; state.currentTextFiles = [];
+    imagePreviewContainer.innerHTML = ''; adjustTextareaHeight();
+    welcomeContainer.style.display = 'none';
 
-    // Hide welcome container if it's visible
-    if (welcomeContainer.style.display !== 'none') {
-         welcomeContainer.style.display = 'none';
-    }
+    let currentChatId = state.currentChatId;
+    let savedUserMessageId = null;
+
+    // Set loading state *before* API calls
+    sendButton.disabled = true; sendButton.innerHTML = '<div class="spinner"></div>';
+    messageInput.disabled = true;
 
     try {
-        let currentChatId = state.currentChatId;
-        let messagesForGeneration = [];
-
-        // 1. Create new chat if necessary
+        // 1. Ensure chat exists
         if (!currentChatId) {
-            console.log("No current chat, creating new one...");
             const response = await fetch(`${API_BASE}/chat/new_chat`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                     message: messageText || " ", // Send space if only attachments
-                     attachments: attachments,
-                     character_id: state.currentCharacterId // Pass selected character
-                })
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ character_id: state.currentCharacterId })
             });
             if (!response.ok) throw new Error(`Failed to create chat: ${await response.text()}`);
             const { chat_id } = await response.json();
-            currentChatId = chat_id;
-            state.currentChatId = chat_id; // Update state
-            console.log(`New chat created: ${currentChatId}`);
-            await fetchChats(); // Refresh chat list
-            await loadChat(currentChatId); // Load the new chat (which includes the first message)
-            // Generation will happen naturally if loadChat triggers it, or call explicitly?
-            // The flow now relies on generateResponse being called *after* ensuring the user message exists.
-             // Since new_chat adds the message, we proceed to generate.
-        } else {
-             // 2. Add user message to existing chat
-             console.log(`Adding message to chat: ${currentChatId}`);
-             const response = await fetch(`${API_BASE}/chat/${currentChatId}/add_message`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                     message: messageText || " ", // Send space if only attachments
-                     role: 'user',
-                     attachments: attachments
-                 })
-            });
-            if (!response.ok) throw new Error(`Failed to add message: ${await response.text()}`);
-            const { message_id } = await response.json();
-            console.log(`User message ${message_id} added.`);
-            // Add message locally for instant display? Or rely on generate's reload?
-             // Let's add locally then call generate.
-             const newUserMessage = {
-                 message_id,
-                 chat_id: currentChatId,
-                 role: 'user',
-                 message: messageText || " ",
-                 attachments: attachments, // Use the same attachments array
-                 timestamp: Date.now(),
-                 parent_message_id: state.messages.length > 0 ? findLastActiveMessageId(state.messages) : null, // Find actual parent
-                 active_child_index: 0,
-                 child_message_ids: []
-             };
-              state.messages.push(newUserMessage); // Add to local state
-              renderActiveMessages(); // Re-render to show the new user message immediately
-              scrollToBottom();
+            currentChatId = chat_id; state.currentChatId = chat_id;
+            await fetchChats(); // Refresh sidebar with new chat
+            localStorage.setItem('lastChatId', currentChatId);
+            highlightCurrentChatInSidebar();
         }
 
-        // 3. Trigger Generation
-         if (currentChatId) {
-             await generateResponse(); // Now call generate
-         } else {
-              console.error("Chat ID is still null after attempting creation/message add.");
-         }
+        // 2. Save the user message
+        const parentId = findLastActiveMessageId(state.messages); // Find parent from *current* local state
+        const addUserResponse = await fetch(`${API_BASE}/chat/${currentChatId}/add_message`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                role: 'user', message: messageText || " ", attachments: attachments, parent_message_id: parentId
+            })
+        });
+        if (!addUserResponse.ok) throw new Error(`Failed to save user message: ${await addUserResponse.text()}`);
+        const { message_id } = await addUserResponse.json();
+        savedUserMessageId = message_id;
+        console.log(`User message saved with ID: ${savedUserMessageId}`);
+
+        // *** 3. Reload chat state to include the saved user message ***
+        await loadChat(currentChatId); // This updates state.messages and re-renders
+
+        // 4. Prepare for assistant generation (now using the reloaded state)
+        await generateAssistantResponse(savedUserMessageId); // Pass the ID of the saved user message
 
     } catch (error) {
-        console.error('Error sending message or starting generation:', error);
-        addSystemMessage(`Error: ${error.message}`, "error"); // Show error in chat
-    } finally {
-        // Restore input state
-        sendButton.disabled = false;
-        sendButton.innerHTML = '<i class="bi bi-send-fill"></i>'; // Restore send icon
+        console.error('Error sending message or preparing generation:', error);
+        addSystemMessage(`Error: ${error.message}`, "error");
+        // Restore input if save failed
+        messageInput.value = currentInputText;
+        alert("Failed to send message. Please try again.");
+        // Reset UI loading state on error
+        sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
         messageInput.disabled = false;
-        // Keep focus on input?
-        messageInput.focus();
     }
 }
 
-// Helper to find the last message ID in the active branch
+
+// Function to find the last message ID in the active branch of the local state
 function findLastActiveMessageId(messages) {
      if (!messages || messages.length === 0) return null;
-
      const messageMap = new Map(messages.map(msg => [msg.message_id, { ...msg, children: [] }]));
      const rootMessages = [];
-
      messages.forEach(msg => {
-         if (msg.role === 'system') return; // Skip system messages
+         if (msg.role === 'system') return;
          const msgNode = messageMap.get(msg.message_id);
          if (!msgNode) return;
          if (msg.parent_message_id && messageMap.has(msg.parent_message_id)) {
              messageMap.get(msg.parent_message_id).children.push(msgNode);
-         } else if (!msg.parent_message_id) {
-             rootMessages.push(msgNode);
-         }
+         } else if (!msg.parent_message_id) { rootMessages.push(msgNode); }
      });
      messageMap.forEach(node => node.children.sort((a, b) => a.timestamp - b.timestamp));
      rootMessages.sort((a, b) => a.timestamp - b.timestamp);
 
      let lastActiveId = null;
-     let currentNode = rootMessages.length > 0 ? rootMessages[0] : null;
+     // Find the latest root message based on timestamp to start traversal
+     let activeRoot = rootMessages.length > 0 ? rootMessages.reduce((latest, current) => (current.timestamp > latest.timestamp ? current : latest), rootMessages[0]) : null;
 
-     while (currentNode) {
-         lastActiveId = currentNode.message_id;
-         const children = currentNode.children;
+     function traverse(node) {
+         if (!node) return;
+         lastActiveId = node.message_id;
+         const children = node.children; // Use the children linked in the map
          if (children && children.length > 0) {
-             const activeIndex = currentNode.active_child_index ?? 0;
-             currentNode = children[activeIndex < children.length ? activeIndex : 0];
-         } else {
-             currentNode = null; // End of branch
+             const activeIndex = node.active_child_index ?? 0;
+             const activeChild = children[activeIndex < children.length ? activeIndex : 0];
+             traverse(activeChild);
          }
      }
+     traverse(activeRoot);
+     // console.log("Found last active message ID:", lastActiveId); // Debug
      return lastActiveId;
 }
 
-// Generate Response (updated stream handling and abort logic)
-async function generateResponse() {
-    if (!state.currentChatId || state.streamController) {
-         console.warn("Generation skipped: No chat ID or already generating.");
-         return;
-    }
 
-    const parentMessageId = findLastActiveMessageId(state.messages); // Find true parent for context
-    if (!parentMessageId) {
-        addSystemMessage("Error: Cannot generate response without a preceding message.", "error");
-        return;
-    }
+// Function to generate the assistant's response (MODIFIED)
+async function generateAssistantResponse(userMessageId) {
+    if (!state.currentChatId || state.streamController) return;
 
-    console.log(`Starting generation for chat ${state.currentChatId}, parent: ${parentMessageId}`);
-
-    state.streamController = new AbortController();
-    // Set context for saving on abort
-    state.generationContext = { type: 'new', parentMessageId: parentMessageId };
-
+    // UI Loading state (stop button, spinner already set in sendMessage)
     stopButton.style.display = 'flex';
-    sendButton.disabled = true; // Keep send disabled
-    state.isAutoScrolling = true; // Enable auto-scroll for new response
+    state.isAutoScrolling = true;
     state.userHasScrolled = false;
-
     const scrollHandler = createScrollHandler();
     chatContainer.addEventListener('scroll', scrollHandler);
 
-    // Add placeholder for the assistant message
-    const assistantMessagePlaceholder = {
-         message_id: `temp_${Date.now()}`, // Temporary ID
-         role: 'llm',
-         message: '',
-         attachments: [],
-         timestamp: Date.now(),
-         parent_message_id: parentMessageId,
-         active_child_index: 0,
-         child_message_ids: []
-    };
-
-
-    // Add placeholder to local state and render it
-    state.messages.push(assistantMessagePlaceholder);
-    renderActiveMessages(); // Re-render to show the placeholder (empty initially)
-    const contentDiv = messagesWrapper.querySelector(`.message-row[data-message-id="${assistantMessagePlaceholder.message_id}"] .message-content`);
-
+    // Add placeholder for the assistant message visually (but not to state.messages yet)
+    const tempAssistantId = `temp_assistant_${Date.now()}`;
+    const placeholderRow = createPlaceholderMessageRow(tempAssistantId, userMessageId);
+    messagesWrapper.appendChild(placeholderRow);
+    const contentDiv = placeholderRow.querySelector('.message-content');
     if (!contentDiv) {
          console.error("Failed to find placeholder message div after rendering.");
-         // Cleanup before erroring out
-          stopButton.style.display = 'none';
-          sendButton.disabled = false;
-          state.streamController = null;
-          state.generationContext = null;
-          state.messages = state.messages.filter(m => m.message_id !== assistantMessagePlaceholder.message_id); // Remove placeholder from state
-          renderActiveMessages(); // Re-render without placeholder
          addSystemMessage("Internal error: Could not create message placeholder.", "error");
+         // Reset UI
+          sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+          messageInput.disabled = false; stopButton.style.display = 'none';
+          chatContainer.removeEventListener('scroll', scrollHandler);
          return;
     }
 
-    contentDiv.classList.add('streaming'); // Add streaming indicator
-    state.currentAssistantMessageDiv = contentDiv; // Track the div being streamed into
-    scrollToBottom(); // Scroll after placeholder is added
+    contentDiv.classList.add('streaming');
+    state.currentAssistantMessageDiv = contentDiv; // Track for UI updates
+    scrollToBottom();
 
-    let fullText = ''; // Accumulate text here
-    let finalMessageId = null;
+    // Prepare context for LLM (uses the state loaded after user message was saved)
+    const context = getContextForGeneration(userMessageId, true);
+    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
+    const modelName = selectedOption.value;
+    const modelIdentifier = selectedOption.dataset.modelIdentifier;
+    const provider = selectedOption.dataset.provider;
+
+    let fullText = ''; // Accumulate response
+    let savedAssistantMessageId = null; // ID from backend after saving
 
     try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/generate/`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                model_name: modelSelect.value,
-                streaming: true,
-                gen_args: defaultGenArgs,
-                provider: state.models.find(m => m.name === modelSelect.value)?.provider
-            }),
-            signal: state.streamController.signal
-        });
-
-        if (!response.ok) {
-             const errorText = await response.text().catch(() => `HTTP ${response.status}`);
-            throw new Error(`Generation request failed: ${errorText}`);
-        }
-
-        const reader = response.body.getReader();
-        const textDecoder = new TextDecoder();
-
-        while (true) {
-            const { done, value } = await reader.read();
-             if (done) {
-                  console.log(`Generation stream for ${state.currentChatId} finished.`);
-                  break; // Should be handled by [DONE] signal
-             }
-              if (state.streamController?.signal.aborted) {
-                  // AbortError will be thrown by fetch, handled in catch block
-                  console.log(`Stream read aborted.`);
-                  break; // Exit loop immediately
-              }
-
-            const textChunk = textDecoder.decode(value, { stream: true }); // Use stream: true
-            const lines = textChunk.split('\n').filter(line => line.trim());
-
-            for (const line of lines) {
-                if (line.startsWith('data: ')) {
-                    const data = line.substring(6).trim();
-                    if (data === '[DONE]') {
-                         console.log(`Received [DONE] for generation in ${state.currentChatId}. Reloading chat.`);
-                         // The backend handled saving, just reload to get the final state with correct ID
-                         await loadChat(state.currentChatId);
-                         // Clear context after successful completion and reload
-                         state.generationContext = null;
-                         return; // Exit generation handler
+        await streamLLMResponse(
+            provider, modelIdentifier, context, defaultGenArgs,
+            // onChunk callback
+            (chunk) => {
+                fullText += chunk;
+                contentDiv.innerHTML = renderMarkdown(fullText);
+                contentDiv.dataset.raw = fullText;
+                // Re-run code block wrapping/highlighting within the streaming div
+                contentDiv.querySelectorAll('pre code').forEach(block => {
+                    const preElement = block.parentElement;
+                    if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
+                         const codeText = block.textContent;
+                         const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
+                         const lang = langClass ? langClass.substring(9) : '';
+                         const wrapper = createCodeBlockWithContent(codeText, lang);
+                         preElement.replaceWith(wrapper);
+                    } else if (preElement && preElement.closest('.code-block-wrapper code') && !block.classList.contains('hljs')) {
+                        try { hljs.highlightElement(block); } catch(e) { console.error("Error highlighting mid-stream:", e); }
                     }
-                    try {
-                         const json = JSON.parse(data);
-                         if (json.error) {
-                            throw new Error(json.error);
-                         }
-                          // Check for cancellation status from backend (redundant if using abort signal properly)
-                         if (json.status === 'cancelled') {
-                             console.log("Backend indicated cancellation (may be delayed).");
-                             // AbortError should handle this flow via the catch block now
-                             continue; // Skip further processing of this chunk
-                         }
+                 });
 
-                         // Check for final message ID confirmation
-                          if (json.complete && json.message_id) {
-                               finalMessageId = json.message_id;
-                               console.log(`Server confirmed message saved with ID: ${finalMessageId}`);
-                               // We still wait for [DONE] before reload
-                          }
+                if (!state.userHasScrolled && state.isAutoScrolling) scrollToBottom();
+            },
+            // onComplete callback (MODIFIED - reload state)
+            async () => {
+                console.log("Streaming completed. Saving assistant message.");
+                contentDiv.classList.remove('streaming');
+                state.currentAssistantMessageDiv = null;
 
-                         const content = json.content || '';
-                         if (content && content !== ': OPENROUTER PROCESSING') {
-                             fullText += content; // Accumulate full text
-                             contentDiv.innerHTML = renderMarkdown(fullText); // Update HTML
-                             contentDiv.dataset.raw = fullText; // Update raw data
+                try {
+                    const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            role: 'llm', message: fullText, attachments: [],
+                            parent_message_id: userMessageId, model_name: modelName
+                        })
+                    });
+                    if (!saveResponse.ok) throw new Error(`Failed to save assistant message: ${await saveResponse.text()}`);
+                    const { message_id } = await saveResponse.json();
+                    savedAssistantMessageId = message_id;
+                    console.log(`Assistant message saved with ID: ${savedAssistantMessageId}`);
 
-                             // Process code blocks AFTER innerHTML update
-                             contentDiv.querySelectorAll('pre code').forEach(block => {
-                                 const preElement = block.parentElement;
-                                 if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
-                                      // Found an unwrapped block, wrap it
-                                      const codeText = block.textContent;
-                                      const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
-                                      const lang = langClass ? langClass.substring(9) : '';
-                                      // Use the updated createCodeBlockWithContent
-                                      const wrapper = createCodeBlockWithContent(codeText, lang);
-                                      preElement.replaceWith(wrapper);
-                                 } else if (preElement && preElement.closest('.code-block-wrapper code')) {
-                                     // It's already wrapped, check if highlighting needs refresh (e.g., theme change logic)
-                                     // For streaming, marked should apply classes, hljs might run in createCodeBlockWithContent
-                                     // Re-highlighting here might be redundant unless classes are missing
-                                      if (!block.classList.contains('hljs')) {
-                                           try { hljs.highlightElement(block); } catch(e) { console.error("Error highlighting block mid-stream:", e); }
-                                      }
-                                 }
-                             });
+                    // *** Reload chat state FROM BACKEND to get the final correct state ***
+                    await loadChat(state.currentChatId);
 
-
-                             if (!state.userHasScrolled && state.isAutoScrolling) {
-                                 scrollToBottom();
-                             }
-                         }
-                    } catch (e) {
-                        console.warn('Failed to parse generation stream chunk:', data, e);
-                        // Update UI with error indication within the stream if possible
-                        fullText += `\n\n*Error parsing stream data*`;
-                        contentDiv.innerHTML = renderMarkdown(fullText);
-                        contentDiv.dataset.raw = fullText;
-                    }
+                } catch (saveError) {
+                    console.error("Error saving assistant message:", saveError);
+                    addSystemMessage(`Error saving response: ${saveError.message}`, "error");
+                    // Remove placeholder on save error
+                    placeholderRow.remove();
+                } finally {
+                    // Final UI cleanup after successful save OR save error
+                    sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+                    messageInput.disabled = false; messageInput.focus();
+                    stopButton.style.display = 'none'; state.isAutoScrolling = false;
                 }
-            }
-        }
+            },
+            // onError callback (MODIFIED - check error.name)
+            async (error) => {
+                if (contentDiv) contentDiv.classList.remove('streaming');
+                state.currentAssistantMessageDiv = null;
+                console.error("Streaming error:", error); // Log the full error object
 
-        // If loop finishes without [DONE] (e.g., network issue before explicit abort)
-        console.log("Stream loop finished without [DONE] signal. Reloading chat state.");
-        await loadChat(state.currentChatId);
+                // *** Check for AbortError ***
+                if (error.name === 'AbortError') {
+                    console.log("Handling aborted generation. Saving partial text:", fullText);
+                    if (fullText.trim()) {
+                        try {
+                            const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, {
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    role: 'llm', message: fullText, attachments: [],
+                                    parent_message_id: userMessageId, model_name: modelName + " (incomplete)"
+                                })
+                             });
+                             if (!saveResponse.ok) throw new Error(`Failed to save partial message: ${await saveResponse.text()}`);
+                             const { message_id } = await saveResponse.json();
+                             console.log(`Partial assistant message saved with ID: ${message_id}`);
 
+                            // *** Reload chat state FROM BACKEND after partial save ***
+                            await loadChat(state.currentChatId);
 
-    } catch (error) {
-        if (error.name === 'AbortError') {
-            console.log("Generation stopped by user.");
-            // --- SAVE PARTIAL TEXT ---
-            const partialText = fullText; // Get the text accumulated so far
-            const context = state.generationContext; // Get context
+                        } catch (saveError) {
+                             console.error("Error saving partial assistant message:", saveError);
+                             addSystemMessage(`Error saving partial response: ${saveError.message}`, "error");
+                             // Remove placeholder on save error
+                             placeholderRow.remove();
+                        }
+                    } else {
+                         console.log("Aborted with no text, removing placeholder.");
+                         placeholderRow.remove(); // Remove empty placeholder
+                    }
+                    // Add a system message indicating the stop, but not as an error
+                    addSystemMessage("Generation stopped by user.", "info");
+                } else {
+                    // Other errors (API error, network error)
+                    placeholderRow.remove(); // Remove placeholder on failure
+                    addSystemMessage(`Generation Error: ${error.message}`, "error"); // Show the actual error message
+                }
 
-            if (partialText && partialText.trim() && context && context.type === 'new' && context.parentMessageId) {
-                 try {
-                     console.log("Attempting to save partial generation...");
-                     // Endpoint to save partial text for a NEW message under a parent
-                     const saveUrl = `${API_BASE}/chat/${state.currentChatId}/save_generation_result/${context.parentMessageId}`;
-                     const payload = { message: partialText };
-
-                      console.log(`Saving partial to ${saveUrl}`);
-                      const saveResponse = await fetch(saveUrl, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify(payload)
-                      });
-                      if (!saveResponse.ok) {
-                           const err = await saveResponse.text().catch(() => `HTTP ${saveResponse.status}`);
-                           throw new Error(`Failed to save partial result: ${err}`);
-                      }
-                      console.log("Partial generation saved successfully via API.");
-                 } catch (saveError) {
-                      console.error("Error saving partial generation via API:", saveError);
-                      // Inform the user the save failed, but still reload
-                      addSystemMessage("Could not save the partial response.", "error");
-                 }
-            } else {
-                 console.warn("Partial text empty or context invalid, not saving.", { partialText, context });
-            }
-            // --- END SAVE PARTIAL TEXT ---
-
-            // Always reload chat state after abort to sync with backend (whether save succeeded or not)
-            await loadChat(state.currentChatId);
-
-        } else {
-            // Handle non-abort errors as before
-            console.error('Generation error:', error);
-            if (contentDiv) { // Show error in the placeholder div
-                 contentDiv.innerHTML = renderMarkdown(fullText + `\n\n*Error generating response: ${error.message}*`);
-                 contentDiv.classList.remove('streaming');
-                 contentDiv.dataset.raw = fullText + `\n\nError generating response: ${error.message}`;
-            } else { // Fallback to system message
-                 addSystemMessage(`Error generating response: ${error.message}`, "error");
-            }
-             // Attempt to reload chat state even after error to ensure consistency
-             try { await loadChat(state.currentChatId); } catch { /* ignore reload error */ }
-        }
+               // Final UI cleanup after error/abort
+               sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+               messageInput.disabled = false; messageInput.focus();
+               stopButton.style.display = 'none'; state.isAutoScrolling = false;
+           }
+        );
+    } catch (error) { // Catch synchronous stream setup errors
+         console.error("Error initiating generation stream:", error);
+         addSystemMessage(`Error starting generation: ${error.message}`, "error");
+         // Clean up placeholder and UI state
+          placeholderRow.remove();
+          sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+          messageInput.disabled = false; stopButton.style.display = 'none';
+          state.streamController = null; state.isAutoScrolling = false;
     } finally {
-        stopButton.style.display = 'none';
-        sendButton.disabled = false; // Re-enable send button
-        messageInput.disabled = false; // Re-enable input
-        state.streamController = null;
-        state.generationContext = null; // Clear context regardless of outcome
-        state.currentAssistantMessageDiv = null;
-        state.isAutoScrolling = false; // Disable auto-scroll
-        chatContainer.removeEventListener('scroll', scrollHandler);
-        // Ensure streaming class is removed if it was added and might still be present
-        const finalPlaceholderDiv = messagesWrapper.querySelector(`.message-row[data-message-id="${assistantMessagePlaceholder.message_id}"] .message-content`);
-        if (finalPlaceholderDiv) finalPlaceholderDiv.classList.remove('streaming');
-        // If the message ID changed after reload, the placeholder is gone anyway.
-        // We might need to find the *actual* last message div and ensure its class is removed?
-        // Reloading the chat should handle the final state correctly.
+         chatContainer.removeEventListener('scroll', scrollHandler);
     }
 }
 
+// Helper to create placeholder row visually
+function createPlaceholderMessageRow(tempId, parentId) {
+    const messageRow = document.createElement('div');
+    messageRow.className = `message-row assistant-row placeholder`; // Add placeholder class
+    messageRow.dataset.messageId = tempId; // Temporary ID
+    messageRow.dataset.parentId = parentId; // Store parent ref if needed
 
-// stopStreaming function (now only aborts, saving is handled in catch block)
-async function stopStreaming() {
-    if (state.streamController && !state.streamController.signal.aborted) {
-        console.log("Attempting to stop streaming via AbortController...");
-        state.streamController.abort(); // Abort the fetch request
+    const messageDiv = document.createElement('div');
+    messageDiv.className = 'message';
 
-        // Optional: Send non-blocking signal to backend if helpful for faster cleanup
-        fetch(`${API_BASE}/stop`, { method: 'POST' }).catch(err => console.warn("Backend /stop signal failed:", err));
+    const avatarActionsDiv = document.createElement('div');
+    avatarActionsDiv.className = 'message-avatar-actions'; // Container for avatar and actions
 
-        // UI cleanup (hiding button) happens immediately
-        stopButton.style.display = 'none';
-        // Re-enabling send/input and final state update (saving partial, reloading) is handled
-        // in the catch block of the function that initiated the stream.
-    } else {
-        console.log("No active stream to stop or already aborted.");
+    // Placeholder for actions (can be hidden or minimal)
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'message-actions placeholder-actions'; // Specific class
+    // actionsDiv.innerHTML = '<span>...</span>'; // Or leave empty
+
+    // Message Content placeholder
+    const contentDiv = document.createElement('div');
+    contentDiv.className = 'message-content';
+    contentDiv.innerHTML = '<span class="pulsing-cursor">▍</span>'; // Simple pulsing cursor
+
+    messageDiv.appendChild(contentDiv);
+    avatarActionsDiv.appendChild(actionsDiv);
+    messageDiv.appendChild(avatarActionsDiv);
+    messageRow.appendChild(messageDiv);
+    return messageRow;
+}
+
+
+// --- Context Preparation ---
+// Get message context for sending to LLM
+function getContextForGeneration(stopAtMessageId = null, includeStopMessage = false) {
+    const context = [];
+    const messageMap = new Map(state.messages.map(msg => [msg.message_id, { ...msg }])); // No need for children array here
+    const rootMessages = [];
+
+    // Build tree structure and find roots
+    state.messages.forEach(msg => {
+        if (msg.role === 'system') return; // Skip DB system messages
+        const msgNode = messageMap.get(msg.message_id);
+        if (!msgNode) return;
+         // Link children to parent (though not strictly needed for traversal)
+         if (msg.parent_message_id && messageMap.has(msg.parent_message_id)) {
+              const parent = messageMap.get(msg.parent_message_id);
+              if (!parent.children) parent.children = []; // Initialize if missing
+              parent.children.push(msgNode);
+              parent.children.sort((a, b) => a.timestamp - b.timestamp); // Ensure order
+         } else if (!msg.parent_message_id) {
+            rootMessages.push(msgNode);
+        }
+    });
+    rootMessages.sort((a, b) => a.timestamp - b.timestamp);
+
+    // Add system prompt first if available
+    if (state.activeSystemPrompt) {
+        context.push({ role: 'system', message: state.activeSystemPrompt, attachments: [] });
     }
+
+    // Traverse active branch(es) from roots
+    function traverse(messageId) {
+        const messageNode = messageMap.get(messageId);
+        if (!messageNode || messageNode.role === 'system') return false; // Stop if null or system
+
+        // Add current message to context if conditions met
+         const shouldAdd = !stopAtMessageId || (messageNode.message_id !== stopAtMessageId || includeStopMessage);
+         if (shouldAdd) {
+              context.push({
+                  role: messageNode.role, // llm or user
+                  message: messageNode.message,
+                  // Map attachments to simpler format for LLM formatting function
+                  attachments: (messageNode.attachments || []).map(att => ({
+                      type: att.type,
+                      content: att.content, // Base64 for image, formatted text for file
+                      name: att.name
+                  }))
+              });
+         }
+
+        // Check if we should stop traversal
+        if (stopAtMessageId && messageNode.message_id === stopAtMessageId) {
+             console.log("Reached stopAtMessageId:", stopAtMessageId);
+             return true; // Signal to stop
+        }
+
+        // Find active child ID from the message's children_ids (fetched from backend)
+        const childrenIds = messageNode.child_message_ids || [];
+         // Find actual children nodes based on IDs to ensure correct timestamp sorting
+         const childrenNodes = childrenIds.map(id => messageMap.get(id)).filter(Boolean);
+         childrenNodes.sort((a, b) => a.timestamp - b.timestamp); // Sort nodes by timestamp
+
+        if (childrenNodes.length > 0) {
+            const activeIndex = messageNode.active_child_index ?? 0;
+            const activeChildNode = childrenNodes[activeIndex < childrenNodes.length ? activeIndex : 0];
+            if (activeChildNode) {
+                 if (traverse(activeChildNode.message_id)) return true; // Propagate stop signal
+            }
+        }
+        return false; // Continue traversal if not stopped
+    }
+
+    // Start traversal from each root
+    for (const rootNode of rootMessages) {
+        if (traverse(rootNode.message_id)) break; // Stop if signal received
+    }
+
+    // Remove leading system message if it's empty (rare case)
+    if (context.length > 0 && context[0].role === 'system' && !context[0].message) {
+        context.shift();
+    }
+
+    console.log(`Context prepared (${context.length} messages) up to ${stopAtMessageId || 'end'}`);
+    // console.log("Context:", JSON.stringify(context, null, 2)); // DEBUG: Careful logging large context
+    return context;
+}
+
+
+// --- Regeneration / Continuation (Frontend Orchestration) (MODIFIED) ---
+
+async function regenerateMessage(messageId, newBranch = false) {
+    if (!state.currentChatId || state.streamController) return;
+    const messageToRegen = state.messages.find(m => m.message_id === messageId);
+    if (!messageToRegen || messageToRegen.role !== 'llm') {
+        addSystemMessage("Error: Can only regenerate assistant messages.", "error"); return;
+    }
+    const parentMessageId = messageToRegen.parent_message_id;
+    if (!parentMessageId) {
+        addSystemMessage("Error: Cannot regenerate message without a parent.", "error"); return;
+    }
+
+    console.log(`Regenerating message ${messageId} (new branch: ${newBranch})`);
+
+    // UI Loading state
+    sendButton.disabled = true; sendButton.innerHTML = '<div class="spinner"></div>';
+    messageInput.disabled = true; stopButton.style.display = 'flex';
+    state.isAutoScrolling = true; state.userHasScrolled = false;
+    const scrollHandler = createScrollHandler();
+    chatContainer.addEventListener('scroll', scrollHandler);
+
+    const context = getContextForGeneration(parentMessageId, true); // Context up to parent
+
+    const targetMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageId}"]`);
+    let contentDiv = null; // Div to update if replacing
+    let tempIndicator = null; // UI indicator for branching
+
+    if (!newBranch) { // Replacing
+        contentDiv = targetMessageRow?.querySelector('.message-content');
+        if (!contentDiv) {
+            console.error("Cannot find content div to replace for regeneration.");
+            addSystemMessage("Error: Could not find message to replace.", "error");
+            // Reset UI state
+            sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+            messageInput.disabled = false; stopButton.style.display = 'none';
+            chatContainer.removeEventListener('scroll', scrollHandler);
+            return;
+        }
+        contentDiv.innerHTML = '<span class="pulsing-cursor">▍</span>'; // Clear and show cursor
+        contentDiv.dataset.raw = ''; contentDiv.classList.add('streaming');
+        state.currentAssistantMessageDiv = contentDiv;
+    } else { // Branching
+         tempIndicator = document.createElement('div');
+         tempIndicator.className = 'system-info-row info'; tempIndicator.textContent = `Generating new branch...`;
+         targetMessageRow?.insertAdjacentElement('afterend', tempIndicator);
+         state.currentAssistantMessageDiv = null; // Not streaming into existing div
+    }
+    scrollToBottom();
+
+    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
+     if (!selectedOption || selectedOption.disabled) {
+          addSystemMessage("Error: Please select a valid model with an API key.", "error");
+          if (tempIndicator) tempIndicator.remove();
+           // Reset UI state
+          sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+          messageInput.disabled = false; stopButton.style.display = 'none';
+          chatContainer.removeEventListener('scroll', scrollHandler);
+          return;
+     }
+    const modelName = selectedOption.value;
+    const modelIdentifier = selectedOption.dataset.modelIdentifier;
+    const provider = selectedOption.dataset.provider;
+
+    let fullText = '';
+
+    try {
+        await streamLLMResponse(
+            provider, modelIdentifier, context, defaultGenArgs,
+            // onChunk
+            (chunk) => {
+                fullText += chunk;
+                if (!newBranch && contentDiv) { // Only update UI if replacing
+                     contentDiv.innerHTML = renderMarkdown(fullText);
+                     contentDiv.dataset.raw = fullText;
+                      contentDiv.querySelectorAll('pre code').forEach(block => {
+                           const preElement = block.parentElement;
+                           if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
+                                const codeText = block.textContent;
+                                const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
+                                const lang = langClass ? langClass.substring(9) : '';
+                                const wrapper = createCodeBlockWithContent(codeText, lang);
+                                preElement.replaceWith(wrapper);
+                           } else if (preElement && preElement.closest('.code-block-wrapper code') && !block.classList.contains('hljs')) {
+                                try { hljs.highlightElement(block); } catch(e) { console.error("Error highlighting mid-stream:", e); }
+                           }
+                       });
+                     if (!state.userHasScrolled && state.isAutoScrolling) scrollToBottom();
+                }
+            },
+            // onComplete (MODIFIED - reload state)
+            async () => {
+                 console.log("Regeneration streaming completed.");
+                 if (!newBranch && contentDiv) contentDiv.classList.remove('streaming');
+                 state.currentAssistantMessageDiv = null;
+                 if (tempIndicator) tempIndicator.remove();
+
+                 try {
+                     let saveResponse;
+                     if (newBranch) { // Add new message
+                          saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                  role: 'llm', message: fullText, attachments: [],
+                                  parent_message_id: parentMessageId, model_name: modelName
+                              })
+                          });
+                     } else { // Edit existing message
+                          const attachmentsForSave = messageToRegen.attachments.map(({ rawContent, ...rest }) => rest);
+                          saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
+                              method: 'POST', headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify({
+                                  message: fullText, attachments: attachmentsForSave,
+                                  model_name: modelName // Update model name
+                              })
+                          });
+                     }
+                     if (!saveResponse.ok) throw new Error(`Failed to save ${newBranch ? 'new branch' : 'edited message'}: ${await saveResponse.text()}`);
+                     console.log(`Regeneration ${newBranch ? 'branched' : 'edited'} and saved successfully.`);
+
+                     // *** Reload chat state FROM BACKEND ***
+                     await loadChat(state.currentChatId);
+
+                 } catch (saveError) {
+                      console.error("Error saving regeneration result:", saveError);
+                      addSystemMessage(`Error saving response: ${saveError.message}`, "error");
+                      // Optionally restore original content if replacing failed?
+                      if (!newBranch && contentDiv) {
+                          contentDiv.innerHTML = renderMarkdown(messageToRegen.message); // Restore
+                          contentDiv.dataset.raw = messageToRegen.message;
+                      }
+                 } finally {
+                      // Final UI cleanup
+                      sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+                      messageInput.disabled = false; messageInput.focus();
+                      stopButton.style.display = 'none'; state.isAutoScrolling = false;
+                 }
+            },
+            // onError (MODIFIED - check error.name)
+            async (error) => {
+                 if (!newBranch && contentDiv) contentDiv.classList.remove('streaming');
+                 state.currentAssistantMessageDiv = null;
+                 if (tempIndicator) tempIndicator.remove();
+                 console.error("Regeneration streaming error:", error); // Log full error
+
+                 // *** Check for AbortError ***
+                 if (error.name === 'AbortError') {
+                     console.log("Handling aborted regeneration. Saving partial text:", fullText);
+                     if (fullText.trim()) {
+                          try {
+                              let saveResponse;
+                              const attachmentsForSave = messageToRegen.attachments.map(({ rawContent, ...rest }) => rest);
+                              if (newBranch) {
+                                   saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, {
+                                       method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                       body: JSON.stringify({
+                                           role: 'llm', message: fullText, attachments: [],
+                                           parent_message_id: parentMessageId, model_name: modelName + " (incomplete)"
+                                       })
+                                   });
+                              } else {
+                                   saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
+                                       method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                       body: JSON.stringify({
+                                           message: fullText, attachments: attachmentsForSave,
+                                           model_name: modelName + " (incomplete)"
+                                       })
+                                   });
+                              }
+
+                               if (!saveResponse.ok) throw new Error(`Failed to save partial: ${await saveResponse.text()}`);
+                               console.log("Partial regeneration saved.");
+
+                               // *** Reload chat state FROM BACKEND after partial save ***
+                               await loadChat(state.currentChatId);
+
+                          } catch (saveError) {
+                               console.error("Error saving partial regeneration:", saveError);
+                               addSystemMessage(`Error saving partial response: ${saveError.message}`, "error");
+                                if (!newBranch && contentDiv) { // Restore original if save failed
+                                    contentDiv.innerHTML = renderMarkdown(messageToRegen.message);
+                                    contentDiv.dataset.raw = messageToRegen.message;
+                                }
+                          }
+                     } else { // Aborted with no text
+                          if (!newBranch && contentDiv) { // Restore original if replacing
+                               contentDiv.innerHTML = renderMarkdown(messageToRegen.message);
+                               contentDiv.dataset.raw = messageToRegen.message;
+                          }
+                     }
+                     addSystemMessage("Regeneration stopped by user.", "info");
+                 } else { // Other errors
+                      if (!newBranch && contentDiv) {
+                           contentDiv.innerHTML = renderMarkdown(`*Error: ${error.message}*`); // Show actual error
+                           contentDiv.dataset.raw = `*Error: ${error.message}*`;
+                      } else {
+                           addSystemMessage(`Regeneration Error: ${error.message}`, "error");
+                      }
+                 }
+                 // Final UI cleanup after error/abort
+                 sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+                 messageInput.disabled = false; messageInput.focus();
+                 stopButton.style.display = 'none'; state.isAutoScrolling = false;
+            }
+        );
+    } catch (error) { // Catch synchronous setup errors
+         console.error("Error initiating regeneration stream:", error);
+         addSystemMessage(`Error starting regeneration: ${error.message}`, "error");
+         if (tempIndicator) tempIndicator.remove(); // Remove indicator
+         // Clean up UI
+         sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+         messageInput.disabled = false; stopButton.style.display = 'none';
+         state.streamController = null; state.isAutoScrolling = false;
+          if (!newBranch && contentDiv) { // Restore original content if replacing
+              contentDiv.innerHTML = renderMarkdown(messageToRegen.message);
+              contentDiv.dataset.raw = messageToRegen.message;
+              contentDiv.classList.remove('streaming');
+          }
+    } finally {
+         chatContainer.removeEventListener('scroll', scrollHandler);
+    }
+}
+
+async function continueMessage(messageId) {
+    if (!state.currentChatId || state.streamController) return;
+    const messageToContinue = state.messages.find(m => m.message_id === messageId);
+    if (!messageToContinue || messageToContinue.role !== 'llm') {
+        addSystemMessage("Error: Can only continue assistant messages.", "error"); return;
+    }
+    const parentMessageId = messageToContinue.parent_message_id;
+    if (!parentMessageId) {
+        addSystemMessage("Error: Cannot continue message without a parent.", "error"); return;
+    }
+
+    console.log(`Continuing message ${messageId}`);
+
+    // UI Loading state
+    sendButton.disabled = true; sendButton.innerHTML = '<div class="spinner"></div>';
+    messageInput.disabled = true; stopButton.style.display = 'flex';
+    state.isAutoScrolling = true; state.userHasScrolled = false;
+    const scrollHandler = createScrollHandler();
+    chatContainer.addEventListener('scroll', scrollHandler);
+
+    const context = getContextForGeneration(messageId, true); // Include message itself
+
+    const targetMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageId}"]`);
+    const contentDiv = targetMessageRow?.querySelector('.message-content');
+    if (!contentDiv) {
+         console.error("Cannot find content div to continue message.");
+         addSystemMessage("Error: Could not find message to continue.", "error");
+         // Reset UI
+         sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+         messageInput.disabled = false; stopButton.style.display = 'none';
+         chatContainer.removeEventListener('scroll', scrollHandler);
+         return;
+    }
+
+    let existingText = messageToContinue.message;
+    let continuationText = '';
+    contentDiv.classList.add('streaming');
+    state.currentAssistantMessageDiv = contentDiv;
+    scrollToBottom();
+
+    const originalModelName = messageToContinue.model_name || modelSelect.value;
+    const modelInfo = state.models.find(m => m.name === originalModelName) || state.models.find(m => m.name === modelSelect.value);
+    if (!modelInfo || !modelInfo.provider) {
+        addSystemMessage("Error: Could not determine model information for continuation.", "error");
+         // Reset UI
+        sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+        messageInput.disabled = false; stopButton.style.display = 'none';
+        chatContainer.removeEventListener('scroll', scrollHandler);
+         if (contentDiv) contentDiv.classList.remove('streaming');
+         state.currentAssistantMessageDiv = null;
+        return;
+    }
+    const modelIdentifier = modelInfo.model_identifier;
+    const provider = modelInfo.provider;
+
+     if (!provider) {
+          addSystemMessage("Error: Model provider not found for continuation.", "error");
+          // Reset UI
+          sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+          messageInput.disabled = false; stopButton.style.display = 'none';
+          chatContainer.removeEventListener('scroll', scrollHandler);
+           if (contentDiv) contentDiv.classList.remove('streaming');
+           state.currentAssistantMessageDiv = null;
+          return;
+     }
+
+    try {
+        await streamLLMResponse(
+            provider, modelIdentifier, context, defaultGenArgs,
+            // onChunk
+            (chunk) => {
+                continuationText += chunk;
+                const fullText = existingText + continuationText;
+                contentDiv.innerHTML = renderMarkdown(fullText);
+                contentDiv.dataset.raw = fullText;
+                contentDiv.querySelectorAll('pre code').forEach(block => {
+                     const preElement = block.parentElement;
+                     if (preElement && preElement.tagName === 'PRE' && !preElement.closest('.code-block-wrapper')) {
+                          const codeText = block.textContent;
+                          const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
+                          const lang = langClass ? langClass.substring(9) : '';
+                          const wrapper = createCodeBlockWithContent(codeText, lang);
+                          preElement.replaceWith(wrapper);
+                     } else if (preElement && preElement.closest('.code-block-wrapper code') && !block.classList.contains('hljs')) {
+                         try { hljs.highlightElement(block); } catch(e) { console.error("Error highlighting mid-stream:", e); }
+                     }
+                 });
+                if (!state.userHasScrolled && state.isAutoScrolling) scrollToBottom();
+            },
+            // onComplete (MODIFIED - reload state)
+            async () => {
+                 console.log("Continuation streaming completed.");
+                 contentDiv.classList.remove('streaming');
+                 state.currentAssistantMessageDiv = null;
+                 const finalFullText = existingText + continuationText;
+                 try {
+                      const attachmentsForSave = messageToContinue.attachments.map(({ rawContent, ...rest }) => rest);
+                     const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
+                         method: 'POST', headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify({
+                             message: finalFullText, attachments: attachmentsForSave,
+                             model_name: originalModelName // Keep original model name unless explicitly changed
+                         })
+                     });
+                      if (!saveResponse.ok) throw new Error(`Failed to save continued message: ${await saveResponse.text()}`);
+                     console.log(`Continued message ${messageId} saved successfully.`);
+
+                     // *** Reload chat state FROM BACKEND ***
+                     await loadChat(state.currentChatId);
+
+                 } catch (saveError) {
+                      console.error("Error saving continued message:", saveError);
+                      addSystemMessage(`Error saving response: ${saveError.message}`, "error");
+                      contentDiv.innerHTML = renderMarkdown(finalFullText + `\n\n*[Save Error]*`);
+                 } finally {
+                      // Final UI cleanup
+                      sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+                      messageInput.disabled = false; messageInput.focus();
+                      stopButton.style.display = 'none'; state.isAutoScrolling = false;
+                 }
+            },
+            // onError (MODIFIED - check error.name)
+            async (error) => {
+                 contentDiv.classList.remove('streaming');
+                 state.currentAssistantMessageDiv = null;
+                 console.error("Continuation streaming error:", error); // Log full error
+                 const finalPartialText = existingText + continuationText;
+
+                 // *** Check for AbortError ***
+                 if (error.name === 'AbortError') {
+                     console.log("Handling aborted continuation. Saving partial text:", finalPartialText);
+                     if (continuationText.trim()) { // Only save if something new was added
+                          try {
+                               const attachmentsForSave = messageToContinue.attachments.map(({ rawContent, ...rest }) => rest);
+                              const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
+                                   method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                   body: JSON.stringify({
+                                       message: finalPartialText, attachments: attachmentsForSave,
+                                       model_name: originalModelName + " (incomplete)"
+                                   })
+                               });
+                              if (!saveResponse.ok) throw new Error(`Failed to save partial continuation: ${await saveResponse.text()}`);
+                              console.log("Partial continuation saved.");
+                               // *** Reload chat state FROM BACKEND after partial save ***
+                               await loadChat(state.currentChatId);
+                          } catch (saveError) {
+                               console.error("Error saving partial continuation:", saveError);
+                               addSystemMessage(`Error saving partial response: ${saveError.message}`, "error");
+                               contentDiv.innerHTML = renderMarkdown(finalPartialText + `\n\n*[Save Error]*`);
+                          }
+                     } else {
+                          console.log("Aborted continuation with no new text, not saving.");
+                          // Restore original text in UI
+                          contentDiv.innerHTML = renderMarkdown(existingText);
+                          contentDiv.dataset.raw = existingText;
+                     }
+                     addSystemMessage("Continuation stopped by user.", "info");
+                 } else { // Other errors
+                     contentDiv.innerHTML = renderMarkdown(finalPartialText + `\n\n*Error: ${error.message}*`); // Show actual error
+                     contentDiv.dataset.raw = finalPartialText + `\n\n*Error: ${error.message}*`;
+                 }
+                 // Final UI cleanup after error/abort
+                 sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+                 messageInput.disabled = false; messageInput.focus();
+                 stopButton.style.display = 'none'; state.isAutoScrolling = false;
+            }
+        );
+    } catch (error) { // Catch synchronous setup errors
+         console.error("Error initiating continuation stream:", error);
+         addSystemMessage(`Error starting continuation: ${error.message}`, "error");
+         // Clean up UI
+         sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-send-fill"></i>';
+         messageInput.disabled = false; stopButton.style.display = 'none';
+         state.streamController = null; state.isAutoScrolling = false;
+         if (contentDiv) contentDiv.classList.remove('streaming');
+         state.currentAssistantMessageDiv = null;
+    } finally {
+         chatContainer.removeEventListener('scroll', scrollHandler);
+    }
+}
+
+// Stop Streaming (Frontend Abort)
+function stopStreaming() {
+    if (state.streamController && !state.streamController.signal.aborted) {
+        console.log("User requested stop. Aborting frontend fetch...");
+        state.streamController.abort();
+        stopButton.style.display = 'none';
+        if (state.currentAssistantMessageDiv) {
+             state.currentAssistantMessageDiv.classList.remove('streaming');
+             // The onError handler now manages saving partial/showing stopped state
+             state.currentAssistantMessageDiv = null;
+        }
+    } else { console.log("No active frontend stream to stop or already aborted."); }
 }
 
 // --- Character Handling ---
@@ -2619,8 +2386,6 @@ async function populateCharacterSelect() {
             const option = document.createElement('option');
             option.value = char.character_id;
             option.textContent = char.character_name;
-            // Store sysprompt directly on option for displayActiveSystemPrompt? Maybe not needed.
-            // option.dataset.sysprompt = char.sysprompt;
             select.appendChild(option);
         });
         // Restore previous selection if it still exists
@@ -2636,37 +2401,15 @@ async function populateCharacterSelect() {
     const selectedId = select.value;
     document.getElementById('character-edit-btn').disabled = !selectedId;
     document.getElementById('character-delete-btn').disabled = !selectedId;
-
-    // Display prompt for the currently selected character in the dropdown (even if not active chat char)
-     // This seems wrong, displayActiveSystemPrompt should reflect the *chat's* character.
-     // Let's call displayActiveSystemPrompt based on state.currentCharacterId instead.
-     // displayActiveSystemPrompt(selectedId, characters); // No, do this based on chat load / selection change
 }
 
-function displayActiveSystemPrompt(characterId, characters = null) {
+function displayActiveSystemPrompt(characterName, promptText) {
     const mainContent = document.querySelector('.main-content');
     let activePromptDisplay = document.getElementById('active-system-prompt');
     const chatContainerElement = document.getElementById('chat-container');
 
-    // If no character ID, remove the display if it exists
-    if (!characterId) {
-        if (activePromptDisplay) activePromptDisplay.remove();
-        if(chatContainerElement) chatContainerElement.style.paddingTop = '0'; // Reset padding
-        return;
-    }
-
-     // Ensure characters list is available
-     if (!characters) {
-          console.warn("Cannot display system prompt without character list.");
-          // Optionally fetch characters here if needed, but better to pass them in
-          if (activePromptDisplay) activePromptDisplay.remove(); // Remove old one if exists
-          if(chatContainerElement) chatContainerElement.style.paddingTop = '0'; // Reset padding
-          return;
-     }
-
-    const character = characters.find(c => c.character_id === characterId);
-    if (!character || !character.sysprompt) {
-        // Character selected but no prompt, or character not found? Remove display.
+    // If no prompt text, remove the display if it exists
+    if (!promptText) {
         if (activePromptDisplay) activePromptDisplay.remove();
         if(chatContainerElement) chatContainerElement.style.paddingTop = '0'; // Reset padding
         return;
@@ -2676,17 +2419,14 @@ function displayActiveSystemPrompt(characterId, characters = null) {
     if (!activePromptDisplay) {
         activePromptDisplay = document.createElement('div');
         activePromptDisplay.id = 'active-system-prompt';
-        // Apply styles directly - designed to look like a message row header
+        // Apply styles directly
         activePromptDisplay.style.cssText = `
             background: var(--message-user);
-            padding: 5px 20px; /* Match header padding */
-            border-bottom: 1px solid var(--border-color);
-            position: sticky; /* Stick to top */
-            top: 60px; /* Below main header */
-            z-index: 4; /* Below header, above chat */
+            padding: 16px 40px;
+            position: sticky;
             cursor: pointer;
-            max-height: 40px; /* Initial collapsed height */
             overflow: hidden;
+            max-height: 64px;
             transition: max-height 0.3s ease-in-out;
         `;
 
@@ -2696,49 +2436,44 @@ function displayActiveSystemPrompt(characterId, characters = null) {
             const promptContent = activePromptDisplay.querySelector('.system-prompt-content');
 
             if (isCollapsed) {
-                activePromptDisplay.style.maxHeight = '40px'; // Collapsed height
+                activePromptDisplay.style.maxHeight = '64px'; // Collapsed height
                 if (icon) icon.className = 'bi bi-chevron-down';
                 if (promptContent) promptContent.style.display = 'none';
             } else {
                 activePromptDisplay.style.maxHeight = '300px'; // Expanded height limit
-                 if (icon) icon.className = 'bi bi-chevron-up';
-                if (promptContent) promptContent.style.display = 'block'; // Or 'pre' if needed
+                if (icon) icon.className = 'bi bi-chevron-up';
+                if (promptContent) promptContent.style.display = 'block';
             }
         });
 
-         // Insert it right after the header
-         const headerElement = document.querySelector('.header');
-         if (mainContent && headerElement) {
-             headerElement.after(activePromptDisplay); // Insert after the main header
-         }
+            // Insert it right after the header
+            const headerElement = document.querySelector('.header');
+            if (mainContent && headerElement) {
+            headerElement.after(activePromptDisplay);
+            }
     }
 
     // Update content
     activePromptDisplay.innerHTML = `
-         <div style="display: flex; justify-content: space-between; align-items: center; height: 30px;">
-              <span style="font-weight: 500; color: var(--text-secondary); font-size: 0.9em;">
-                 Active Prompt: ${character.character_name}
-              </span>
-              <span class="expand-icon" style="color: var(--text-secondary);"><i class="bi bi-chevron-down"></i></span>
+         <div style="display: flex; align-items: center; height: 30px; padding-left: 32px;">
+            <span class="expand-icon" style="color: var(--text-secondary);"><i class="bi bi-chevron-down"></i></span>
+            <span style="font-weight: 500; color: var(--text-secondary); font-size: 0.9em; padding-left: 4px;">
+                Active Prompt: ${characterName || 'Unknown Character'}
+            </span>
          </div>
-         <pre class="system-prompt-content" style="white-space: pre-wrap; margin-top: 5px; padding: 10px; background-color: var(--bg-primary); border-radius: var(--border-radius-md); border: 1px solid var(--border-color); font-size: 0.85em; max-height: 250px; overflow-y: auto; display: none;">${character.sysprompt}</pre>
+         <pre class="system-prompt-content" style="white-space: pre-wrap; margin-top: 5px; padding: 10px; background-color: var(--bg-primary); border-radius: var(--border-radius-md); border: 1px solid var(--border-color); font-size: 0.85em; max-height: 250px; overflow-y: auto; display: none;">${promptText}</pre>
      `;
 
      // Ensure it's collapsed initially after update/creation
      activePromptDisplay.classList.add('collapsed');
-     activePromptDisplay.style.maxHeight = '40px'; // Reset max-height
+     activePromptDisplay.style.maxHeight = '64px'; // Reset max-height
      const promptContent = activePromptDisplay.querySelector('.system-prompt-content');
      if (promptContent) promptContent.style.display = 'none';
      const icon = activePromptDisplay.querySelector('.expand-icon i');
      if (icon) icon.className = 'bi bi-chevron-down';
-
-     // Adjust chat container padding dynamically? Maybe not needed with sticky position.
-     // if(chatContainerElement) chatContainerElement.style.paddingTop = `${activePromptDisplay.offsetHeight}px`;
-
 }
 
-
-// Simplified Character Modal Logic (Removed model selection from character)
+// Simplified Character Modal Logic
 function openCharacterModal(mode, character = null) {
     const modal = document.getElementById('character-modal');
     const form = document.getElementById('character-form');
@@ -2754,6 +2489,7 @@ function openCharacterModal(mode, character = null) {
     if (mode === 'create') {
         titleSpan.textContent = 'Create New Character';
         submitBtn.textContent = 'Create';
+        characterIdInput.value = ''; // Ensure ID is empty
     } else if (mode === 'edit' && character) {
         titleSpan.textContent = 'Edit Character';
         submitBtn.textContent = 'Save Changes';
@@ -2780,49 +2516,48 @@ function setupCharacterEvents() {
     const characterForm = document.getElementById('character-form');
     const cancelCreateBtn = document.getElementById('cancel-create-btn');
 
-
     characterBtn.addEventListener('click', (e) => {
-        // Toggle display, ensure it's positioned correctly relative to button
         characterPopup.style.display = characterPopup.style.display === 'none' ? 'block' : 'none';
-        e.stopPropagation(); // Prevent triggering document click listener immediately
+        e.stopPropagation();
     });
 
     characterSelect.addEventListener('change', async () => {
         const selectedCharacterId = characterSelect.value || null;
-        console.log(`Character selection changed to: ${selectedCharacterId}`);
-        localStorage.setItem('lastCharacterId', selectedCharacterId || ''); // Save selection
-
-        // Enable/disable edit/delete buttons
+        localStorage.setItem('lastCharacterId', selectedCharacterId || '');
         characterEditBtn.disabled = !selectedCharacterId;
         characterDeleteBtn.disabled = !selectedCharacterId;
 
-        // Update the active character for the *current chat*
+        // Fetch character details to get prompt text
+         let activeChar = null;
+         if (selectedCharacterId) {
+              try {
+                  const charResponse = await fetch(`${API_BASE}/chat/get_character/${selectedCharacterId}`);
+                   if (charResponse.ok) activeChar = await charResponse.json();
+              } catch (e) { console.error("Failed to fetch selected character details", e); }
+         }
+         state.currentCharacterId = selectedCharacterId;
+         state.activeSystemPrompt = activeChar?.sysprompt || null; // Update prompt state
+
+         // Update prompt display banner immediately
+         displayActiveSystemPrompt(activeChar?.character_name, state.activeSystemPrompt);
+
+        // Update the character association in the backend *if a chat is loaded*
         if (state.currentChatId) {
             try {
-                console.log(`Setting character ${selectedCharacterId} for chat ${state.currentChatId}`);
                 const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ character_id: selectedCharacterId })
                 });
                 if (!response.ok) throw new Error(`Failed to set character: ${await response.text()}`);
-                state.currentCharacterId = selectedCharacterId; // Update local state *after* success
-                // Reload the chat to reflect potential system prompt changes? Yes.
-                 await loadChat(state.currentChatId); // This handles displaying the prompt banner
+                console.log(`Chat ${state.currentChatId} character set to ${selectedCharacterId}`);
             } catch (error) {
                 console.error('Error setting character for chat:', error);
                 alert(`Failed to set active character: ${error.message}`);
-                // Revert dropdown?
-                characterSelect.value = state.currentCharacterId || '';
+                // Revert selection? Needs previous state.
+                // characterSelect.value = state.currentCharacterId || ''; // This might be wrong if state didn't update
             }
-        } else {
-             // No active chat, just update state for potential new chat
-             state.currentCharacterId = selectedCharacterId;
-             // Update the prompt display based on selection even without a chat
-             const characters = await fetchCharacters();
-             displayActiveSystemPrompt(selectedCharacterId, characters);
         }
-        characterPopup.style.display = 'none'; // Close popup after selection
+        characterPopup.style.display = 'none'; // Close popup
     });
 
     characterCreateBtn.addEventListener('click', () => {
@@ -2832,7 +2567,7 @@ function setupCharacterEvents() {
 
     characterEditBtn.addEventListener('click', async () => {
         const characterId = characterSelect.value;
-        if (!characterId) return; // Should be disabled, but check anyway
+        if (!characterId) return;
 
         try {
              const response = await fetch(`${API_BASE}/chat/get_character/${characterId}`);
@@ -2857,24 +2592,19 @@ function setupCharacterEvents() {
                     method: 'DELETE'
                 });
                 if (!response.ok) throw new Error(`Failed to delete character: ${await response.text()}`);
-
                 console.log(`Character ${characterId} deleted.`);
-                // If the deleted character was active, clear the state
+
+                 // If the deleted character was active, clear the state and update chat/UI
                  if (state.currentCharacterId === characterId) {
                      state.currentCharacterId = null;
-                     localStorage.removeItem('lastCharacterId'); // Clear saved selection too
-                     // If a chat is loaded, update its character to null
-                      if (state.currentChatId) {
+                     state.activeSystemPrompt = null;
+                     localStorage.removeItem('lastCharacterId');
+                     displayActiveSystemPrompt(null, null); // Clear banner
+                      if (state.currentChatId) { // Update chat if one is loaded
                           await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
-                               method: 'POST',
-                               headers: { 'Content-Type': 'application/json' },
+                               method: 'POST', headers: { 'Content-Type': 'application/json' },
                                body: JSON.stringify({ character_id: null })
                           });
-                           // Reload chat to remove prompt banner
-                           await loadChat(state.currentChatId);
-                      } else {
-                           // No chat loaded, just remove the banner
-                           displayActiveSystemPrompt(null);
                       }
                  }
                  // Refresh the dropdown list
@@ -2890,7 +2620,7 @@ function setupCharacterEvents() {
 
     // Close popup if clicked outside
     document.addEventListener('click', (e) => {
-        if (!characterBtn.contains(e.target) && !characterPopup.contains(e.target)) {
+        if (characterPopup.style.display === 'block' && !characterBtn.contains(e.target) && !characterPopup.contains(e.target)) {
             characterPopup.style.display = 'none';
         }
     });
@@ -2901,39 +2631,33 @@ function setupCharacterEvents() {
         const mode = e.target.dataset.mode;
         const name = document.getElementById('character-name').value.trim();
         const sysprompt = document.getElementById('character-sysprompt').value.trim();
-        const characterId = document.getElementById('character-id').value; // Only used in edit mode
+        const characterId = document.getElementById('character-id').value;
 
         if (!name || !sysprompt) {
             alert('Character Name and System Prompt are required.');
             return;
         }
 
-        const characterData = { character_name: name, sysprompt, settings: {} }; // Settings not used currently
+        const characterData = { character_name: name, sysprompt, settings: {} };
 
         try {
              let response;
-             let newCharacterId = null;
+             let outcomeCharacterId = null;
              if (mode === 'create') {
                  console.log("Creating character:", characterData);
                  response = await fetch(`${API_BASE}/chat/create_character`, {
-                     method: 'POST',
-                     headers: { 'Content-Type': 'application/json' },
+                     method: 'POST', headers: { 'Content-Type': 'application/json' },
                      body: JSON.stringify(characterData)
                  });
-                  if (response.ok) {
-                     const respData = await response.json();
-                     newCharacterId = respData.character_id;
-                  }
+                 if (response.ok) outcomeCharacterId = (await response.json()).character_id;
              } else if (mode === 'edit' && characterId) {
                   console.log(`Updating character ${characterId}:`, characterData);
                  response = await fetch(`${API_BASE}/chat/update_character/${characterId}`, {
-                     method: 'PUT',
-                     headers: { 'Content-Type': 'application/json' },
+                     method: 'PUT', headers: { 'Content-Type': 'application/json' },
                      body: JSON.stringify(characterData)
                  });
-             } else {
-                  throw new Error("Invalid form mode or missing character ID for edit.");
-             }
+                 if (response.ok) outcomeCharacterId = characterId;
+             } else { throw new Error("Invalid form mode or missing character ID for edit."); }
 
              if (!response.ok) {
                  const errorData = await response.json().catch(() => ({ detail: response.statusText }));
@@ -2941,22 +2665,19 @@ function setupCharacterEvents() {
              }
 
              console.log(`Character ${mode === 'create' ? 'created' : 'updated'} successfully.`);
-             characterModal.style.display = 'none'; // Close modal on success
+             characterModal.style.display = 'none';
              await populateCharacterSelect(); // Refresh dropdown
 
-             // If editing the currently active character, reload the chat/prompt display
-             if (mode === 'edit' && state.currentCharacterId === characterId) {
-                  if (state.currentChatId) {
-                       await loadChat(state.currentChatId);
-                  } else {
-                       const characters = await fetchCharacters();
-                       displayActiveSystemPrompt(characterId, characters);
-                  }
-             } else if (mode === 'create' && newCharacterId) {
-                  // Optionally select the newly created character?
-                   characterSelect.value = newCharacterId;
-                   characterSelect.dispatchEvent(new Event('change')); // Trigger change handler to apply it
-             }
+             // Update prompt display if the active character was edited, or select new one
+              if (mode === 'edit' && state.currentCharacterId === outcomeCharacterId) {
+                   state.activeSystemPrompt = sysprompt; // Update state directly
+                   displayActiveSystemPrompt(name, sysprompt); // Update banner
+              } else if (mode === 'create' && outcomeCharacterId) {
+                  // Select the newly created character
+                   characterSelect.value = outcomeCharacterId;
+                   // Manually trigger the change handler logic (which updates state and backend if chat loaded)
+                   await characterSelect.dispatchEvent(new Event('change')); // Trigger change event
+              }
 
         } catch (error) {
              console.error(`Error saving character (mode: ${mode}):`, error);
@@ -2976,145 +2697,86 @@ function setupCharacterEvents() {
     });
 }
 
+
 // --- Chat Actions ---
 
 function startNewChat() {
     console.log("Starting new chat...");
-    state.currentChatId = null;
-    state.messages = [];
-    messagesWrapper.innerHTML = ''; // Clear messages display
-    welcomeContainer.style.display = 'flex'; // Show welcome message
-    localStorage.removeItem('lastChatId'); // Clear last chat ID
-    highlightCurrentChatInSidebar(); // De-select in sidebar
+    if (state.streamController) {
+         alert("Please wait for the current response to finish or stop it first."); return;
+    }
+    state.currentChatId = null; state.messages = [];
+    messagesWrapper.innerHTML = ''; welcomeContainer.style.display = 'flex';
+    localStorage.removeItem('lastChatId'); highlightCurrentChatInSidebar();
     messageInput.focus();
-
-    // Keep the selected character active for the new chat
     const selectedCharacterId = document.getElementById('character-select').value || null;
     state.currentCharacterId = selectedCharacterId;
-     if (selectedCharacterId) {
-          // Fetch characters if needed to display prompt banner for new chat
-          fetchCharacters().then(characters => {
-               displayActiveSystemPrompt(selectedCharacterId, characters);
-          });
+    if (selectedCharacterId) {
+         fetchCharacters().then(characters => { // TODO: Cache characters
+             const selectedChar = characters.find(c => c.character_id === selectedCharacterId);
+             state.activeSystemPrompt = selectedChar?.sysprompt;
+             displayActiveSystemPrompt(selectedChar?.character_name, state.activeSystemPrompt);
+         });
      } else {
-          displayActiveSystemPrompt(null); // Ensure no prompt shown if "No Character" selected
+         state.activeSystemPrompt = null; displayActiveSystemPrompt(null, null);
      }
-
-     // Clear file/image previews
-     state.currentImages = [];
-     state.currentTextFiles = [];
-     imagePreviewContainer.innerHTML = '';
-     adjustTextareaHeight();
+    state.currentImages = []; state.currentTextFiles = [];
+    imagePreviewContainer.innerHTML = ''; adjustTextareaHeight();
 }
 
 async function deleteCurrentChat() {
-    if (!state.currentChatId) {
-         alert("No chat selected to delete.");
-         return;
-    }
-
+    if (!state.currentChatId) { alert("No chat selected to delete."); return; }
+     if (state.streamController) { alert("Please wait for the current response to finish or stop it before deleting."); return; }
     const chatPreview = state.chats.find(c => c.chat_id === state.currentChatId)?.preview || `Chat ${state.currentChatId.substring(0,6)}`;
-    if (!confirm(`Are you sure you want to permanently delete this chat?\n"${chatPreview}"`)) {
-        return;
-    }
-
+    if (!confirm(`Are you sure you want to permanently delete this chat?\n"${chatPreview}"`)) { return; }
     console.log(`Deleting chat: ${state.currentChatId}`);
-
     try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}`, {
-            method: 'DELETE'
-        });
-        if (!response.ok) {
-             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
-            throw new Error(`Failed to delete chat: ${errorData.detail || response.statusText}`);
-        }
-
+        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}`, { method: 'DELETE' });
+        if (!response.ok) { throw new Error(`Failed to delete chat: ${await response.text()}`); }
         console.log(`Chat ${state.currentChatId} deleted successfully.`);
-        const deletedChatId = state.currentChatId; // Store ID before clearing state
-
-        // Go to new chat state
-        startNewChat();
-
-        // Remove deleted chat from the list in the UI
-        state.chats = state.chats.filter(c => c.chat_id !== deletedChatId);
+        const deletedChatId = state.currentChatId;
+        startNewChat(); // Go to new chat state
+        state.chats = state.chats.filter(c => c.chat_id !== deletedChatId); // Update local list
         renderChatList(); // Re-render sidebar
-
-        // Load the next chat if available? Or stay on new chat? Stay on new chat is simpler.
-
-
-    } catch (error) {
-        console.error('Error deleting chat:', error);
-        alert(`Failed to delete chat: ${error.message}`);
-        // Optionally add error as system message?
-        // addSystemMessage(`Error deleting chat: ${error.message}`, "error");
-    }
+    } catch (error) { console.error('Error deleting chat:', error); alert(`Failed to delete chat: ${error.message}`); }
 }
 
+// --- Theme & Settings ---
 function setupThemeSwitch() {
-    const settingsBtn = document.getElementById('settings-btn');
+    // const settingsBtn = document.getElementById('settings-btn'); // Setup in setupEventListeners
     const themeModal = document.getElementById('theme-modal');
-    // REMOVED: colorPicker, applyColorBtn references
-
-    // Define themes (ensure these variables are used in style.css)
+    // Define themes
     const themes = {
         white: {
-            '--bg-primary': '#ffffff',
-            '--bg-secondary': '#f7f7f7',
-            '--bg-tertiary': '#f0f0f0',
-            '--accent-color': '#101010', // Predefined accent
-            '--text-primary': '#1f2328',
-            '--text-secondary': '#57606a',
-            '--accent-hover': '#1f2328', // Based on predefined accent or a fixed hover
-            '--accent-color-highlight': '#1f2328', // Based on predefined accent
-            '--error-color': '#d73a49',
-            '--message-user': '#f0f0f0',
-            '--message-assistant': '#ffffff',
-            '--scrollbar-bg': '#f0f0f0',
-            '--scrollbar-thumb': '#cccccc',
-            '--border-color': '#d0d7de',
+            '--bg-primary': '#ffffff', '--bg-secondary': '#f7f7f7', '--bg-tertiary': '#f0f0f0',
+            '--text-primary': '#1f2328', '--text-secondary': '#57606a', '--accent-color': '#101010',
+            '--accent-hover': '#1f2328', '--accent-color-highlight': '#1f2328', '--error-color': '#d73a49',
+            '--message-user': '#f0f0f0', '--message-assistant': '#ffffff', '--scrollbar-bg': '#f0f0f0',
+            '--scrollbar-thumb': '#cccccc', '--border-color': '#d0d7de',
         },
         solarized: {
-            '--bg-primary': '#fdf6e3',   // base3
-            '--bg-secondary': '#eee8d5', // base2
-            '--bg-tertiary': '#e8e1cf',   // Adjusted tertiary
-            '--text-primary': '#657b83', // base00
-            '--text-secondary': '#839496', // base0
-            '--accent-color': '#d4c4a8', // Changed to warm cream
-            '--accent-hover': '#657b83', // Predefined hover (Lighter blue)
-            '--accent-color-highlight': '#657b83', // Matching new accent
-            '--error-color': '#dc322f', // red
-            '--message-user': '#eee8d5',
-            '--message-assistant': '#fdf6e3',
-            '--scrollbar-bg': '#eee8d5',
-            '--scrollbar-thumb': '#93a1a1', // base01
-            '--border-color': '#d9cfb3',   // Adjusted border
+            '--bg-primary': '#fdf6e3', '--bg-secondary': '#eee8d5', '--bg-tertiary': '#e8e1cf',
+            '--text-primary': '#657b83', '--text-secondary': '#839496', '--accent-color': '#d4c4a8',
+            '--accent-hover': '#657b83', '--accent-color-highlight': '#657b83', '--error-color': '#dc322f',
+            '--message-user': '#eee8d5', '--message-assistant': '#fdf6e3', '--scrollbar-bg': '#eee8d5',
+            '--scrollbar-thumb': '#93a1a1', '--border-color': '#d9cfb3',
         },
         dark: {
-            '--bg-primary': '#121212',
-            '--bg-secondary': '#1a1a1a',
-            '--bg-tertiary': '#101010',
-            '--text-primary': '#e0e0e0',
-            '--text-secondary': '#a0a0a0',
-            '--accent-color': '#2c2c2c', // Changed to cool black
-            '--accent-hover': '#1a1a1a',
-            '--accent-color-highlight': '#e0e0e0', // Based on new accent
-            '--error-color': '#cf6679',
-            '--message-user': '#1e1e1e',
-            '--message-assistant': '#1a1a1a',
-            '--scrollbar-bg': '#1a1a1a',
-            '--scrollbar-thumb': '#424242',
-            '--border-color': '#333333',
+            '--bg-primary': '#121212', '--bg-secondary': '#1a1a1a', '--bg-tertiary': '#101010',
+            '--text-primary': '#e0e0e0', '--text-secondary': '#a0a0a0', '--accent-color': '#2c2c2c',
+            '--accent-hover': '#1a1a1a', '--accent-color-highlight': '#e0e0e0', '--error-color': '#cf6679',
+            '--message-user': '#1e1e1e', '--message-assistant': '#1a1a1a', '--scrollbar-bg': '#1a1a1a',
+            '--scrollbar-thumb': '#424242', '--border-color': '#333333',
         }
     };
 
     function applyTheme(themeName) {
          const theme = themes[themeName] || themes.dark; // Default to dark
-         const customStyle = document.createElement('style');
+         const customStyle = document.createElement('style'); // For dynamic background
 
          Object.entries(theme).forEach(([prop, value]) => {
              document.documentElement.style.setProperty(prop, value);
          });
-         // REMOVED: call to updateAccentColorRGB
 
          // Update highlight.js theme
          const highlightThemeLink = document.getElementById('highlight-theme');
@@ -3126,32 +2788,27 @@ function setupThemeSwitch() {
             highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/stackoverflow-dark.css';
          }
 
-         customStyle.textContent = `
-         pre code.hljs {
-             background: var(--bg-tertiary) !important;
-         }
-         `;
-        document.head.appendChild(customStyle);
+          // Ensure custom style for background exists or update it
+          let dynamicStyle = document.getElementById('dynamic-hljs-bg');
+          if (!dynamicStyle) {
+               dynamicStyle = document.createElement('style');
+               dynamicStyle.id = 'dynamic-hljs-bg';
+               document.head.appendChild(dynamicStyle);
+          }
+          dynamicStyle.textContent = `
+          pre code.hljs {
+              background: var(--bg-tertiary) !important;
+          }
+          .code-block-wrapper { /* Ensure wrapper also gets background */
+              background: var(--bg-tertiary) !important;
+          }
+          `;
 
          // Re-highlight existing code blocks after theme change
-          setTimeout(() => { // Timeout ensures CSS is applied
+          setTimeout(() => {
               messagesWrapper.querySelectorAll('pre code').forEach(block => {
-                   try {
-                        const preElement = block.parentElement;
-                        if (preElement && preElement.tagName === 'PRE') {
-                            // Check if it needs wrapping or just re-highlighting
-                             if (!preElement.closest('.code-block-wrapper')) {
-                                const codeText = block.textContent;
-                                const langClass = block.className.split(' ').find(cls => cls.startsWith('language-'));
-                                const lang = langClass ? langClass.substring(9) : '';
-                                const wrapper = createCodeBlockWithContent(codeText, lang); // Use updated function
-                                preElement.replaceWith(wrapper);
-                            } else {
-                                // Already wrapped, just re-highlight the block
-                                hljs.highlightElement(block);
-                            }
-                        }
-                   } catch (e) { console.error("Error re-highlighting:", e); }
+                   try { hljs.highlightElement(block); }
+                   catch (e) { console.error("Error re-highlighting:", e); }
               });
           }, 100);
 
@@ -3160,54 +2817,119 @@ function setupThemeSwitch() {
     }
 
     // --- Event Listeners for Theme Modal ---
-    settingsBtn.addEventListener('click', (e) => {
-        themeModal.style.display = 'flex';
-        e.stopPropagation();
-    });
+    // Settings button click listener added in setupEventListeners
 
-    // Listener for theme buttons (White, Solarized, Dark)
+    // Listener for theme option buttons
     document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
-        button.addEventListener('click', () => {
-            applyTheme(button.dataset.theme);
-            // Close modal after selecting a theme
-            themeModal.style.display = 'none';
-        });
+        button.addEventListener('click', () => { applyTheme(button.dataset.theme); });
     });
-
-    // REMOVED: Event listener for applyColorBtn
-    // REMOVED: Event listeners for theme-preset elements
 
     // Close modal on background click
-    themeModal.addEventListener('click', (e) => {
-        if (e.target === themeModal) {
-            themeModal.style.display = 'none';
-        }
-    });
+    themeModal.addEventListener('click', (e) => { if (e.target === themeModal) themeModal.style.display = 'none'; });
 
     // Apply saved theme on initial load
-    const savedTheme = localStorage.getItem('theme') || 'dark'; // Default to dark
+    const savedTheme = localStorage.getItem('theme') || 'dark';
     applyTheme(savedTheme);
-    // REMOVED: Loading and applying saved accent color
 }
 
-// Add System Message utility (for frontend errors/info)
+function setupGenerationSettings() {
+    const genSettingsBtn = document.getElementById('gen-settings-btn');
+    const modal = document.getElementById('gen-settings-modal');
+    const applyBtn = document.getElementById('apply-gen-settings');
+    const cancelBtn = document.getElementById('cancel-gen-settings');
+
+    genSettingsBtn.addEventListener('click', () => { updateSlidersUI(); modal.style.display = 'flex'; });
+    applyBtn.addEventListener('click', () => {
+        // Read values from UI and update defaultGenArgs
+        defaultGenArgs.temperature = document.getElementById('temp-none').checked ? null : parseFloat(document.getElementById('temp-slider').value);
+        defaultGenArgs.min_p = document.getElementById('minp-none').checked ? null : parseFloat(document.getElementById('minp-slider').value);
+        defaultGenArgs.max_tokens = document.getElementById('maxt-none').checked ? null : parseInt(document.getElementById('maxt-slider').value);
+        // Add top_p if slider exists
+        const topPSlider = document.getElementById('topp-slider'); // Assuming it might exist
+        if (topPSlider) {
+             defaultGenArgs.top_p = document.getElementById('topp-none').checked ? null : parseFloat(topPSlider.value);
+        } else {
+             defaultGenArgs.top_p = null; // Ensure it's null if slider doesn't exist
+        }
+
+        localStorage.setItem('genArgs', JSON.stringify(defaultGenArgs));
+        modal.style.display = 'none';
+    });
+    cancelBtn.addEventListener('click', () => modal.style.display = 'none');
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.style.display = 'none'; });
+
+    const settingsConfig = [
+        { prefix: 'temp', defaultVal: 0.7, stateKey: 'temperature' },
+        { prefix: 'minp', defaultVal: 0.05, stateKey: 'min_p' },
+        { prefix: 'maxt', defaultVal: 1024, stateKey: 'max_tokens' },
+        // { prefix: 'topp', defaultVal: 0.9, stateKey: 'top_p' }, // Uncomment if top_p slider added
+    ];
+    settingsConfig.forEach(({ prefix, defaultVal, stateKey }) => {
+        const slider = document.getElementById(`${prefix}-slider`);
+        const valueSpan = document.getElementById(`${prefix}-value`);
+        const noneCheckbox = document.getElementById(`${prefix}-none`);
+
+        if (!slider || !valueSpan || !noneCheckbox) return; // Skip if elements don't exist
+
+        slider.addEventListener('input', () => {
+            valueSpan.textContent = slider.value;
+            if (noneCheckbox.checked) {
+                 noneCheckbox.checked = false; // Uncheck 'None' if slider is moved
+                 slider.disabled = false;
+            }
+        });
+
+        noneCheckbox.addEventListener('change', () => {
+            slider.disabled = noneCheckbox.checked;
+            valueSpan.textContent = noneCheckbox.checked ? 'None' : slider.value;
+            if (noneCheckbox.checked) {
+                 // Optional: Reset slider to default when 'None' is checked?
+                 // slider.value = defaultVal;
+            }
+        });
+    });
+    function updateSlidersUI() {
+        settingsConfig.forEach(({ prefix, stateKey }) => {
+             const slider = document.getElementById(`${prefix}-slider`);
+             const valueSpan = document.getElementById(`${prefix}-value`);
+             const noneCheckbox = document.getElementById(`${prefix}-none`);
+
+             if (!slider || !valueSpan || !noneCheckbox) return;
+
+             const currentValue = defaultGenArgs[stateKey];
+            const isNone = currentValue === null || currentValue === undefined;
+
+            noneCheckbox.checked = isNone;
+            slider.disabled = isNone;
+            if (isNone) {
+                 valueSpan.textContent = 'None';
+                 // Keep slider value or reset to default? Keep current value.
+                 // slider.value = slider.defaultValue;
+            } else {
+                 slider.value = currentValue;
+                 valueSpan.textContent = currentValue;
+            }
+        });
+    }
+    updateSlidersUI(); // Initial UI update
+}
+
+// --- Utilities ---
 function addSystemMessage(text, type = "info") { // type can be 'info', 'error', 'warning'
      console.log(`System Message [${type}]: ${text}`);
      const messageRow = document.createElement('div');
-     // Use distinct classes, not reusing message-row system-row if that's removed
-     messageRow.className = `system-info-row ${type}`;
+     messageRow.className = `system-info-row ${type}`; // Use distinct classes
      messageRow.style.cssText = `
-        padding: 8px 20px; /* Adjust padding */
-        margin: 5px auto; /* Center with auto margins */
-        max-width: 800px; /* Match message width */
+        padding: 8px 20px; margin: 5px auto; max-width: 800px;
         border-radius: var(--border-radius-md);
         background-color: ${type === 'error' ? 'rgba(229, 62, 62, 0.2)' : 'color-mix(in srgb, var(--text-secondary) 10%, transparent)'};
         color: ${type === 'error' ? 'var(--error-color)' : 'var(--text-secondary)'};
         border: 1px solid ${type === 'error' ? 'var(--error-color)' : 'var(--border-color)'};
-        font-size: 0.9em;
+        font-size: 0.9em; display: flex; align-items: center; gap: 8px;
      `;
 
-     messageRow.innerHTML = `<i class="bi bi-${type === 'error' ? 'exclamation-octagon-fill' : 'info-circle-fill'}"></i> ${text}`; // Add icon
+     const iconClass = type === 'error' ? 'exclamation-octagon-fill' : (type === 'warning' ? 'exclamation-triangle-fill' : 'info-circle-fill');
+     messageRow.innerHTML = `<i class="bi bi-${iconClass}"></i> <span>${text}</span>`; // Wrap text in span
 
      messagesWrapper.appendChild(messageRow);
      scrollToBottom(); // Scroll to show the message
@@ -3215,17 +2937,12 @@ function addSystemMessage(text, type = "info") { // type can be 'info', 'error',
 
 // Scroll Utility
 function scrollToBottom(behavior = 'auto') { // 'smooth' or 'auto'
-     // Debounce or throttle this if called very frequently? Not strictly necessary yet.
      requestAnimationFrame(() => {
-         // Check if the container exists before scrolling
          if (chatContainer) {
              chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: behavior });
          }
      });
 }
 
-
 // Start the Application
-document.addEventListener('DOMContentLoaded', () => {
-    init(); // Init will call applySidebarState internally now
-});
+document.addEventListener('DOMContentLoaded', init);
