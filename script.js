@@ -166,7 +166,7 @@ async function init() {
     // fetchModels is now called within fetchProviderConfig after keys are set
     // await fetchModels();
     await fetchChats();
-    await populateCharacterSelect();
+    await populateCharacterSelect(); // Populates the dropdown
     setupCharacterEvents();
     setupEventListeners();
     adjustTextareaHeight();
@@ -194,14 +194,26 @@ async function init() {
         const savedCharacterId = localStorage.getItem('lastCharacterId');
         if (savedCharacterId) {
             document.getElementById('character-select').value = savedCharacterId;
-            const characters = await fetchCharacters();
+            const characters = await fetchCharacters(); // Fetch characters to get details
             const selectedChar = characters.find(c => c.character_id === savedCharacterId);
-            displayActiveSystemPrompt(selectedChar?.character_name, selectedChar?.sysprompt);
-            state.currentCharacterId = savedCharacterId;
-            state.activeSystemPrompt = selectedChar?.sysprompt;
+            if (selectedChar) { // Check if character still exists
+                displayActiveSystemPrompt(selectedChar.character_name, selectedChar.sysprompt);
+                state.currentCharacterId = savedCharacterId;
+                state.activeSystemPrompt = selectedChar.sysprompt;
+            } else {
+                 // Character doesn't exist anymore, clear stored ID
+                 localStorage.removeItem('lastCharacterId');
+                 displayActiveSystemPrompt(null, null);
+                 state.currentCharacterId = null;
+                 state.activeSystemPrompt = null;
+                 document.getElementById('character-select').value = ''; // Reset dropdown
+            }
         }
      }
+     // Apply sidebar state (collapsed/expanded)
      applySidebarState();
+     // *** Explicitly update character action buttons after initial setup and potential restorations ***
+     updateCharacterActionButtons();
 }
 
 
@@ -2397,80 +2409,65 @@ async function populateCharacterSelect() {
         }
     }
 
-    // Update edit/delete buttons based on selection
-    const selectedId = select.value;
-    document.getElementById('character-edit-btn').disabled = !selectedId;
-    document.getElementById('character-delete-btn').disabled = !selectedId;
+    // Update edit/delete buttons based on the FINAL selection state
+    updateCharacterActionButtons();
 }
 
 function displayActiveSystemPrompt(characterName, promptText) {
-    const mainContent = document.querySelector('.main-content');
-    let activePromptDisplay = document.getElementById('active-system-prompt');
-    const chatContainerElement = document.getElementById('chat-container');
+    const promptContainer = document.getElementById('active-prompt-container');
+    if (!promptContainer) return;
 
-    // If no prompt text, remove the display if it exists
     if (!promptText) {
-        if (activePromptDisplay) activePromptDisplay.remove();
-        if(chatContainerElement) chatContainerElement.style.paddingTop = '0'; // Reset padding
+        promptContainer.innerHTML = '';
+        promptContainer.onclick = null; // Remove listener if no prompt
+        promptContainer.style.cursor = 'default'; // Reset cursor
         return;
     }
 
-    // Create or update the display element
-    if (!activePromptDisplay) {
-        activePromptDisplay = document.createElement('div');
-        activePromptDisplay.id = 'active-system-prompt';
-        // Apply styles directly
-        activePromptDisplay.style.cssText = `
-            background: var(--message-user);
-            padding: 16px 40px;
-            position: sticky;
-            cursor: pointer;
-            overflow: hidden;
-            max-height: 64px;
-            transition: max-height 0.3s ease-in-out;
-        `;
+    const characterNameToDisplay = characterName || 'Unknown Character';
+    promptContainer.innerHTML = `
+        <i class="bi bi-person-check-fill"></i>
+        Prompt: <span class="active-prompt-name">${characterNameToDisplay}</span>
+    `; // Removed title attribute
 
-        activePromptDisplay.addEventListener('click', () => {
-            const isCollapsed = activePromptDisplay.classList.toggle('collapsed');
-            const icon = activePromptDisplay.querySelector('.expand-icon i');
-            const promptContent = activePromptDisplay.querySelector('.system-prompt-content');
+    // Add click listener to the container
+    promptContainer.onclick = () => viewSystemPromptPopup(promptText, characterNameToDisplay);
+    promptContainer.style.cursor = 'pointer'; // Ensure pointer cursor
+}
 
-            if (isCollapsed) {
-                activePromptDisplay.style.maxHeight = '64px'; // Collapsed height
-                if (icon) icon.className = 'bi bi-chevron-down';
-                if (promptContent) promptContent.style.display = 'none';
-            } else {
-                activePromptDisplay.style.maxHeight = '300px'; // Expanded height limit
-                if (icon) icon.className = 'bi bi-chevron-up';
-                if (promptContent) promptContent.style.display = 'block';
-            }
-        });
+function viewSystemPromptPopup(promptText, characterName = "System Prompt") {
+    const popup = document.createElement('div');
+    popup.className = 'attachment-popup-overlay'; // Reuse overlay class
+    popup.addEventListener('click', (e) => {
+        if (e.target === popup) popup.remove(); // Close if clicked outside
+    });
 
-            // Insert it right after the header
-            const headerElement = document.querySelector('.header');
-            if (mainContent && headerElement) {
-            headerElement.after(activePromptDisplay);
-            }
-    }
+    const container = document.createElement('div');
+    container.className = 'attachment-popup-container'; // Reuse container class
 
-    // Update content
-    activePromptDisplay.innerHTML = `
-         <div style="display: flex; align-items: center; height: 30px; padding-left: 32px;">
-            <span class="expand-icon" style="color: var(--text-secondary);"><i class="bi bi-chevron-down"></i></span>
-            <span style="font-weight: 500; color: var(--text-secondary); font-size: 0.9em; padding-left: 4px;">
-                Active Prompt: ${characterName || 'Unknown Character'}
-            </span>
-         </div>
-         <pre class="system-prompt-content" style="white-space: pre-wrap; margin-top: 5px; padding: 10px; background-color: var(--bg-primary); border-radius: var(--border-radius-md); border: 1px solid var(--border-color); font-size: 0.85em; max-height: 250px; overflow-y: auto; display: none;">${promptText}</pre>
-     `;
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'attachment-popup-close'; // Reuse close button class
+    closeBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
+    closeBtn.title = `Close ${characterName} Prompt`;
+    closeBtn.addEventListener('click', () => popup.remove());
 
-     // Ensure it's collapsed initially after update/creation
-     activePromptDisplay.classList.add('collapsed');
-     activePromptDisplay.style.maxHeight = '64px'; // Reset max-height
-     const promptContent = activePromptDisplay.querySelector('.system-prompt-content');
-     if (promptContent) promptContent.style.display = 'none';
-     const icon = activePromptDisplay.querySelector('.expand-icon i');
-     if (icon) icon.className = 'bi bi-chevron-down';
+    // Content element for the prompt text
+    const contentElement = document.createElement('pre');
+    contentElement.textContent = promptText;
+    contentElement.className = 'system-prompt-popup-text'; // Use specific class for styling if needed, or reuse attachment-popup-text
+
+    // Optional: Add a title inside the popup
+    const titleElement = document.createElement('h4');
+    titleElement.textContent = `${characterName} - System Prompt`;
+    titleElement.style.color = "var(--text-primary)";
+    titleElement.style.marginTop = "10px"; // Adjust spacing as needed
+    titleElement.style.textAlign = "center";
+
+    container.appendChild(closeBtn);
+    container.appendChild(titleElement); // Add title
+    container.appendChild(contentElement);
+    popup.appendChild(container);
+    document.body.appendChild(popup);
 }
 
 // Simplified Character Modal Logic
@@ -2524,8 +2521,7 @@ function setupCharacterEvents() {
     characterSelect.addEventListener('change', async () => {
         const selectedCharacterId = characterSelect.value || null;
         localStorage.setItem('lastCharacterId', selectedCharacterId || '');
-        characterEditBtn.disabled = !selectedCharacterId;
-        characterDeleteBtn.disabled = !selectedCharacterId;
+        updateCharacterActionButtons(); // Update buttons immediately
 
         // Fetch character details to get prompt text
          let activeChar = null;
@@ -2553,8 +2549,6 @@ function setupCharacterEvents() {
             } catch (error) {
                 console.error('Error setting character for chat:', error);
                 alert(`Failed to set active character: ${error.message}`);
-                // Revert selection? Needs previous state.
-                // characterSelect.value = state.currentCharacterId || ''; // This might be wrong if state didn't update
             }
         }
         characterPopup.style.display = 'none'; // Close popup
@@ -2607,8 +2601,9 @@ function setupCharacterEvents() {
                           });
                       }
                  }
-                 // Refresh the dropdown list
+                 // Refresh the dropdown list & update buttons
                  await populateCharacterSelect();
+
 
             } catch (error) {
                 console.error('Error deleting character:', error);
@@ -2666,18 +2661,16 @@ function setupCharacterEvents() {
 
              console.log(`Character ${mode === 'create' ? 'created' : 'updated'} successfully.`);
              characterModal.style.display = 'none';
-             await populateCharacterSelect(); // Refresh dropdown
+             await populateCharacterSelect(); // Refresh dropdown (this now updates buttons too)
 
-             // Update prompt display if the active character was edited, or select new one
-              if (mode === 'edit' && state.currentCharacterId === outcomeCharacterId) {
-                   state.activeSystemPrompt = sysprompt; // Update state directly
-                   displayActiveSystemPrompt(name, sysprompt); // Update banner
-              } else if (mode === 'create' && outcomeCharacterId) {
-                  // Select the newly created character
-                   characterSelect.value = outcomeCharacterId;
-                   // Manually trigger the change handler logic (which updates state and backend if chat loaded)
-                   await characterSelect.dispatchEvent(new Event('change')); // Trigger change event
-              }
+             // Reselect the character after create/edit and trigger update
+             if (outcomeCharacterId) {
+                 characterSelect.value = outcomeCharacterId;
+                 // Trigger change event programmatically to ensure state/UI/backend sync
+                 await characterSelect.dispatchEvent(new Event('change', { bubbles: true }));
+             }
+             updateCharacterActionButtons(); // Explicitly update buttons after potential reselection
+
 
         } catch (error) {
              console.error(`Error saving character (mode: ${mode}):`, error);
@@ -2697,6 +2690,13 @@ function setupCharacterEvents() {
     });
 }
 
+// Helper function to update character action button states
+function updateCharacterActionButtons() {
+     const select = document.getElementById('character-select');
+     const selectedId = select.value;
+     document.getElementById('character-edit-btn').disabled = !selectedId;
+     document.getElementById('character-delete-btn').disabled = !selectedId;
+}
 
 // --- Chat Actions ---
 

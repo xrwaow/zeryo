@@ -247,23 +247,72 @@ body.highlight-drop::after {
 /* Header */
 .header {
     position: fixed;
-    right: 0;
-    padding: 12px 20px;
+    top: 0; /* Explicitly set top */
+    left: 0; /* Explicitly set left */
+    width: 100%; /* Take full width to position items correctly */
+    background-color: transparent; /* Give header a background */
+    padding: 0 20px 0 60px; /* Add left padding for sidebar toggle */
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    align-items: center; /* Vertically center items */
+    justify-content: space-between; /* Space out left (prompt) and right (actions) */
     z-index: 5;
     height: 60px;
+}
+
+/* Container for prompt display in header */
+.active-prompt-container {
+    color: var(--text-secondary);
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    gap: 6px; /* Space between icon and text */
+    overflow: hidden; /* Prevent overflow */
+    white-space: nowrap; /* Keep on one line */
+    text-overflow: ellipsis; /* Add ellipsis if too long */
+    flex-shrink: 1; /* Allow shrinking */
+    max-width: calc(100% - 250px); /* Limit width to avoid overlap with buttons */
+    cursor: pointer; /* Make the whole container clickable */
+    padding: 4px 8px; /* Add some padding */
+    border-radius: var(--border-radius-md);
+    transition: background-color 0.2s ease;
+}
+.active-prompt-container:hover {
+     background-color: color-mix(in srgb, var(--text-secondary) 10%, transparent); /* Subtle hover */
+}
+
+/* Style for the prompt name within the header display */
+.active-prompt-name {
+    color: var(--text-primary); /* Use primary text color for name */
+    font-weight: 500;
+    text-overflow: ellipsis;
+    overflow: hidden;
+    /* cursor: help; - removed */
+}
+
+.system-prompt-popup-text {
+    background-color: var(--bg-primary); /* Background for text */
+    color: var(--text-primary);
+    padding: 15px;
+    border-radius: var(--border-radius-md);
+    margin-top: 30px; /* Space below close button */
+    white-space: pre-wrap; /* Preserve whitespace */
+    word-wrap: break-word; /* Wrap long lines */
+    max-height: calc(90vh - 80px); /* Scrollable */
+    overflow: auto;
+    font-family: 'Inter', sans-serif; /* Regular font */
+    font-size: 14px;
+    line-height: 1.6;
 }
 
 .header-actions {
     display: flex;
     gap: 10px;
-    margin-left: auto; /* Push actions to the right */
+    margin-left: auto; /* Keep actions pushed to the right */
+    flex-shrink: 0; /* Prevent actions from shrinking */
 }
 
 .header-btn {
-    background-color: var(--bg-secondary);
+    background-color: var(--bg-tertiary); /* Use tertiary for buttons */
     border: 1px solid var(--border-color);
     color: var(--text-secondary);
     font-size: 16px;
@@ -278,7 +327,7 @@ body.highlight-drop::after {
 }
 
 .header-btn:hover {
-    background-color: var(--bg-tertiary);
+    background-color: var(--bg-secondary); /* Slightly darker on hover */
     color: var(--accent-color);
     border-color: var(--accent-color);
 }
@@ -288,7 +337,8 @@ body.highlight-drop::after {
 .chat-container {
     flex: 1;
     overflow-y: auto;
-    padding: 0;
+    padding: 0; /* Remove padding */
+    padding-top: 60px; /* Add top padding equal to header height */
     display: flex;
     flex-direction: column;
     scroll-behavior: smooth;
@@ -299,7 +349,8 @@ body.highlight-drop::after {
     flex: 1;
     display: flex;
     flex-direction: column;
-    
+    padding: 0 20px; /* Add horizontal padding back */
+
 }
 
 /* Message Row */
@@ -401,6 +452,7 @@ body.highlight-drop::after {
 .code-header-actions {
     display: flex;
     gap: 6px;
+    align-items: center; /* Align items vertically */
 }
 
 .code-header-btn {
@@ -686,7 +738,7 @@ body.highlight-drop::after {
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 100%;
+    height: calc(100% - 60px); /* Adjust height considering header */
     max-width: 600px;
     margin: 0 auto;
     padding: 20px;
@@ -718,6 +770,28 @@ body.highlight-drop::after {
     }
     .sidebar.show {
         transform: translateX(0);
+    }
+    /* Adjust header for mobile */
+    .header {
+         padding: 0 10px; /* Less padding */
+    }
+    .active-prompt-container {
+         max-width: calc(100% - 180px); /* Less max-width */
+         font-size: 13px;
+    }
+    .header-actions {
+         gap: 5px; /* Less gap */
+    }
+     .header-btn {
+         width: 32px;
+         height: 32px;
+         font-size: 14px;
+     }
+    .messages-wrapper {
+        padding: 0 10px; /* Less horizontal padding */
+    }
+    .welcome-container {
+        height: calc(100% - 60px);
     }
 }
 
@@ -787,13 +861,13 @@ body.highlight-drop::after {
 .message-content table { border-collapse: collapse; margin-bottom: 16px; width: 100%; }
 .message-content table th, .message-content table td { padding: 6px 13px; border: 1px solid var(--border-color); }
 .message-content table tr:nth-child(2n) { background-color: rgba(255, 255, 255, 0.05); }
-.message-content code:not(pre code) { 
-    font-family: 'JetBrains Mono', monospace; 
+.message-content code:not(pre code) {
+    font-family: 'JetBrains Mono', monospace;
     background-color: color-mix(in srgb, var(--text-secondary) 20%, transparent);
-    border-radius: var(--border-radius-sm); 
+    border-radius: var(--border-radius-sm);
     padding: 1px;
     /*cursor: pointer; 8*/
-    transition: background-color 0.2s ease; 
+    transition: background-color 0.2s ease;
 }
 
 .message-content.editing textarea {
@@ -863,6 +937,7 @@ body.highlight-drop::after {
     padding: 10px;
     z-index: 10;
     width: 220px; /* Adjust width as needed */
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2); /* Add subtle shadow */
 }
 .character-select { /* Style for the select dropdown inside popup */
     width: 100%;
@@ -922,6 +997,10 @@ body.highlight-drop::after {
     width: 100%;
     margin-bottom: 5px;
 }
+.character-popup button:last-of-type {
+    margin-bottom: 0; /* Remove margin from last button */
+}
+
 
 /* Character Modal */
 .character-modal {

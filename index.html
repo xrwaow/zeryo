@@ -64,6 +64,10 @@
     <div class="main-content">
         <div class="chat-container" id="chat-container">
             <div class="header">
+                 <!-- Active Prompt Display Area -->
+                 <div id="active-prompt-container" class="active-prompt-container">
+                      <!-- Content injected by JS -->
+                 </div>
                 <div class="header-actions">
                     <button class="header-btn" id="clear-chat-btn" title="Clear chat">
                         <i class="bi bi-trash"></i>
@@ -71,9 +75,9 @@
                     <button class="header-btn" id="gen-settings-btn" title="Generation Settings">
                         <i class="bi bi-sliders"></i>
                     </button>
-                    <div class="header-btn">
-                        <i id="settings-btn" class="bi bi-gear"></i>
-                    </div>
+                    <button class="header-btn" id="settings-btn" title="Appearance Settings">
+                        <i class="bi bi-gear"></i>
+                    </button>
                 </div>
             </div>
             <div class="welcome-container" id="welcome-container">
