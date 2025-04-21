@@ -1,0 +1,4 @@
+openrouter: "openrouter_key"
+google: "AIza-yourgoogleaikeyhere"
+local_api_key: "waow"
+local_base_url: "http://127.0.0.1:8080"
