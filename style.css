@@ -607,9 +607,6 @@ body.welcome-active .input-area .input-container {
     flex-direction: column; /* Stack elements vertically */
     transition: border-color 0.2s ease;
 }
-.input-container:focus-within {
-    border-color: var(--text-primary); /* Highlight border on focus */
-}
 
 .image-preview-container {
     display: flex;
