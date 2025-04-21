@@ -20,7 +20,6 @@
     --error-color: #e53e3e;
     --error-hover: #ff6666;
     --message-user: #141419;
-    --message-assistant: #0d0d12;
     --scrollbar-bg: #1a1a24;
     --scrollbar-thumb: #38383f;
     --border-color: #2a2a38;
@@ -54,13 +53,17 @@
 
 /* Body Styles */
 body {
-    background-color: var(--bg-primary);
+    background-color: var(--bg-secondary);
     color: var(--text-primary);
     height: 100vh;
     display: flex;
     overflow: hidden;
     font-size: 15px;
     line-height: 1.5;
+}
+
+a{
+    color: var(--text-secondary);
 }
 
 /* Highlight Drop Effect */
@@ -587,7 +590,7 @@ body.welcome-active .input-area .input-container {
     bottom: 0;
     left: 0; /* Adjust if sidebar is persistent */
     right: 0;
-    padding: 0px 0 25px 0; /* Adjust padding */
+    padding: 0px 0px 8px 0px; /* Adjust padding */
     transition: left 0.3s ease;
     pointer-events: none; /* Allow clicks to pass through gradient */
 }
@@ -605,7 +608,7 @@ body.welcome-active .input-area .input-container {
     transition: border-color 0.2s ease;
 }
 .input-container:focus-within {
-    border-color: var(--accent-color); /* Highlight border on focus */
+    border-color: var(--text-primary); /* Highlight border on focus */
 }
 
 .image-preview-container {
@@ -1647,4 +1650,3 @@ body.welcome-active .input-area .input-container {
     font-style: italic;
     font-size: 0.9em;
 }
-

@@ -3599,7 +3599,7 @@ function setupThemeSwitch() {
             '--bg-primary': '#ffffff', '--bg-secondary': '#f7f7f7', '--bg-tertiary': '#f0f0f0',
             '--text-primary': '#1f2328', '--text-secondary': '#57606a', '--accent-color': '#101010',
             '--accent-hover': '#1f2328', '--accent-color-highlight': 'rgba(31, 35, 40, 0.3)', '--error-color': '#d73a49', '--error-hover': '#b22222',
-            '--message-user': '#f0f0f0', '--message-assistant': '#ffffff', '--scrollbar-bg': '#f0f0f0',
+            '--message-user': '#f0f0f0', '--scrollbar-bg': '#f0f0f0',
             '--scrollbar-thumb': '#cccccc', '--border-color': '#d0d7de',
              '--tool-call-bg': 'rgba(0, 0, 0, 0.03)', '--tool-call-border': '#444',
              '--tool-result-bg': 'rgba(0, 0, 0, 0.02)', '--tool-result-border': '#aaa',
@@ -3608,7 +3608,7 @@ function setupThemeSwitch() {
             '--bg-primary': '#fdf6e3', '--bg-secondary': '#eee8d5', '--bg-tertiary': '#e8e1cf',
             '--text-primary': '#657b83', '--text-secondary': '#839496', '--accent-color': '#2aa198', // Solarized Cyan
             '--accent-hover': '#217d77', '--accent-color-highlight': 'rgba(42, 161, 152, 0.3)', '--error-color': '#dc322f', '--error-hover': '#b52a27',
-            '--message-user': '#eee8d5', '--message-assistant': '#fdf6e3', '--scrollbar-bg': '#eee8d5',
+            '--message-user': '#eee8d5', '--scrollbar-bg': '#eee8d5',
             '--scrollbar-thumb': '#93a1a1', '--border-color': '#d9cfb3',
             '--tool-call-bg': 'rgba(42, 161, 152, 0.08)', '--tool-call-border': '#2aa198',
             '--tool-result-bg': 'rgba(147, 161, 161, 0.08)', '--tool-result-border': '#93a1a1',
@@ -3617,11 +3617,31 @@ function setupThemeSwitch() {
             '--bg-primary': '#0a0a10', '--bg-secondary': '#0f0f15', '--bg-tertiary': '#16161e',
             '--text-primary': '#e0e0e8', '--text-secondary': '#a0a0b0', '--accent-color': '#b86a38',
             '--accent-hover': '#d07c46', '--accent-color-highlight': 'rgba(184, 106, 56, 0.3)', '--error-color': '#e53e3e', '--error-hover': '#ff6666',
-            '--message-user': '#141419', '--message-assistant': '#0d0d12', '--scrollbar-bg': '#1a1a24',
+            '--message-user': '#141419', '--scrollbar-bg': '#1a1a24',
             '--scrollbar-thumb': '#38383f', '--border-color': '#2a2a38',
             // Tool colors updated with brownish-orange theme
             '--tool-call-bg': 'rgba(184, 106, 56, 0.08)', '--tool-call-border': '#b86a38',
             '--tool-result-bg': 'rgba(184, 106, 56, 0.05)', '--tool-result-border': '#9a5a30',
+        },
+        claude_white: {
+            '--bg-primary': '#ffffff',
+            '--bg-secondary': '#f7f6f4', 
+            '--bg-tertiary': '#FDFCFA',
+            '--text-primary': '#1f2328', 
+            '--text-secondary': '#57606a', 
+            '--accent-color': '#e97c5d',
+            '--accent-hover': '#D97757', 
+            '--accent-color-highlight': '#1f2328', 
+            '--error-color': '#d73a49', 
+            '--error-hover': '#b22222',
+            '--message-user': '#f0f0f0', 
+            '--scrollbar-bg': '#f0f0f0',
+            '--scrollbar-thumb': '#cccccc', 
+            '--border-color': '#e0e0e0',
+            '--tool-call-bg': 'rgba(0, 0, 0, 0.03)', 
+            '--tool-call-border': '#444',
+            '--tool-result-bg': 'rgba(0, 0, 0, 0.02)', 
+            '--tool-result-border': '#aaa',
         }
     };
 
@@ -3638,6 +3658,8 @@ function setupThemeSwitch() {
              highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css';
          } else if (themeName === 'solarized') {
              highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/base16/solarized-light.min.css';
+        } else if (themeName === 'claude_white') {
+            highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/base16/solarized-light.min.css';
          } else { // dark theme
             highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/stackoverflow-dark.css';
          }
