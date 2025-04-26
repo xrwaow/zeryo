@@ -1,4 +1,7 @@
 save*
+new_*
+aa*
+ugh/
 *.sqlite
 api_keys.yaml
 __pycache__

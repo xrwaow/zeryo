@@ -16,13 +16,16 @@
 <body>
     <!-- Sidebar -->
     <div class="sidebar" id="sidebar">
-        <div class="sidebar-content">
-            <button class="new-chat-btn btn-primary" id="new-chat-btn">
-                <i class="bi bi-plus-lg"></i>
-                <span>New Chat</span>
-            </button>
+        <button class="sidebar-toggle" id="sidebar-toggle">
+            <i class="bi bi-chevron-left"></i>
+        </button>
+        <button class="new-chat-btn btn-primary" id="new-chat-btn">
+            <i class="bi bi-plus-lg"></i>
+            <span>New Chat</span>
+        </button>
+        <div class="history-title">Recent Conversations</div>
+        <div class="sidebar-content">            
             <div class="chat-history">
-                <div class="history-title">Recent Conversations</div>
             </div>
         </div>
 
@@ -38,9 +41,7 @@
             </div>
         </div>
     </div>
-    <button class="sidebar-toggle" id="sidebar-toggle">
-        <i class="bi bi-chevron-left"></i>
-    </button>
+    
     <div class="character-modal" id="character-modal">
         <div class="character-modal-content">
             <h3><span id="modal-title">Create New Character</span></h3>
@@ -74,6 +75,9 @@
                     <!-- Tool Toggle Button -->
                     <button class="header-btn" id="toggle-tools-btn" title="Enable/Disable Tool Calls">
                         <i class="bi bi-tools"></i>
+                    </button>
+                    <button id="toggle-codeblocks-btn" class="header-btn" title="Collapse All Code Blocks">
+                        <i class="bi bi-arrows-collapse"></i> <!-- Initial state: Expand means show collapse icon -->
                     </button>
                     <button class="header-btn" id="delete-chat-btn" title="Delete chat">
                         <i class="bi bi-trash"></i>
@@ -170,6 +174,10 @@
                 </div>
             </div>
         </div>
+        <!-- Snap to Bottom Button -->
+        <button id="scroll-to-bottom-btn" class="scroll-bottom-button" style="display: none;" title="Scroll to bottom">
+            <i class="bi bi-arrow-down"></i>
+        </button>
     </div>
     
     <script src="script.js"></script>

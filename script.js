@@ -27,7 +27,7 @@ const imagePreviewContainer = document.getElementById('image-preview-container')
 const chatHistoryContainer = document.querySelector('.chat-history');
 const toggleToolsBtn = document.getElementById('toggle-tools-btn');
 
-// State Management
+// State Management (Remove unused scroll flags)
 const state = {
     currentChatId: null,
     chats: [], // List of {chat_id, preview, timestamp_updated}
@@ -40,9 +40,7 @@ const state = {
     currentCharacterId: null,
     activeSystemPrompt: null, // Store the actual character prompt text
     effectiveSystemPrompt: null, // Character prompt + optional tools prompt
-    userHasScrolled: false,
-    lastScrollTop: 0,
-    isAutoScrolling: true,
+    followOutput: true, // NEW: Track if user wants to follow output (used only by scroll listener now)
     activeBranchInfo: {}, // { parentMessageId: { activeIndex: number, totalBranches: number } } -> Derived from messages during render
     apiKeys: { // Store keys fetched from backend /config endpoint
         openrouter: null,
@@ -56,6 +54,8 @@ const state = {
     toolContinuationContext: null,
     currentToolCallId: null, // Track the ID of the current tool call being processed
     abortingForToolCall: false,
+    scrollDebounceTimer: null, // NEW: For debouncing scroll listener
+    codeBlocksDefaultCollapsed: false, // NEW: Default state for code blocks in the current chat (false = expanded)
 };
 
 // Default generation arguments
@@ -104,21 +104,20 @@ function parseAttributes(attrsString) {
     return attributes;
 }
 
-// Render markdown with think block handling and LaTeX rendering
+// (Replace the existing renderMarkdown function with this one)
 // ADDED: Optional temporaryId for state preservation during streaming
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
-    let processedText = text || ''; // Ensure text is a string
-    const thinkBlockPlaceholder = '___THINK_BLOCK_PLACEHOLDER___';
+    let processedText = text || '';
     let html = '';
     let thinkContent = '';
     let remainingTextAfterThink = '';
     let isThinkBlockMessage = processedText.trim().startsWith('<think>');
 
+    // --- Handle Think Block ---
     if (isThinkBlockMessage) {
         const thinkStartIndex = processedText.indexOf('<think>');
         let thinkEndIndex = processedText.indexOf('</think>');
         if (thinkEndIndex === -1) {
-            thinkEndIndex = processedText.length;
             thinkContent = processedText.substring(thinkStartIndex + '<think>'.length);
             remainingTextAfterThink = '';
         } else {
@@ -126,80 +125,153 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
             remainingTextAfterThink = processedText.substring(thinkEndIndex + '</think>'.length);
         }
 
-        // --- Create Think Block Structure ---
+        // --- Create Think Block Structure (HTML string generation) ---
         const thinkBlockWrapper = document.createElement('div');
         thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
-        // Add temporary ID if provided (for state tracking during stream)
+        // *** ADDED: Assign temporary ID if provided ***
         if (temporaryId) {
             thinkBlockWrapper.dataset.tempId = temporaryId;
         }
 
-        // Header
         const header = document.createElement('div');
         header.className = 'think-header';
+        // Header Title (static)
         const titleSpan = document.createElement('span');
         titleSpan.className = 'think-header-title';
         titleSpan.innerHTML = '<i class="bi bi-lightbulb"></i> Thought Process';
         header.appendChild(titleSpan);
+        // Header Actions (toggle button)
         const actionsDiv = document.createElement('div');
         actionsDiv.className = 'think-header-actions';
         const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'think-block-toggle';
+        collapseBtn.className = 'think-block-toggle'; // Class for event delegation
         collapseBtn.innerHTML = `<i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>`;
         collapseBtn.title = `${initialCollapsedState ? 'Expand' : 'Collapse'} thought process`;
         actionsDiv.appendChild(collapseBtn);
         header.appendChild(actionsDiv);
-        thinkBlockWrapper.appendChild(header);
+        thinkBlockWrapper.appendChild(header); // Add the header to the wrapper
 
         // Content Div
         const thinkContentDiv = document.createElement('div');
         thinkContentDiv.className = 'think-content';
+        // Parse the inner think content with marked
         thinkContentDiv.innerHTML = marked.parse(thinkContent.trim());
-        // Note: Highlighting inside think block is now done in buildContentHtml *after* insertion
-        thinkBlockWrapper.appendChild(thinkContentDiv);
+        thinkBlockWrapper.appendChild(thinkContentDiv); // Add content div
 
-        html += thinkBlockWrapper.outerHTML;
-        processedText = remainingTextAfterThink;
+        html += thinkBlockWrapper.outerHTML; // Add the whole block's HTML string
+        processedText = remainingTextAfterThink; // Process text *after* the block
     }
 
-    // --- Process remaining text ---
+    // --- Process remaining text (non-think or text after think block) ---
     if (processedText) {
-        // ... (rest of the function for processing non-think text remains the same) ...
-        const parts = [];
-        let lastIndex = 0;
-        const blockRegex = /(```[\s\S]*?```)/g;
-        let match;
+        // 1. Parse the entire remaining text with marked
+        let remainingHtml = marked.parse(processedText);
 
-        while ((match = blockRegex.exec(processedText)) !== null) {
-            const beforeBlock = processedText.slice(lastIndex, match.index);
-            parts.push(beforeBlock.replace(/</g, '<').replace(/>/g, '>'));
-            parts.push(match[0]);
-            lastIndex = blockRegex.lastIndex;
-        }
-        const remaining = processedText.slice(lastIndex);
-        parts.push(remaining.replace(/</g, '<').replace(/>/g, '>'));
+        // 2. Create a temporary container to manipulate the parsed HTML
+        const tempContainer = document.createElement('div');
+        tempContainer.innerHTML = remainingHtml;
 
-        const escapedProcessedText = parts.join('');
-        let remainingHtml = marked.parse(escapedProcessedText);
+        // 3. Find and enhance all <pre> elements within the container
+        tempContainer.querySelectorAll('pre').forEach(preElement => {
+            enhanceCodeBlock(preElement); // Use the helper to replace pre with wrapped version
+        });
 
-        // LaTeX processing remains the same
-        remainingHtml = remainingHtml.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+        // 4. Process LaTeX (applied to the potentially modified HTML)
+        let finalHtml = tempContainer.innerHTML; // Get the HTML after code block enhancement
+        finalHtml = finalHtml.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
             try {
                 const decodedLatex = latex.replace(/</g, '<').replace(/>/g, '>').replace(/&/g, '&');
                 return katex.renderToString(decodedLatex.trim(), { displayMode: true, throwOnError: false });
             } catch (e) { console.error('KaTeX block rendering error:', e, "Input:", latex); return `<span class="katex-error">[Block LaTeX Error]</span>`; }
         });
-        remainingHtml = remainingHtml.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
+        finalHtml = finalHtml.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
             try {
                  const decodedLatex = latex.replace(/</g, '<').replace(/>/g, '>').replace(/&/g, '&');
                 return katex.renderToString(decodedLatex.trim(), { displayMode: false, throwOnError: false });
             } catch (e) { console.error('KaTeX inline rendering error:', e, "Input:", latex); return `<span class="katex-error">[Inline LaTeX Error]</span>`; }
         });
 
-        html += remainingHtml;
+
+        // *** Wrap remaining content in a div if it came after a think block ***
+        // This helps target it during streaming updates.
+        if (isThinkBlockMessage) {
+            // Use the same ID as buildContentHtml uses for the remaining content container
+            const remainingContentTempId = 'streaming-remaining-content';
+            html += `<div data-temp-id="${remainingContentTempId}">${finalHtml}</div>`;
+        } else {
+            html += finalHtml; // Add the processed HTML directly
+        }
     }
 
     return html;
+}
+
+/**
+ * Handles clicks on code block copy buttons (delegated).
+ * @param {HTMLButtonElement} copyBtn - The clicked copy button element.
+ */
+function handleCodeCopy(copyBtn) {
+    const wrapper = copyBtn.closest('.code-block-wrapper');
+    if (!wrapper) return;
+
+    // Retrieve raw code from the data attribute
+    const codeText = wrapper.dataset.rawCode || ''; // Use stored raw code
+
+    if (!codeText) {
+        console.warn("Could not find code text to copy.");
+        return;
+    }
+
+    navigator.clipboard.writeText(codeText).then(() => {
+        copyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Copied';
+        copyBtn.disabled = true;
+        setTimeout(() => {
+            copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
+            copyBtn.disabled = false;
+        }, 1500);
+    }).catch(err => {
+        console.error('Failed to copy code:', err);
+        copyBtn.innerHTML = 'Error'; // Indicate copy failure briefly
+         setTimeout(() => {
+             copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
+         }, 1500);
+    });
+    // No need for stopPropagation here as the main listener handles it
+}
+
+/**
+ * Handles clicks on code block collapse buttons (delegated).
+ * @param {HTMLButtonElement} collapseBtn - The clicked collapse button element.
+ */
+function handleCodeCollapse(collapseBtn) {
+    const wrapper = collapseBtn.closest('.code-block-wrapper');
+    const preElement = wrapper?.querySelector('pre'); // Find the pre element to hide/show
+    const collapseInfoSpan = wrapper?.querySelector('.collapse-info');
+    const icon = collapseBtn.querySelector('i');
+
+    if (!wrapper || !preElement || !collapseInfoSpan || !icon) {
+        console.warn("Could not find necessary elements for code collapse.");
+        return;
+    }
+
+    const isCollapsed = wrapper.classList.toggle('collapsed');
+
+    if (isCollapsed) {
+        icon.className = 'bi bi-chevron-down';
+        collapseBtn.title = 'Expand code';
+        const codeText = wrapper.dataset.rawCode || ''; // Use raw code for accurate count
+        const lines = codeText.split('\n').length;
+        const lineCount = codeText.endsWith('\n') ? lines - 1 : lines;
+        collapseInfoSpan.textContent = `${lineCount} lines hidden`;
+        collapseInfoSpan.style.display = 'inline-block';
+        preElement.style.display = 'none';
+    } else {
+        icon.className = 'bi bi-chevron-up';
+        collapseBtn.title = 'Collapse code';
+        collapseInfoSpan.style.display = 'none';
+        preElement.style.display = '';
+    }
+    // No need for stopPropagation here
 }
 
 // handleThinkBlockToggle - UPDATED to use .collapsed class
@@ -243,6 +315,53 @@ function updateEffectiveSystemPrompt() {
     console.log("Effective system prompt updated:", state.effectiveSystemPrompt ? state.effectiveSystemPrompt.substring(0, 100) + "..." : "None");
 }
 
+// --- NEW Scroll Handling Functions ---
+
+/** Debounce helper function */
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+/** Updates visibility of the scroll-to-bottom button */
+function updateScrollButtonVisibility() {
+    const scrollButton = document.getElementById('scroll-to-bottom-btn');
+    if (!chatContainer || !scrollButton) return;
+
+    // Show button only if NOT scrolled near the bottom
+    const isNearBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 30; // 30px tolerance
+    scrollButton.style.display = isNearBottom ? 'none' : 'flex'; // Use flex to match other buttons
+}
+
+/** Sets up scroll listener and button click handler */
+function setupScrollListener() {
+    const scrollButton = document.getElementById('scroll-to-bottom-btn');
+    if (!chatContainer || !scrollButton) {
+        console.error("Chat container or scroll button not found for scroll listener setup.");
+        return;
+    }
+
+    // Debounced listener for scroll events
+    chatContainer.addEventListener('scroll', debounce(updateScrollButtonVisibility, 100));
+
+    // Click listener for the button
+    scrollButton.addEventListener('click', () => {
+        chatContainer.scrollTo({
+            top: chatContainer.scrollHeight,
+            behavior: 'smooth'
+        });
+    });
+
+    // Initial check in case content is already scrollable on load
+    requestAnimationFrame(updateScrollButtonVisibility);
+}
 
 async function init() {
     // Setup fetch calls
@@ -255,21 +374,18 @@ async function init() {
     await populateCharacterSelect(); // Populates dropdown, restores last selection if any
     setupCharacterEvents();
     setupEventListeners();
+    setupScrollListener(); // NEW: Setup scroll listener for button
     adjustTextareaHeight(); // Call initially to set correct height/padding
     setupDropZone();
     setupThemeSwitch();
     setupGenerationSettings();
     setupToolToggle(); // Setup the new button listener
+    setupCodeblockToggle(); // NEW: Setup the global codeblock toggle button
 
-    // --- MODIFIED ---
-    // Always start with a new chat interface instead of loading the last one.
-    // populateCharacterSelect above already handled restoring the last selected character
-    // into the dropdown. startNewChat will read this dropdown value.
+    // Always start with a new chat interface
     startNewChat();
-    // --- END MODIFICATION ---
 
     applySidebarState(); // Apply sidebar collapsed/expanded state
-    // updateCharacterActionButtons is called by populateCharacterSelect/characterSelect change handler
 }
 
 
@@ -424,11 +540,27 @@ function renderChatList() {
         item.appendChild(icon);
         item.appendChild(text);
 
-        item.addEventListener('click', () => {
-             if (state.currentChatId !== chat.chat_id) {
-                 loadChat(chat.chat_id);
-             }
-        });
+        item.addEventListener('click', async () => { // Make the handler async
+            if (state.currentChatId !== chat.chat_id) {
+                try {
+                    // Wait for the chat to load completely
+                    await loadChat(chat.chat_id);
+
+                    // After loadChat is done and the messages are rendered,
+                    // scroll to the bottom instantly.
+                    requestAnimationFrame(() => {
+                        scrollToBottom('auto'); // Use 'auto' for instant scroll
+                    });
+
+                } catch (error) {
+                    // Handle potential errors from loadChat if necessary
+                    console.error(`Error loading chat ${chat.chat_id} from sidebar click:`, error);
+                    // Optionally display an error to the user here
+                    addSystemMessage(`Failed to load chat: ${error.message}`, "error");
+                }
+            }
+            // If it's the same chat, do nothing (no scroll needed)
+       });
 
         if (chat.chat_id === state.currentChatId) {
              item.classList.add('active');
@@ -454,15 +586,18 @@ function highlightCurrentChatInSidebar() {
 async function loadChat(chatId) {
     if (!chatId) { console.warn("loadChat called with null chatId"); startNewChat(); return; }
     console.log(`Loading chat: ${chatId}`);
-    state.isAutoScrolling = true; state.userHasScrolled = false;
-    state.toolCallPending = false; // Reset tool state on chat load
+    state.followOutput = true; // Default to following on new chat load
+    state.toolCallPending = false;
     state.toolContinuationContext = null;
 
-    // Abort any ongoing stream before loading a new chat
+    // Reset code block default when loading a chat - REMOVED THIS LINE:
+    // state.codeBlocksDefaultCollapsed = false; // <<< REMOVE THIS LINE >>>
+    // The global button state should persist for the loaded chat session.
+    updateCodeblockToggleButton(); // Still update global button state based on current state
+
     if (state.streamController && !state.streamController.signal.aborted) {
         console.log("Aborting active stream before loading new chat.");
         state.streamController.abort();
-        // Cleanup might be needed if abort doesn't trigger onError properly
         cleanupAfterGeneration();
     }
 
@@ -482,37 +617,48 @@ async function loadChat(chatId) {
         state.currentChatId = chatId;
         state.messages = chat.messages || [];
         state.currentCharacterId = chat.character_id;
-        state.activeSystemPrompt = null; // Reset base prompt
+        state.activeSystemPrompt = null;
 
         localStorage.setItem('lastChatId', chatId);
         document.getElementById('character-select').value = state.currentCharacterId || '';
+        updateCharacterActionButtons();
 
-        // Fetch character details if associated
         if (state.currentCharacterId) {
              try {
                   const charResponse = await fetch(`${API_BASE}/chat/get_character/${state.currentCharacterId}`);
                   if (charResponse.ok) {
                        const activeChar = await charResponse.json();
                        state.activeSystemPrompt = activeChar?.sysprompt || null;
-                  } else { console.warn(`Failed to fetch character ${state.currentCharacterId} details.`); }
-             } catch (charError) { console.error("Error fetching character details:", charError); }
+                  } else {
+                        console.warn(`Failed to fetch character ${state.currentCharacterId} details. Character might be deleted.`);
+                        state.currentCharacterId = null;
+                        document.getElementById('character-select').value = '';
+                        updateCharacterActionButtons();
+                  }
+             } catch (charError) {
+                console.error("Error fetching character details:", charError);
+                state.currentCharacterId = null;
+                document.getElementById('character-select').value = '';
+                updateCharacterActionButtons();
+             }
         }
-        updateEffectiveSystemPrompt(); // Update combined prompt and display banner
+        updateEffectiveSystemPrompt();
 
-        messagesWrapper.innerHTML = ''; // Clear old messages
+        messagesWrapper.innerHTML = '';
         highlightCurrentChatInSidebar();
 
-        // Determine if welcome screen should be active
         const hasVisibleMessages = state.messages.some(m => m.role !== 'system');
         if (!hasVisibleMessages) {
              welcomeContainer.style.display = 'flex';
              document.body.classList.add('welcome-active');
-             if (chatContainer) chatContainer.style.paddingBottom = '0px'; // No padding for welcome
+             if (chatContainer) chatContainer.style.paddingBottom = '0px';
         } else {
              welcomeContainer.style.display = 'none';
              document.body.classList.remove('welcome-active');
-             renderActiveMessages(); // Render the messages for the loaded chat
-             adjustTextareaHeight(); // Adjust padding for messages
+             // renderActiveMessages will now respect the *current* state.codeBlocksDefaultCollapsed
+             // because we didn't reset it above.
+             renderActiveMessages();
+             adjustTextareaHeight();
         }
 
     } catch (error) {
@@ -521,20 +667,11 @@ async function loadChat(chatId) {
         welcomeContainer.style.display = 'none';
         document.body.classList.remove('welcome-active');
         state.currentChatId = null;
+        document.getElementById('character-select').value = '';
+        updateCharacterActionButtons();
         highlightCurrentChatInSidebar();
     } finally {
-        // Scroll to bottom after rendering (if not welcome screen)
-        if (!document.body.classList.contains('welcome-active')) {
-             setTimeout(() => {
-                 // Scroll only if user hasn't manually scrolled up during load
-                 if (!state.userHasScrolled) {
-                     scrollToBottom('auto'); // Use instant scroll on load
-                 }
-                 state.isAutoScrolling = false; // Allow user scrolling after initial load
-             }, 100); // Delay slightly for render
-        } else {
-             state.isAutoScrolling = false; // Not auto-scrolling on welcome screen
-        }
+        requestAnimationFrame(updateScrollButtonVisibility);
     }
 }
 
@@ -544,204 +681,309 @@ function renderActiveMessages() {
 
     if (!state.messages || state.messages.length === 0) {
         console.log("No messages to render.");
-        // Ensure welcome screen logic is handled by caller (loadChat)
-        return;
+        return; // Welcome screen handled by caller
     }
 
-    // Build tree structure from flat list
+    // --- Step 1: Build Tree Structure (No Change Needed) ---
     const messageMap = new Map(state.messages.map(msg => [msg.message_id, { ...msg, children: [] }]));
     const rootMessages = [];
-
     state.messages.forEach(msg => {
-        if (msg.role === 'system') return; // Don't render system messages directly
-
         const msgNode = messageMap.get(msg.message_id);
-        if (!msgNode) return; // Should not happen
-
+        if (!msgNode) return;
         if (msg.parent_message_id && messageMap.has(msg.parent_message_id)) {
             const parentNode = messageMap.get(msg.parent_message_id);
             if (!parentNode.children) parentNode.children = [];
             parentNode.children.push(msgNode);
-        } else if (!msg.parent_message_id) { // Only add true roots
+        } else if (!msg.parent_message_id && msg.role !== 'system') {
             rootMessages.push(msgNode);
         }
     });
-
-    // Sort children and roots by timestamp
     messageMap.forEach(node => {
         if (node.children && node.children.length > 0) {
             node.children.sort((a, b) => a.timestamp - b.timestamp);
-             // Derive branch info for UI display where multiple children exist
-             if (node.child_message_ids && node.child_message_ids.length > 1) {
-                  state.activeBranchInfo[node.message_id] = {
-                      // Use active_child_index from the message data, default 0
-                      activeIndex: node.active_child_index ?? 0,
-                      totalBranches: node.child_message_ids.length
-                  };
-             }
+            if (node.child_message_ids && node.child_message_ids.length > 1) {
+                state.activeBranchInfo[node.message_id] = {
+                    activeIndex: node.active_child_index ?? 0,
+                    totalBranches: node.child_message_ids.length
+                };
+            }
         }
     });
     rootMessages.sort((a, b) => a.timestamp - b.timestamp);
 
-    // Recursive function to render the active branch
-    function renderBranch(messageNode) {
+    // --- Step 2: Render all messages in the active branch initially ---
+    function renderBranch(messageNode) { // No Change Needed
         if (!messageNode || messageNode.role === 'system') return;
-
-        addMessage(messageNode); // Render the current node
-
-        const children = messageNode.children; // Already sorted by timestamp
+        addMessage(messageNode); // Creates separate rows for each DB message initially
+        const children = messageNode.children;
         if (children && children.length > 0) {
-            // Determine the active child based on backend data
             const activeIndex = messageNode.active_child_index ?? 0;
             const safeActiveIndex = Math.min(Math.max(0, activeIndex), children.length - 1);
             const activeChildNode = children[safeActiveIndex];
+            if (activeChildNode) { renderBranch(activeChildNode); }
+            else { console.warn(`Could not find active child at index ${safeActiveIndex}...`); }
+        }
+    }
+    rootMessages.forEach(rootNode => renderBranch(rootNode));
 
-            if (activeChildNode) {
-                renderBranch(activeChildNode); // Recursively render the active child's branch
+    // --- Step 3: Post-processing: Merge sequential Assistant/Tool rows ---
+    const allRows = Array.from(messagesWrapper.querySelectorAll('.message-row'));
+    const rowsToRemove = new Set(); // Use a Set to automatically handle duplicates
+    let currentMergeTargetRow = null; // The first assistant row in a sequence
+    let accumulatedContentHTML = ''; // To store HTML from subsequent rows
+
+    for (let i = 0; i < allRows.length; i++) {
+        const currentRow = allRows[i];
+        const isAssistant = currentRow.classList.contains('assistant-row');
+        const isTool = currentRow.classList.contains('tool-row');
+        const isUser = currentRow.classList.contains('user-row');
+
+        if (isAssistant || isTool) {
+            if (!currentMergeTargetRow) {
+                // This is the FIRST assistant/tool message after a user message (or start)
+                // This becomes the row we merge INTO.
+                if (isAssistant) { // Only start merging with an assistant row
+                   currentMergeTargetRow = currentRow;
+                   accumulatedContentHTML = ''; // Reset accumulator
+                   console.log(`Starting merge sequence with target: ${currentRow.dataset.messageId}`);
+                }
+                // If the first non-user message is a tool message, something is odd, don't merge.
             } else {
-                 console.warn(`Could not find active child at index ${safeActiveIndex} for message ${messageNode.message_id}`);
+                // This is a SUBSEQUENT assistant or tool message in the sequence.
+                // Add its content to the accumulator and mark it for removal.
+                const contentDiv = currentRow.querySelector('.message-content');
+                if (contentDiv) {
+                     // We directly append the innerHTML, preserving blocks like tool calls/results
+                     accumulatedContentHTML += contentDiv.innerHTML;
+                     console.log(`Accumulating content from: ${currentRow.dataset.messageId}`);
+                }
+                rowsToRemove.add(currentRow);
             }
+        }
+
+        // If we hit a user message OR the end of messages, AND we have a merge target,
+        // finalize the merge for the previous sequence.
+        if ((isUser || i === allRows.length - 1) && currentMergeTargetRow) {
+            if (accumulatedContentHTML) {
+                const targetContentDiv = currentMergeTargetRow.querySelector('.message-content');
+                if (targetContentDiv) {
+                    console.log(`Finalizing merge into target: ${currentMergeTargetRow.dataset.messageId}`);
+                    // Append all accumulated HTML
+                    targetContentDiv.insertAdjacentHTML('beforeend', accumulatedContentHTML);
+                } else {
+                     console.warn(`Target merge row ${currentMergeTargetRow.dataset.messageId} missing content div.`);
+                }
+            } else {
+                 console.log(`No accumulated content to merge into target: ${currentMergeTargetRow.dataset.messageId}`);
+            }
+            // Reset for the next potential sequence (which might start with the current user row)
+            currentMergeTargetRow = null;
+            accumulatedContentHTML = '';
+        }
+
+        // If the current row is User, ensure any merge sequence is reset
+        if (isUser) {
+            currentMergeTargetRow = null;
+            accumulatedContentHTML = '';
         }
     }
 
-    // Start rendering from each root node
-    rootMessages.forEach(rootNode => renderBranch(rootNode));
+    // --- Step 4: Remove the merged rows from the DOM ---
+    rowsToRemove.forEach(row => row.remove());
+    if (rowsToRemove.size > 0) {
+       console.log(`Removed ${rowsToRemove.size} rows after merging.`);
+    }
 
-    // Final post-processing (code block wrapping/highlighting) - Deferred
+    // --- Step 5: Final post-processing (code block highlighting on potentially modified content) ---
     requestAnimationFrame(() => {
-         messagesWrapper.querySelectorAll('pre code').forEach(block => {
-            highlightRenderedCode(block.parentElement); // Pass the <pre> element
+         messagesWrapper.querySelectorAll('.message-content pre code').forEach(block => {
+            highlightRenderedCode(block.closest('pre'));
          });
     });
 }
 
-// Helper function to create a code block with header and content
-function createCodeBlockWithContent(codeText, lang = '') {
-    const wrapper = document.createElement('div');
-    wrapper.className = 'code-block-wrapper'; // Add base class
+/**
+ * Forces a specific code block wrapper element into the desired collapsed/expanded state.
+ * @param {HTMLElement} wrapper - The .code-block-wrapper element.
+ * @param {boolean} shouldBeCollapsed - True to collapse, false to expand.
+ */
+function setCodeBlockCollapsedState(wrapper, shouldBeCollapsed) {
+    if (!wrapper) return;
 
-    // Create header
+    const preElement = wrapper.querySelector('pre');
+    const collapseInfoSpan = wrapper.querySelector('.collapse-info');
+    const collapseBtn = wrapper.querySelector('.collapse-btn');
+    const icon = collapseBtn?.querySelector('i');
+
+    if (!preElement || !collapseInfoSpan || !collapseBtn || !icon) {
+        // console.warn("setCodeBlockCollapsedState: Missing elements in wrapper", wrapper);
+        return; // Don't proceed if elements are missing
+    }
+
+    const isCurrentlyCollapsed = wrapper.classList.contains('collapsed');
+
+    // Only act if the state needs changing
+    if (shouldBeCollapsed && !isCurrentlyCollapsed) {
+        // Collapse it
+        wrapper.classList.add('collapsed');
+        icon.className = 'bi bi-chevron-down';
+        collapseBtn.title = 'Expand code';
+        const codeText = wrapper.dataset.rawCode || '';
+        const lines = codeText.split('\n').length;
+        const lineCount = codeText.endsWith('\n') ? lines - 1 : lines;
+        collapseInfoSpan.textContent = `${lineCount} lines hidden`;
+        collapseInfoSpan.style.display = 'inline-block';
+        preElement.style.display = 'none';
+    } else if (!shouldBeCollapsed && isCurrentlyCollapsed) {
+        // Expand it
+        wrapper.classList.remove('collapsed');
+        icon.className = 'bi bi-chevron-up';
+        collapseBtn.title = 'Collapse code';
+        collapseInfoSpan.style.display = 'none';
+        preElement.style.display = '';
+    }
+}
+
+/**
+ * Updates the global code block toggle button's icon and title
+ * based on the current state.codeBlocksDefaultCollapsed value.
+ */
+function updateCodeblockToggleButton() {
+    const button = document.getElementById('toggle-codeblocks-btn');
+    if (!button) return;
+    const icon = button.querySelector('i');
+    if (!icon) return;
+    
+    button.classList.toggle('active', state.codeBlocksDefaultCollapsed);
+
+    if (state.codeBlocksDefaultCollapsed) {
+        // Default is COLLAPSED, button should show EXPAND action
+        icon.className = 'bi bi-arrows-expand';
+        button.title = 'Expand All Code Blocks (Default)';
+    } else {
+        // Default is EXPANDED, button should show COLLAPSE action
+        icon.className = 'bi bi-arrows-collapse';
+        button.title = 'Collapse All Code Blocks (Default)';
+    }
+}
+
+/**
+ * Sets up the event listener for the global code block toggle button.
+ */
+function setupCodeblockToggle() {
+    const button = document.getElementById('toggle-codeblocks-btn');
+    if (!button) {
+        console.error("Global code block toggle button not found!");
+        return;
+    }
+
+    button.addEventListener('click', () => {
+        // 1. Toggle the state variable
+        state.codeBlocksDefaultCollapsed = !state.codeBlocksDefaultCollapsed;
+        console.log("Code block default collapsed state toggled to:", state.codeBlocksDefaultCollapsed);
+
+        // 2. Update the button's appearance
+        updateCodeblockToggleButton();
+
+        // 3. Apply the new default state to all *existing* code blocks
+        const allCodeBlocks = messagesWrapper.querySelectorAll('.code-block-wrapper');
+        console.log(`Applying new default state to ${allCodeBlocks.length} existing code blocks.`);
+        allCodeBlocks.forEach(block => {
+            setCodeBlockCollapsedState(block, state.codeBlocksDefaultCollapsed);
+        });
+
+        // Optional: If persistence per chat across sessions is desired, save state here
+        // e.g., localStorage.setItem(`chat_${state.currentChatId}_codeCollapsed`, state.codeBlocksDefaultCollapsed);
+    });
+
+    // Set initial button state (important if page loaded with a non-default state somehow)
+    updateCodeblockToggleButton();
+}
+
+/**
+ * Takes a <pre> element generated by marked.js, extracts its content and language,
+ * and replaces it with a new structure including a header with language and copy button.
+ * Applies the current default collapsed state from state.codeBlocksDefaultCollapsed.
+ * Event listeners are NOT attached here; they are handled by delegation.
+ * @param {HTMLPreElement} preElement - The original <pre> element.
+ */
+function enhanceCodeBlock(preElement) {
+    const codeElement = preElement.querySelector('code');
+    if (!codeElement) return;
+
+    const codeText = codeElement.textContent || '';
+    const langClass = Array.from(codeElement.classList).find(cls => cls.startsWith('language-'));
+    const lang = langClass ? langClass.substring(9) : '';
+
+    // --- Check the current default state ---
+    const isInitiallyCollapsed = state.codeBlocksDefaultCollapsed; // Read from global state
+
+    // --- Create the new wrapper structure ---
+    const wrapper = document.createElement('div');
+    // Apply 'collapsed' class based on the default state
+    wrapper.className = `code-block-wrapper ${isInitiallyCollapsed ? 'collapsed' : ''}`;
+    wrapper.dataset.rawCode = codeText;
+
+    // Header
     const header = document.createElement('div');
     header.className = 'code-header';
-
-    // File type/language
     const filetypeSpan = document.createElement('span');
     filetypeSpan.className = 'code-header-filetype';
-    let cleanLang = lang || 'code'; // Use provided lang or default
-    filetypeSpan.textContent = cleanLang;
+    filetypeSpan.textContent = lang || 'code';
     header.appendChild(filetypeSpan);
-
-    // Actions (copy, collapse/expand)
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'code-header-actions';
-
-    // Collapse/Expand button
     const collapseBtn = document.createElement('button');
     collapseBtn.className = 'code-header-btn collapse-btn';
-    collapseBtn.innerHTML = '<i class="bi bi-chevron-up"></i>'; // Start expanded
-    collapseBtn.title = 'Collapse code';
+    // Set initial icon and title based on default state
+    collapseBtn.innerHTML = `<i class="bi bi-chevron-${isInitiallyCollapsed ? 'down' : 'up'}"></i>`;
+    collapseBtn.title = isInitiallyCollapsed ? 'Expand code' : 'Collapse code';
 
-    // Info span for collapsed state (initially hidden)
     const collapseInfoSpan = document.createElement('span');
-    collapseInfoSpan.className = 'collapse-info'; // Class to toggle display
-    collapseInfoSpan.style.display = 'none'; // Hidden by default
+    collapseInfoSpan.className = 'collapse-info';
+    // Set initial info text and display based on default state
+    if (isInitiallyCollapsed) {
+        const lines = codeText.split('\n').length;
+        const lineCount = codeText.endsWith('\n') ? lines - 1 : lines;
+        collapseInfoSpan.textContent = `${lineCount} lines hidden`;
+        collapseInfoSpan.style.display = 'inline-block';
+    } else {
+        collapseInfoSpan.style.display = 'none';
+    }
 
-    actionsDiv.appendChild(collapseInfoSpan); // Add info span next to button area
-    actionsDiv.appendChild(collapseBtn); // Add collapse button
-
-    // Copy button
+    actionsDiv.appendChild(collapseInfoSpan);
+    actionsDiv.appendChild(collapseBtn);
     const copyBtn = document.createElement('button');
     copyBtn.className = 'code-header-btn copy-btn';
     copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
     copyBtn.title = 'Copy code';
-    actionsDiv.appendChild(copyBtn); // Add copy button
-
+    actionsDiv.appendChild(copyBtn);
     header.appendChild(actionsDiv);
 
-    // Create new <pre> and <code> elements
+    // --- Create new PRE and CODE elements for highlighting ---
     const newPre = document.createElement('pre');
+    // Set initial display state based on default
+    newPre.style.display = isInitiallyCollapsed ? 'none' : '';
     const newCode = document.createElement('code');
-    // Set language class for hljs
     if (lang) {
         newCode.className = `language-${lang}`;
     }
-    newCode.textContent = codeText; // Set the text content
+    newCode.textContent = codeText;
 
-    // Highlight the *new* code block
     try {
-       hljs.highlightElement(newCode);
-    } catch(e) {
-        console.error("Error highlighting newly created code block:", e);
+        hljs.highlightElement(newCode);
+    } catch (e) {
+        console.error("Error highlighting enhanced code block:", e);
     }
 
-    newPre.appendChild(newCode); // Add code to pre
+    newPre.appendChild(newCode);
     wrapper.appendChild(header);
-    wrapper.appendChild(newPre); // Add pre to wrapper
+    wrapper.appendChild(newPre);
 
-
-    // --- Add Event Listeners ---
-    copyBtn.addEventListener('click', (e) => {
-        navigator.clipboard.writeText(newCode.textContent).then(() => { // Use newCode.textContent
-             copyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Copied';
-             copyBtn.disabled = true;
-             setTimeout(() => {
-                copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
-                copyBtn.disabled = false;
-             }, 1500);
-        }).catch(err => {
-             console.error('Failed to copy code:', err);
-        });
-        e.stopPropagation();
-    });
-
-    collapseBtn.addEventListener('click', (e) => {
-        const isCollapsed = wrapper.classList.toggle('collapsed');
-        const icon = collapseBtn.querySelector('i');
-
-        if (isCollapsed) {
-            icon.className = 'bi bi-chevron-down';
-            collapseBtn.title = 'Expand code';
-            const lines = newCode.textContent.split('\n').length;
-            const lineCount = newCode.textContent.endsWith('\n') ? lines - 1 : lines;
-            collapseInfoSpan.textContent = `${lineCount} lines hidden`;
-            collapseInfoSpan.style.display = 'inline-block';
-             newPre.style.display = 'none';
-        } else {
-            icon.className = 'bi bi-chevron-up';
-            collapseBtn.title = 'Collapse code';
-            collapseInfoSpan.style.display = 'none';
-            newPre.style.display = '';
-        }
-        e.stopPropagation();
-    });
-
-
-    return wrapper;
+    // --- Replace the original pre element ---
+    preElement.replaceWith(wrapper);
 }
 
-// Helper to parse think block content and remaining text
-function parseThinkContent(text) {
-    let thinkContent = '';
-    let remainingText = '';
-    const thinkStartIndex = text.indexOf('<think>');
-    if (thinkStartIndex === -1) {
-        // Should not happen if called correctly, but handle anyway
-        return { thinkContent: null, remainingText: text };
-    }
-
-    let thinkEndIndex = text.indexOf('</think>');
-    if (thinkEndIndex === -1) {
-        // No closing tag, capture till end
-        thinkContent = text.substring(thinkStartIndex + '<think>'.length);
-        remainingText = '';
-    } else {
-        thinkContent = text.substring(thinkStartIndex + '<think>'.length, thinkEndIndex);
-        remainingText = text.substring(thinkEndIndex + '</think>'.length);
-    }
-    return { thinkContent: thinkContent.trim(), remainingText: remainingText.trim() };
-}
-
-// --- buildContentHtml (REVISED: Removed internal highlighting call) ---
 function buildContentHtml(targetContentDiv, messageText, isStreaming = false) {
     const textToParse = messageText || '';
     const thinkBlockTempId = 'streaming-think-block';
@@ -751,7 +993,7 @@ function buildContentHtml(targetContentDiv, messageText, isStreaming = false) {
     if (textToParse.trim().startsWith('<think>')) {
         const { thinkContent, remainingText } = parseThinkContent(textToParse);
         let existingThinkBlock = null;
-        let thinkBlockWasCollapsed = true; // Default
+        let thinkBlockWasCollapsed = true; // Default assumption
 
         if (isStreaming) {
             existingThinkBlock = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
@@ -761,112 +1003,299 @@ function buildContentHtml(targetContentDiv, messageText, isStreaming = false) {
         }
 
         if (isStreaming && existingThinkBlock) {
-            // --- Targeted Update (Think Block) ---
+            // --- Targeted Update (Think Block Exists) ---
             const existingThinkContentDiv = existingThinkBlock.querySelector('.think-content');
             if (existingThinkContentDiv) {
                 const newThinkHtml = marked.parse(thinkContent || '');
-                 // Update only if different to avoid minor flicker
-                 if (existingThinkContentDiv.innerHTML !== newThinkHtml) {
-                     existingThinkContentDiv.innerHTML = newThinkHtml;
-                     // No immediate highlight here
-                 }
-            } else {
-                 console.warn("Could not find existing .think-content for targeted update.");
-            }
-            let remainingContentDiv = targetContentDiv.querySelector(`div[data-temp-id="${remainingContentTempId}"]`);
-            if (remainingText) {
-                const newRemainingHtml = renderMarkdown(remainingText);
-                if (!remainingContentDiv) {
-                    remainingContentDiv = document.createElement('div');
-                    remainingContentDiv.dataset.tempId = remainingContentTempId;
-                    targetContentDiv.appendChild(remainingContentDiv);
+                if (existingThinkContentDiv.innerHTML !== newThinkHtml) {
+                    existingThinkContentDiv.innerHTML = newThinkHtml;
                 }
-                 // Update only if different
-                 if (remainingContentDiv.innerHTML !== newRemainingHtml) {
-                     remainingContentDiv.innerHTML = newRemainingHtml;
-                     // No immediate highlight here
-                 }
-            } else if (remainingContentDiv) {
-                remainingContentDiv.remove();
+            } else {
+                 console.warn("Streaming update: Could not find existing .think-content for targeted update.");
             }
-            // --- End Targeted Update (Think Block) ---
+
+            // --- Handle Remaining Text (After Think Block) During Streaming ---
+            let existingRemainingContentDiv = targetContentDiv.querySelector(`div[data-temp-id="${remainingContentTempId}"]`);
+            if (remainingText || existingRemainingContentDiv) {
+                 if (!existingRemainingContentDiv) {
+                      existingRemainingContentDiv = document.createElement('div');
+                      existingRemainingContentDiv.dataset.tempId = remainingContentTempId;
+                      targetContentDiv.appendChild(existingRemainingContentDiv);
+                 }
+                 const newRemainingHtml = renderMarkdown(remainingText, true, null);
+                 if (existingRemainingContentDiv.innerHTML !== newRemainingHtml) {
+                      existingRemainingContentDiv.innerHTML = newRemainingHtml;
+                 }
+            }
+
         } else {
-            // --- Full Redraw (Think Block - Not streaming, or first chunk) ---
+            // --- Full Redraw (Not streaming, or first chunk of think block) ---
             const fullRenderedHtml = renderMarkdown(textToParse, thinkBlockWasCollapsed, isStreaming ? thinkBlockTempId : null);
-            targetContentDiv.innerHTML = fullRenderedHtml; // Clears old content implicitly
-             if (remainingText && isStreaming) {
-                 const thinkBlockElement = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
-                 const nodesAfter = [];
-                 let currentNode = thinkBlockElement?.nextSibling;
-                 while(currentNode) {
-                     nodesAfter.push(currentNode);
-                     currentNode = currentNode.nextSibling;
-                 }
-                 if (nodesAfter.length > 0) {
-                      const wrapper = document.createElement('div');
-                      wrapper.dataset.tempId = remainingContentTempId;
-                      nodesAfter.forEach(node => wrapper.appendChild(node));
-                      targetContentDiv.appendChild(wrapper);
-                 }
-             }
-             // No immediate highlight here
-            // --- End Full Redraw (Think Block) ---
+            targetContentDiv.innerHTML = fullRenderedHtml;
+            if (isStreaming) {
+                const newlyRenderedThinkBlock = targetContentDiv.querySelector('.think-block');
+                if (newlyRenderedThinkBlock && !newlyRenderedThinkBlock.dataset.tempId) {
+                    newlyRenderedThinkBlock.dataset.tempId = thinkBlockTempId;
+                }
+                const thinkBlock = targetContentDiv.querySelector('.think-block');
+                const potentialRemainingDiv = thinkBlock?.nextElementSibling;
+                if (potentialRemainingDiv && potentialRemainingDiv.tagName === 'DIV' && !potentialRemainingDiv.dataset.tempId && remainingText) {
+                     potentialRemainingDiv.dataset.tempId = remainingContentTempId;
+                }
+            }
         }
     }
-    // --- Handle Non-Think Block Messages ---
+    // --- Handle Non-Think Block Messages OR Text After Tool Tags ---
     else {
-        // Logic remains the same, using full redraw based on marked + tool tags
-        targetContentDiv.innerHTML = ''; // Clear content
+        // Store existing code block states before clearing (if needed for preserving manual toggles - not doing this yet)
+        // For now, we rely on re-applying the default state after render.
 
+        targetContentDiv.innerHTML = ''; // Clear previous content
+
+        // --- Separate Tool Tags from Text ---
         let lastIndex = 0;
+        const segments = [];
         TOOL_TAG_REGEX.lastIndex = 0;
         let match;
-
         while ((match = TOOL_TAG_REGEX.exec(textToParse)) !== null) {
             const textBefore = textToParse.substring(lastIndex, match.index);
-            if (textBefore) {
-                // Use renderMarkdown which uses marked.parse internally
-                const renderedHtml = renderMarkdown(textBefore);
-                targetContentDiv.insertAdjacentHTML('beforeend', renderedHtml);
-            }
-
-            const fullTag = match[0];
-            const toolCallTag = match[1];
-            const toolResultTag = match[4];
-
+            if (textBefore) { segments.push({ type: 'text', data: textBefore }); }
+            const toolCallTag = match[1]; const toolResultTag = match[4];
             if (toolCallTag) {
-                const toolName = match[2];
-                const attrsString = match[3] || "";
-                const toolArgs = parseAttributes(attrsString);
-                renderToolCallPlaceholder(targetContentDiv, toolName, toolArgs);
+                const toolName = match[2]; const attrsString = match[3] || "";
+                segments.push({ type: 'tool', data: { name: toolName, args: parseAttributes(attrsString) } });
             } else if (toolResultTag) {
-                const toolName = match[5];
-                let resultString = match[6] || "";
-                resultString = resultString.replace(/"/g, '"');
-                renderToolResult(targetContentDiv, resultString);
+                const toolName = match[5]; let resultString = match[6] || "";
+                 try { resultString = resultString.replace(/"/g, '"'); } catch(e) { console.warn("Error decoding result string", e)}
+                segments.push({ type: 'result', data: resultString });
             }
-
             lastIndex = TOOL_TAG_REGEX.lastIndex;
         }
-
         const remainingText = textToParse.substring(lastIndex);
-        if (remainingText) {
-             // Use renderMarkdown which uses marked.parse internally
-            const renderedHtml = renderMarkdown(remainingText);
-            targetContentDiv.insertAdjacentHTML('beforeend', renderedHtml);
+        if (remainingText) { segments.push({ type: 'text', data: remainingText }); }
+
+        // --- Render Segments ---
+        segments.forEach(segment => {
+            if (segment.type === 'text') {
+                // renderMarkdown calls enhanceCodeBlock, which uses the default state
+                targetContentDiv.insertAdjacentHTML('beforeend', renderMarkdown(segment.data, true, null));
+            } else if (segment.type === 'tool') {
+                renderToolCallPlaceholder(targetContentDiv, segment.data.name, segment.data.args);
+            } else if (segment.type === 'result') {
+                renderToolResult(targetContentDiv, segment.data);
+            }
+        });
+    }
+
+    // --- Apply Default Code Block State AFTER Rendering ---
+    // This ensures that even if innerHTML was replaced, the code blocks
+    // within the target div conform to the current default setting.
+    applyCodeBlockDefaults(targetContentDiv);
+
+    // Highlighting is handled separately after this function returns in the stream handler
+}
+
+/**
+ * Finds all code block wrappers within a given container element
+ * and applies the current default collapsed state from state.codeBlocksDefaultCollapsed.
+ * @param {HTMLElement} containerElement - The parent element to search within.
+ */
+function applyCodeBlockDefaults(containerElement) {
+    if (!containerElement) return;
+    const codeBlocks = containerElement.querySelectorAll('.code-block-wrapper');
+    // console.log(`Applying default state (${state.codeBlocksDefaultCollapsed ? 'collapsed' : 'expanded'}) to ${codeBlocks.length} blocks in container.`);
+    codeBlocks.forEach(block => {
+        // Use the existing helper to set the state based on the global default
+        setCodeBlockCollapsedState(block, state.codeBlocksDefaultCollapsed);
+    });
+}
+
+/**
+ * Handles the click on the "Generate" or "Regenerate Response" button on a user message.
+ * Determines whether to simply generate a new response or replace an existing one.
+ * @param {string} userMessageId - The ID of the user message triggering the action.
+ */
+async function handleGenerateOrRegenerateFromUser(userMessageId) {
+    const currentChatId = state.currentChatId;
+    // Use generation state flag check
+    if (!currentChatId || document.getElementById('send-button').disabled) {
+        addSystemMessage("Cannot generate while busy.", "warning");
+        return;
+    }
+
+    const userMessage = state.messages.find(m => m.message_id === userMessageId);
+    if (!userMessage || userMessage.role !== 'user') {
+        addSystemMessage("Invalid target message for generation.", "error");
+        return;
+    }
+
+    // Always use the currently selected model from the UI
+    const modelNameToUse = modelSelect.value;
+    if (!modelNameToUse) {
+        addSystemMessage("Please select a model before generating.", "error");
+        return;
+    }
+
+    const isLastMessage = findLastActiveMessageId(state.messages) === userMessageId;
+    let assistantPlaceholderRow = null;
+
+    console.log(`Action triggered for user message ${userMessageId}. Is last: ${isLastMessage}`);
+
+    try {
+        const userMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${userMessageId}"]`);
+        if (!userMessageRow) {
+            throw new Error(`Could not find user message row ${userMessageId} in DOM.`);
         }
-         // REMOVED highlight call: targetContentDiv.querySelectorAll('pre code').forEach(block => highlightRenderedCode(block));
+
+        if (!isLastMessage) {
+            // --- Regenerate Logic (Replace existing response) ---
+            if (!confirm("This will delete the existing response and generate a new one. Proceed?")) {
+                return;
+            }
+            console.log(`Regenerating response for user message ${userMessageId}. Replacing existing branch.`);
+
+            // Find the direct active child (assistant message)
+            const childMessage = state.messages.find(m =>
+                m.parent_message_id === userMessageId &&
+                m.role === 'llm' && // Assuming direct child is 'llm'
+                userMessage.child_message_ids?.includes(m.message_id) && // Check it's a known child
+                (userMessage.active_child_index === undefined || userMessage.child_message_ids[userMessage.active_child_index ?? 0] === m.message_id) // Check if it's the active one
+            );
+
+            if (childMessage) {
+                const childMessageIdToDelete = childMessage.message_id;
+                console.log(`Found child message ${childMessageIdToDelete} to delete.`);
+                // 1. Remove visually first
+                removeMessageAndDescendantsFromDOM(childMessageIdToDelete);
+                // 2. Delete from backend
+                const deleteSuccess = await deleteMessageFromBackend(currentChatId, childMessageIdToDelete);
+                if (!deleteSuccess) {
+                    throw new Error("Failed to delete existing message branch before regenerating.");
+                }
+                // State will be updated by loadChat after generation completes/errors
+            } else {
+                console.warn(`Could not find the active assistant message following ${userMessageId} to replace. Proceeding to generate.`);
+                // If no child found (e.g., data inconsistency or deleted previously), just generate.
+            }
+        } else {
+            // --- Generate Logic (Message is last) ---
+            console.log(`Generating new response for last user message ${userMessageId}.`);
+            // No deletion needed.
+        }
+
+        // --- Create Placeholder & Start Generation (Common Logic) ---
+        assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, userMessageId);
+        // Insert placeholder immediately after the user message row
+        userMessageRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
+
+        const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
+        if (!assistantContentDiv) {
+             assistantPlaceholderRow?.remove();
+             throw new Error("Failed to create assistant response placeholder element.");
+        }
+        scrollToBottom('smooth');
+
+        // Start generation - this will save the new message(s) and trigger loadChat on completion/error
+        await generateAssistantResponse(
+            userMessageId, // Parent is the user message itself
+            assistantContentDiv,
+            modelNameToUse,
+            defaultGenArgs,
+            state.toolsEnabled
+        );
+        // NOTE: loadChat inside generateAssistantResponse's callbacks will handle the final UI update and state refresh.
+
+    } catch (error) {
+        console.error(`Error during generate/regenerate from user message ${userMessageId}:`, error);
+        addSystemMessage(`Generation failed: ${error.message}`, "error");
+        assistantPlaceholderRow?.remove(); // Remove placeholder on error
+        // Consider reloading the chat to revert to a consistent state on failure
+        try { await loadChat(currentChatId); } catch(e) {
+            console.error("Failed to reload chat after generation error:", e);
+        }
+        cleanupAfterGeneration(); // Use standard cleanup
     }
 }
 
+/**
+ * Handles the "Save & Send" button click during user message editing.
+ * Saves the edit, then triggers handleGenerateOrRegenerateFromUser.
+ * @param {string} userMessageId - The ID of the user message being edited.
+ * @param {HTMLTextAreaElement} textareaElement - The textarea containing the edited text.
+ */
+async function handleSaveAndSend(userMessageId, textareaElement) {
+    const newText = textareaElement.value.trim();
+    const originalMessage = state.messages.find(m => m.message_id === userMessageId);
 
-// --- addMessage (MODIFIED) ---
-// Uses the new buildContentHtml helper function
+    if (!originalMessage || originalMessage.role !== 'user') {
+        console.error("handleSaveAndSend: Invalid original message or not a user message.");
+        return;
+    }
+
+    // Disable buttons temporarily to prevent double clicks
+    const buttonContainer = textareaElement.closest('.edit-buttons');
+    const buttons = buttonContainer?.querySelectorAll('button');
+    buttons?.forEach(btn => btn.disabled = true);
+
+    try {
+        console.log(`Save & Send: Saving edit for user message ${userMessageId}`);
+        // Call saveEdit (assuming it reloads the chat on success)
+        // Modify saveEdit to return success status if not already doing so.
+        const saveSuccess = await saveEdit(userMessageId, newText, 'user', false); // Pass flag to NOT reload automatically
+
+        if (saveSuccess) {
+            console.log(`Save & Send: Edit saved successfully. Now triggering generation for ${userMessageId}.`);
+
+            // Manually update the DOM to remove editing controls after successful save
+            const messageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${userMessageId}"]`);
+            const contentDiv = messageRow?.querySelector('.message-content');
+            const actionsDiv = messageRow?.querySelector('.message-actions');
+
+            if (contentDiv) {
+                contentDiv.classList.remove('editing');
+                contentDiv.innerHTML = renderMarkdown(newText); // Render the new markdown
+                contentDiv.dataset.raw = newText; // Update raw dataset
+                // Re-run highlighting/enhancements
+                 contentDiv.querySelectorAll('pre code').forEach(block => {
+                     highlightRenderedCode(block.closest('pre'));
+                 });
+            }
+             if (actionsDiv) actionsDiv.style.display = ''; // Restore actions visibility
+
+
+            // Update local state message text (since we skipped reload in saveEdit)
+            const msgIndex = state.messages.findIndex(m => m.message_id === userMessageId);
+            if (msgIndex > -1) {
+                 state.messages[msgIndex].message = newText;
+            }
+
+            // Now trigger the generate/regenerate logic using the updated message ID
+            // This function will handle deleting subsequent branches if necessary based on the *current* state.
+            await handleGenerateOrRegenerateFromUser(userMessageId);
+        } else {
+             // Save failed, re-enable buttons
+             buttons?.forEach(btn => btn.disabled = false);
+             addSystemMessage("Failed to save changes before sending.", "error");
+        }
+
+    } catch (error) {
+        console.error('Error during Save & Send:', error);
+        addSystemMessage(`Error: ${error.message}`, "error");
+        // Re-enable buttons on error
+        buttons?.forEach(btn => btn.disabled = false);
+        // Optionally restore textarea content? Or leave as is for user to retry.
+    }
+    // Note: cleanupAfterGeneration() is handled within handleGenerateOrRegenerateFromUser if generation starts/fails.
+}
+
+// --- addMessage (MODIFIED for User Generate/Regen Button and Tool Role Rendering) ---
 function addMessage(message) {
     if (message.role === 'system') return null;
 
-    const role = message.role === 'llm' ? 'assistant' : message.role;
+    // Map llm to assistant for CSS/logic consistency, keep tool as tool
+    const role = message.role === 'llm' ? 'assistant' : message.role; // 'user', 'assistant', or 'tool'
     const messageRow = document.createElement('div');
+    // Add specific class for tool messages for potential styling
     messageRow.className = `message-row ${role}-row ${role === 'tool' ? 'tool-message' : ''}`;
     messageRow.dataset.messageId = message.message_id;
     if (message.parent_message_id) {
@@ -908,7 +1337,7 @@ function addMessage(message) {
         actionsDiv.appendChild(branchNav);
     }
 
-    // Standard Action Buttons (unchanged)
+    // Standard Action Buttons (Hide some for 'tool' role)
     const copyBtn = document.createElement('button');
     copyBtn.className = 'message-action-btn';
     copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
@@ -916,13 +1345,36 @@ function addMessage(message) {
     copyBtn.addEventListener('click', () => copyMessageContent(contentDiv, copyBtn));
     actionsDiv.appendChild(copyBtn);
 
+    // Edit button - Hide for tool results
     const editBtn = document.createElement('button');
     editBtn.className = 'message-action-btn';
     editBtn.innerHTML = '<i class="bi bi-pencil"></i>';
     editBtn.title = 'Edit message';
     editBtn.addEventListener('click', () => startEditing(message.message_id));
-    actionsDiv.appendChild(editBtn); // Hide later for tool messages if needed
+    if (role !== 'tool') { // Hide Edit for tool messages
+        actionsDiv.appendChild(editBtn);
+    }
 
+    // --- ADDED: Generate/Regenerate Button for User Messages ---
+    if (role === 'user') {
+        const isLastMessage = findLastActiveMessageId(state.messages) === message.message_id;
+        const genRegenBtn = document.createElement('button');
+        genRegenBtn.className = 'message-action-btn';
+        genRegenBtn.onclick = () => handleGenerateOrRegenerateFromUser(message.message_id);
+
+        if (isLastMessage) {
+            genRegenBtn.innerHTML = '<i class="bi bi-play-circle"></i>'; // Icon for "Generate"
+            genRegenBtn.title = 'Generate response to this message';
+        } else {
+            genRegenBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i>'; // Icon for "Regenerate"
+            genRegenBtn.title = 'Regenerate response (Replace existing)';
+        }
+        actionsDiv.appendChild(genRegenBtn);
+    }
+    // --- END ADDED ---
+
+
+    // Assistant-specific buttons
     if (role === 'assistant') {
         const regenerateBtn = document.createElement('button');
         regenerateBtn.className = 'message-action-btn';
@@ -930,12 +1382,14 @@ function addMessage(message) {
         regenerateBtn.title = 'Regenerate this response (Replace)';
         regenerateBtn.addEventListener('click', () => regenerateMessage(message.message_id, false));
         actionsDiv.appendChild(regenerateBtn);
+
         const branchBtn = document.createElement('button');
         branchBtn.className = 'message-action-btn';
         branchBtn.innerHTML = '<i class="bi bi-diagram-3"></i>';
         branchBtn.title = 'Regenerate as new branch';
         branchBtn.addEventListener('click', () => regenerateMessage(message.message_id, true));
         actionsDiv.appendChild(branchBtn);
+
         const continueBtn = document.createElement('button');
         continueBtn.className = 'message-action-btn';
         continueBtn.innerHTML = '<i class="bi bi-arrow-bar-right"></i>';
@@ -944,6 +1398,7 @@ function addMessage(message) {
         actionsDiv.appendChild(continueBtn);
     }
 
+    // Delete button - Show for all roles
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'message-action-btn delete-btn';
     deleteBtn.innerHTML = '<i class="bi bi-trash"></i>';
@@ -954,48 +1409,38 @@ function addMessage(message) {
 
     // --- Render Content based on Role ---
     if (role === 'user') {
-        // Directly set text content for user messages, render as markdown
         contentDiv.innerHTML = renderMarkdown(message.message || '');
     } else if (role === 'assistant') {
-        // Use the helper function to parse tool tags and render markdown segments
         buildContentHtml(contentDiv, message.message);
     } else if (role === 'tool') {
-        // Tool messages are not expected directly with the placeholder approach
-        // If they were saved separately, render them here.
-        // Tool role messages contain the raw result text.
-        contentDiv.textContent = `[Tool Result: ${message.message}]`; // Simple display
-        editBtn.style.display = 'none'; // Cannot edit tool results this way
+        renderToolResult(contentDiv, message.message || '[Empty Tool Result]');
     }
 
-    // Append the content div to the main message container
     messageDiv.appendChild(contentDiv);
 
-    // Highlight code blocks *after* setting innerHTML and building content
     contentDiv.querySelectorAll('pre code').forEach(block => {
-       highlightRenderedCode(block); // Pass the code block itself
+       highlightRenderedCode(block.closest('pre'));
     });
 
     // --- Attachments Display (Append to contentDiv) ---
-    if (message.attachments && message.attachments.length > 0) {
+    if (role !== 'tool' && message.attachments && message.attachments.length > 0) {
         const attachmentsContainer = document.createElement('div');
         attachmentsContainer.className = 'attachments-container';
         message.attachments.forEach(attachment => {
              let rawContent = attachment.content;
-             // Simplified attachment rendering logic (no change needed here)
              if (attachment.type === 'image') {
                  const imgWrapper = document.createElement('div');
                  imgWrapper.className = 'attachment-preview image-preview-wrapper';
                  imgWrapper.addEventListener('click', () => viewAttachmentPopup({...attachment, rawContent}));
                  const img = document.createElement('img');
-                 img.src = `data:image/jpeg;base64,${attachment.content}`;
+                 img.src = `data:image/jpeg;base64,${String(attachment.content)}`;
                  img.alt = attachment.name || 'Attached image';
                  imgWrapper.appendChild(img);
                  attachmentsContainer.appendChild(imgWrapper);
              } else if (attachment.type === 'file') {
                  const fileWrapper = document.createElement('div');
                  fileWrapper.className = 'attachment-preview file-preview-wrapper';
-                 // Attempt to parse raw content from formatted string for popup viewing
-                 const match = attachment.content.match(/^.*:\n```[^\n]*\n([\s\S]*)\n```$/);
+                 const match = String(attachment.content).match(/^.*:\n```[^\n]*\n([\s\S]*)\n```$/);
                  if (match && match[1]) { rawContent = match[1]; }
                  fileWrapper.addEventListener('click', () => viewAttachmentPopup({...attachment, rawContent}));
                  const filename = attachment.name || 'Attached File';
@@ -1003,7 +1448,7 @@ function addMessage(message) {
                  attachmentsContainer.appendChild(fileWrapper);
              }
         });
-        contentDiv.appendChild(attachmentsContainer); // Append attachments *inside* contentDiv
+        contentDiv.appendChild(attachmentsContainer);
     }
 
     // --- Final Assembly ---
@@ -1040,32 +1485,49 @@ async function setActiveBranch(parentMessageId, newIndex) {
      }
 }
 
-// --- Edit/Delete Message (MODIFIED) ---
 async function deleteMessage(messageId) {
     if (!state.currentChatId) return;
 
-    const messageText = state.messages.find(m => m.message_id === messageId)?.message || `message ID ${messageId}`;
-    if (!confirm(`Are you sure you want to delete this message and all its subsequent responses/branches?\n"${messageText.substring(0, 50)}..."`)) {
-         return;
+    const messageToDelete = state.messages.find(m => m.message_id === messageId);
+    if (!messageToDelete) {
+        console.warn(`Message ${messageId} not found in state for deletion.`);
+        return;
     }
 
-    console.log(`Deleting message ${messageId} and descendants.`);
+    // Check if this message has a tool message child
+    const hasToolChild = state.messages.some(m => m.parent_message_id === messageId && m.role === 'tool');
+    const baseText = messageToDelete.message?.substring(0, 80) || `message ID ${messageId}`;
+    let confirmMessage = `Are you sure you want to delete this message and all its subsequent responses/branches?\n"${baseText}..."`;
+
+    if (hasToolChild) {
+        confirmMessage = `Are you sure you want to delete this message, the associated tool action(s), and any subsequent response? This affects the entire sequence.\n"${baseText}..."`;
+    }
+
+    if (!confirm(confirmMessage)) {
+        return;
+    }
+
+    console.log(`Deleting message ${messageId} and descendants (cascade handled by backend).`);
 
     try {
+        // Backend DELETE handles cascade based on parent_message_id foreign key constraints
         const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/delete_message/${messageId}`, {
-            method: 'POST' // Changed to POST
+            method: 'POST' // Assuming POST based on previous setup, adjust if DELETE
         });
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
             throw new Error(`Failed to delete message: ${errorData.detail || response.statusText}`);
         }
 
+        // Reload the chat to reflect the deletion across the entire branch
         await loadChat(state.currentChatId);
         await fetchChats(); // Update sidebar as well
 
     } catch (error) {
         console.error('Error deleting message:', error);
         alert(`Failed to delete message: ${error.message}`);
+        // Optionally reload chat even on error to ensure consistency with backend state
+        try { await loadChat(state.currentChatId); } catch(e) {}
     }
 }
 
@@ -1078,26 +1540,36 @@ function startEditing(messageId) {
 
     const message = state.messages.find(m => m.message_id === messageId);
     if (!message) return;
-    // Prevent editing tool result messages directly
+
+    // --- Prevent Editing Tool/Merged Messages ---
     if (message.role === 'tool') {
          alert("Cannot edit tool result messages.");
          return;
     }
+    // Check if this assistant message initiated a tool call sequence
+    const hasToolChild = state.messages.some(m => m.parent_message_id === messageId && m.role === 'tool');
+    if ((message.role === 'llm' || message.role === 'assistant') && (hasToolChild || contentDiv.querySelector('.tool-call-block'))) {
+        alert("Editing messages that involve tool execution is not currently supported.");
+        return;
+    }
+    // --- End Prevention ---
 
     const originalContentHTML = contentDiv.innerHTML;
     const originalActionsDisplay = actionsDiv ? actionsDiv.style.display : '';
-    // Also hide any tool call blocks during edit
-    const toolCallBlocks = messageRow.querySelectorAll('.tool-call-block, .tool-result-block'); // Hide both types
+    // Hide tool blocks if they exist
+    const toolBlocks = messageRow.querySelectorAll('.tool-call-block, .tool-result-block'); // Combined selector
 
     contentDiv.classList.add('editing');
     if (actionsDiv) actionsDiv.style.display = 'none';
-    toolCallBlocks.forEach(el => el.style.display = 'none');
+    toolBlocks.forEach(el => el.style.display = 'none'); // Hide tool blocks during edit
     contentDiv.innerHTML = ''; // Clear current content
 
     const textarea = document.createElement('textarea');
     textarea.className = 'edit-textarea';
-    textarea.value = message.message; // Use the raw text content
-    textarea.rows = Math.min(20, Math.max(3, message.message.split('\n').length + 1));
+    // Use dataset.raw which should hold the *original* text of just this part
+    // Fallback to message.message if dataset isn't populated correctly
+    textarea.value = contentDiv.dataset.raw || message.message || '';
+    textarea.rows = Math.min(20, Math.max(3, textarea.value.split('\n').length + 1));
 
     const buttonContainer = document.createElement('div');
     buttonContainer.className = 'edit-buttons';
@@ -1114,10 +1586,31 @@ function startEditing(messageId) {
         contentDiv.classList.remove('editing');
         contentDiv.innerHTML = originalContentHTML; // Restore original rendered HTML
         if (actionsDiv) actionsDiv.style.display = originalActionsDisplay;
-        toolCallBlocks.forEach(el => el.style.display = ''); // Show tool calls/results again
+        toolBlocks.forEach(el => el.style.display = ''); // Restore tool block display
+        // Re-run highlighting and code block enhancement
+        contentDiv.querySelectorAll('pre:not(.code-block-wrapper pre)').forEach(pre => {
+            const code = pre.querySelector('code');
+            if (code) enhanceCodeBlock(pre); // Use the enhance function
+        });
+        contentDiv.querySelectorAll('.code-block-wrapper code:not(.hljs)').forEach(code => {
+             try { hljs.highlightElement(code); } catch(e) {} // Re-highlight if needed
+        });
     };
 
     buttonContainer.appendChild(saveButton);
+
+    // --- ADDED: Save & Send Button for User Messages ---
+    if (message.role === 'user') {
+        const saveAndSendButton = document.createElement('button');
+        saveAndSendButton.innerHTML = '<i class="bi bi-send-check"></i> Save & Send'; // Or "Save & Regenerate"
+        saveAndSendButton.className = 'btn-secondary'; // Style as secondary or primary as preferred
+        saveAndSendButton.title = 'Save changes and generate a new response';
+        // Use the new handler, passing the textarea element directly
+        saveAndSendButton.onclick = () => handleSaveAndSend(messageId, textarea);
+        buttonContainer.appendChild(saveAndSendButton);
+    }
+    // --- END ADDED ---
+
     buttonContainer.appendChild(cancelButton);
 
     contentDiv.appendChild(textarea);
@@ -1128,74 +1621,115 @@ function startEditing(messageId) {
 }
 
 
-async function saveEdit(messageId, newText, role) {
-     const originalMessage = state.messages.find(m => m.message_id === messageId);
-     if (!originalMessage) return;
+/**
+ * Saves an edited message to the backend.
+ * @param {string} messageId - The ID of the message to edit.
+ * @param {string} newText - The new message text content.
+ * @param {string} role - The role of the message ('user' or 'assistant').
+ * @param {boolean} [reloadChat=true] - Whether to reload the chat state after saving.
+ * @returns {Promise<boolean>} True if the save was successful, false otherwise.
+ */
+async function saveEdit(messageId, newText, role, reloadChat = true) {
+    const originalMessage = state.messages.find(m => m.message_id === messageId);
+    if (!originalMessage) return false; // Indicate failure
 
-    console.log(`Saving edit for message ${messageId}`);
+   console.log(`Saving edit for message ${messageId}. Reload chat: ${reloadChat}`);
 
-    // Preserve original attachments when editing text
-    const attachmentsForSave = (originalMessage.attachments || []).map(att => ({
-        type: att.type,
-        content: att.content,
-        name: att.name
-    }));
-     // Preserve original tool calls if editing an assistant message that made them
-     // NOTE: With the current frontend tool flow, `tool_calls` on the assistant message
-     // might not be stored in the DB unless explicitly added. We preserve it if it exists.
-     const toolCallsForSave = originalMessage.tool_calls || null;
+   // Preserve original attachments when editing text
+   const attachmentsForSave = (originalMessage.attachments || []).map(att => ({
+       type: att.type,
+       content: att.content,
+       name: att.name
+   }));
+   const toolCallsForSave = originalMessage.tool_calls || null;
 
-    try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                 message: newText,
-                 model_name: originalMessage.model_name,
-                 attachments: attachmentsForSave,
-                 tool_calls: toolCallsForSave // Include tool calls if they existed
-            })
-        });
-        if (!response.ok) {
-             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
-            throw new Error(`Failed to edit message: ${errorData.detail || response.statusText}`);
-        }
+   try {
+       const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({
+                message: newText,
+                model_name: originalMessage.model_name,
+                attachments: attachmentsForSave,
+                tool_calls: toolCallsForSave
+           })
+       });
+       if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+           throw new Error(`Failed to edit message: ${errorData.detail || response.statusText}`);
+       }
 
-        await loadChat(state.currentChatId);
+       // --- Conditional Reload ---
+       if (reloadChat && state.currentChatId) {
+           await loadChat(state.currentChatId);
+       }
+       // --- End Conditional Reload ---
 
-    } catch (error) {
-        console.error('Error editing message:', error);
-        alert(`Failed to save changes: ${error.message}`);
-    }
+       return true; // Indicate success
+
+   } catch (error) {
+       console.error('Error editing message:', error);
+       alert(`Failed to save changes: ${error.message}`);
+       return false; // Indicate failure
+   }
 }
 
 function copyMessageContent(contentDiv, buttonElement) {
-    // Try to get raw text, fallback to textContent
-    // Exclude tool calls/results from direct copy if possible, focus on text content
-    let textToCopy = contentDiv.dataset.raw || '';
-    if (!textToCopy) {
-        // Fallback: try to reconstruct text from parts, excluding known tool blocks
-        let tempText = '';
-        contentDiv.childNodes.forEach(node => {
-            if (node.nodeType === Node.TEXT_NODE) {
-                tempText += node.textContent;
-            } else if (node.nodeType === Node.ELEMENT_NODE
-                       && !node.classList.contains('attachments-container')
-                       && !node.classList.contains('tool-call-block') // Exclude tool call block
-                       && !node.classList.contains('tool-result-block')) // Exclude tool result block
-            {
-                // Basic attempt to get text from non-attachment/tool elements
-                tempText += node.textContent + '\n'; // Add newline for block elements maybe?
+    let textToCopy = '';
+    let accumulatedText = ''; // Buffer for text between blocks
+
+    // Iterate through the direct children nodes of the contentDiv
+    contentDiv.childNodes.forEach(node => {
+        if (node.nodeType === Node.TEXT_NODE) {
+            // Append text nodes to the buffer
+            accumulatedText += node.textContent;
+        } else if (node.nodeType === Node.ELEMENT_NODE) {
+            // If we encounter a block element, process the accumulated text first
+            if (accumulatedText.trim()) {
+                textToCopy += accumulatedText + '\n'; // Add accumulated text with a newline
+                accumulatedText = ''; // Reset buffer
             }
-        });
-        textToCopy = tempText.trim();
+
+            // Handle specific element types
+            if (node.classList.contains('tool-call-block')) {
+                const toolName = node.dataset.toolName || 'unknown_tool';
+                const argsElement = node.querySelector('.tool-arguments');
+                const argsText = argsElement ? argsElement.textContent.trim() : '{}';
+                // Format the tool call representation for copy
+                textToCopy += `\n[Tool Call: ${toolName}]\nArguments:\n${argsText}\n\n`;
+            } else if (node.classList.contains('tool-result-block')) {
+                const resultElement = node.querySelector('.tool-result-content');
+                // Use innerText on the result element to better handle potential formatting inside result
+                const resultText = resultElement ? resultElement.innerText.trim() : '[No Result Content]';
+                 // Format the tool result representation for copy
+                 textToCopy += `[Tool Result]\n${resultText}\n\n`;
+            } else if (!node.classList.contains('attachments-container') && !node.classList.contains('message-avatar-actions') && !node.closest('.tool-header')) {
+                // For other relevant elements (like paragraphs, divs, pre) NOT inside tool headers,
+                // add their text content to the buffer. innerText might be better here too.
+                accumulatedText += node.innerText || node.textContent;
+            }
+            // Ignore attachments, action buttons, and elements within tool headers
+        }
+    });
+
+    // Add any remaining accumulated text at the end
+    if (accumulatedText.trim()) {
+        textToCopy += accumulatedText;
+    }
+
+    textToCopy = textToCopy.trim().replace(/\n{3,}/g, '\n\n'); // Normalize excessive newlines
+
+    // Fallback if structured copy yielded nothing
+    if (!textToCopy) {
+        console.warn("Structured copy resulted in empty string, falling back to dataset.raw or textContent");
+        textToCopy = contentDiv.dataset.raw || contentDiv.textContent || '';
+        textToCopy = textToCopy.trim();
     }
 
     if (!textToCopy) {
-         alert("Nothing to copy.");
-         return;
-     }
-
+        alert("Nothing to copy.");
+        return;
+    }
 
     navigator.clipboard.writeText(textToCopy).then(() => {
          const originalHTML = buttonElement.innerHTML;
@@ -1206,7 +1740,7 @@ function copyMessageContent(contentDiv, buttonElement) {
              buttonElement.disabled = false;
         }, 1500);
     }).catch(err => {
-        console.error('Failed to copy message content:', err);
+        console.error('Failed to copy processed message content:', err);
         alert('Failed to copy text.');
     });
 }
@@ -1225,9 +1759,39 @@ function setupEventListeners() {
     sidebarToggle.addEventListener('click', toggleSidebar);
     modelSelect.addEventListener('change', handleModelChange);
     document.addEventListener('paste', handlePaste);
-    messagesWrapper.addEventListener('click', handleThinkBlockToggle); // Existing listener
-    messagesWrapper.addEventListener('click', handleToolBlockToggle); // ADDED: Listener for tool blocks
-    // Settings button now opens theme modal (API key settings removed)
+
+    // --- Delegated Event Listeners ---
+    messagesWrapper.addEventListener('click', (event) => {
+        // Think Block Toggle
+        const thinkToggle = event.target.closest('.think-block-toggle');
+        if (thinkToggle) {
+            handleThinkBlockToggle(event); // Pass the event
+            return; // Stop further processing if handled
+        }
+
+        // Tool Block Toggle
+        const toolToggle = event.target.closest('.tool-collapse-btn');
+         if (toolToggle) {
+             handleToolBlockToggle(event); // Pass the event
+             return; // Stop further processing
+         }
+
+        // Code Block - Copy Button
+        const copyBtn = event.target.closest('.code-header-btn.copy-btn');
+        if (copyBtn) {
+            handleCodeCopy(copyBtn); // Pass the button element
+            return;
+        }
+
+        // Code Block - Collapse Button
+        const collapseBtn = event.target.closest('.code-header-btn.collapse-btn');
+        if (collapseBtn) {
+            handleCodeCollapse(collapseBtn); // Pass the button element
+            return;
+        }
+    });
+
+    // Settings button now opens theme modal
     document.getElementById('settings-btn').addEventListener('click', () => {
         document.getElementById('theme-modal').style.display = 'flex';
     });
@@ -1255,23 +1819,6 @@ function setupToolToggle() {
 function handleModelChange() {
      updateAttachButtons();
      localStorage.setItem('lastModelName', modelSelect.value);
-}
-
-function createScrollHandler() {
-     let localUserScrolled = false;
-     let localLastScrollTop = chatContainer.scrollTop;
-     return () => {
-         const currentScrollTop = chatContainer.scrollTop;
-         const scrollHeight = chatContainer.scrollHeight;
-         const clientHeight = chatContainer.clientHeight;
-         const scrollDirection = currentScrollTop > localLastScrollTop ? 'down' : 'up';
-         localLastScrollTop = currentScrollTop;
-         if (scrollDirection === 'up' && currentScrollTop < scrollHeight - clientHeight - 100) {
-             localUserScrolled = true;
-             state.userHasScrolled = true;
-             state.isAutoScrolling = false;
-         }
-     };
 }
 
 function handleInputKeydown(e) {
@@ -1586,209 +2133,69 @@ function getApiKey(provider) {
     return key;
 }
 
+async function streamFromBackend(chatId, parentMessageId, modelName, generationArgs, toolsEnabled, onChunk, onToolStart, onToolEnd, onComplete, onError) {
+    console.log(`streamFromBackend called for chat: ${chatId}, parent: ${parentMessageId}, model: ${modelName}, toolsEnabled: ${toolsEnabled}`);
 
-// Helper to format messages for different providers
-function formatMessagesForProvider(messages, provider) {
-    console.log(`Formatting ${messages.length} messages for provider: ${provider}`);
-    const formatted = [];
-    for (const msg of messages) {
-        let role = msg.role; // user, llm, system, tool
-        let contentParts = [];
-
-        // Skip tool messages if provider doesn't support them directly
-        // Note: This frontend approach manually adds tool results later anyway,
-        // but good practice if using native tool calling.
-        // if (role === 'tool' && provider !== 'google') { continue; } // Example
-
-        // Normalize role names
-        if (provider === 'google') {
-            role = (role === 'llm') ? 'model' : (role === 'assistant' ? 'model' : role);
-            // Google uses 'function' role for tool results, but we add manually here
-        } else { // OpenAI / OpenRouter / Local
-            role = (role === 'llm') ? 'assistant' : role;
-            // OpenAI uses 'tool' role
-        }
-
-
-        // --- Content Handling (Text + Attachments) ---
-        // Add text content first
-        if (msg.message && msg.message.trim() !== "") {
-            if (provider === 'google') {
-                // Google expects alternating user/model roles for text/images
-                contentParts.push({ text: msg.message }); // Wrap text in object
-            } else {
-                contentParts.push({ type: "text", text: msg.message });
-            }
-        }
-
-        // Add attachments
-        for (const attachment of msg.attachments || []) {
-            if (attachment.type === 'image') {
-                if (attachment.content) {
-                    if (provider === 'google') {
-                        contentParts.push({ inline_data: { mime_type: "image/jpeg", data: attachment.content } });
-                    } else {
-                        contentParts.push({ type: "image_url", image_url: { url: `data:image/jpeg;base64,${attachment.content}` } });
-                    }
-                } else { console.warn("Skipping image attachment with missing content:", attachment.name); }
-            } else if (attachment.type === 'file') {
-                const fileContent = attachment.content; // Pre-formatted content
-                if (fileContent) {
-                    // Append file content to the last text part if possible
-                    if (provider === 'google') {
-                        const lastTextPart = contentParts.findLast(p => p.text !== undefined);
-                        if (lastTextPart) { lastTextPart.text += `\n${fileContent}`; }
-                        else { contentParts.push({ text: fileContent }); } // Add as new part if no prior text
-                    } else { // OpenAI format
-                        const lastTextPart = contentParts.findLast(p => p.type === 'text');
-                        if (lastTextPart) { lastTextPart.text += `\n${fileContent}`; }
-                        else { contentParts.push({ type: "text", text: fileContent }); }
-                    }
-                } else { console.warn("Skipping file attachment with missing content:", attachment.name); }
-            }
-        }
-        // --- End Content Handling ---
-
-        // --- Tool Call/Result Formatting (for native support, less relevant here) ---
-        if (role === 'assistant' && msg.tool_calls && provider !== 'google') { // OpenAI format
-            // Native tool calls are added directly to the assistant message
-            formatted.push({ role: role, content: contentParts, tool_calls: msg.tool_calls });
-        } else if (role === 'tool' && provider !== 'google') { // OpenAI format
-             // Native tool results require content and tool_call_id
-             formatted.push({ role: role, content: msg.message, tool_call_id: msg.tool_call_id });
-        } else if (contentParts.length > 0) { // Standard message or Google
-            if (provider === 'google') {
-                // Google needs 'parts' array
-                formatted.push({ role: role, parts: contentParts });
-            } else {
-                // Standard message without tool calls for OpenAI format
-                formatted.push({ role: role, content: contentParts });
-            }
-        } else { console.log(`Skipping message with no content parts (Role: ${role}, Provider: ${provider})`); }
+    if (state.streamController && !state.streamController.signal.aborted) {
+        console.warn("streamFromBackend: Aborting existing stream controller before starting new stream.");
+        state.streamController.abort();
     }
+    state.streamController = new AbortController();
 
-     // Provider specific validation/cleaning (Example: remove consecutive messages)
-     const cleaned = [];
-     let lastRole = null;
-     for (const msg of formatted) {
-          // Allow consecutive tool messages for OpenAI native flow
-          if (msg.role !== 'system' && msg.role === lastRole && provider !== 'google' && msg.role !== 'tool' && lastRole !== 'assistant' /* Allow tool after assistant */) {
-              console.warn(`Skipping consecutive message with role ${msg.role} for ${provider}`); continue;
-          }
-          if (provider !== 'google' && msg.content && Array.isArray(msg.content) && msg.content.length === 0) {
-               console.warn(`Skipping message with empty content array (Role: ${msg.role})`); continue;
-          }
-           if (provider === 'google' && Array.isArray(msg.parts) && msg.parts.length === 0) {
-                console.warn(`Skipping message with empty parts array (Role: ${msg.role})`); continue;
-           }
-          cleaned.push(msg);
-          lastRole = msg.role;
-     }
-      if (provider === 'google' && cleaned.length > 0 && cleaned[cleaned.length - 1].role === 'model') {
-           console.warn("Last message is 'model' for Google, API might require 'user'.");
-       }
-
-    return cleaned;
-}
-
-
-// --- streamLLMResponse (MODIFIED: onChunk post-processing for early code block headers) ---
-async function streamLLMResponse(provider, modelIdentifier, messages, genArgs, onChunk, onComplete, onError, onToolCallDetected) {
-    console.log(`streamLLMResponse called for provider: ${provider}, model: ${modelIdentifier}`);
-    const apiKey = getApiKey(provider);
-    const lowerProvider = provider.toLowerCase();
-
-    if (!apiKey && lowerProvider !== 'local') {
-        onError(new Error(`API Key for ${provider} not configured.`));
-        return;
-    }
-
-    let url = '';
-    let headers = { 'Content-Type': 'application/json' };
-    let body = {};
-    const filteredGenArgs = {};
-    for (const key in genArgs) {
-        if (genArgs[key] !== null && genArgs[key] !== undefined) {
-            filteredGenArgs[key] = genArgs[key];
-        }
-    }
-
-    // Provider Specific Setup (Ensure OpenRouter body matches expectations)
-     if (lowerProvider === 'openrouter') {
-        url = `${PROVIDER_CONFIG.openrouter_base_url}/chat/completions`;
-        headers['Authorization'] = `Bearer ${apiKey}`;
-        headers['HTTP-Referer'] = window.location.origin; // Recommended
-        headers['X-Title'] = "Zeryo Chat"; // Recommended
-        body = {
-             model: modelIdentifier,
-             messages: formatMessagesForProvider(messages, lowerProvider),
-             stream: true,
-             ...filteredGenArgs
-        };
-    } else if (lowerProvider === 'google') {
-        url = `https://generativelanguage.googleapis.com/v1beta/models/${modelIdentifier}:streamGenerateContent?key=${apiKey}&alt=sse`;
-        const formattedMsgs = formatMessagesForProvider(messages, lowerProvider);
-        const generationConfig = {};
-        if (filteredGenArgs.temperature !== undefined) generationConfig.temperature = filteredGenArgs.temperature;
-        if (filteredGenArgs.top_p !== undefined) generationConfig.topP = filteredGenArgs.top_p;
-        if (filteredGenArgs.max_tokens !== undefined) generationConfig.maxOutputTokens = filteredGenArgs.max_tokens;
-        body = { contents: formattedMsgs, generationConfig: generationConfig };
-    } else if (lowerProvider === 'local') {
-        url = `${PROVIDER_CONFIG.local_base_url.replace(/\/$/, '')}/v1/chat/completions`;
-        if (state.apiKeys.local) { headers['Authorization'] = `Bearer ${state.apiKeys.local}`; }
-        // Local models might support tool tags directly, but reasoning isn't standard
-        body = {
-            model: modelIdentifier,
-            messages: formatMessagesForProvider(messages, lowerProvider),
-            stream: true,
-            ...filteredGenArgs
-        };
-    } else {
-        onError(new Error(`Unsupported provider: ${provider}`));
-        return;
-    }
-
-    if (!state.streamController) {
-        state.streamController = new AbortController();
-    }
-    let accumulatedText = ''; // Buffer for regex checking (for tool calls)
-    let isStreamingReasoning = false; // <<< NEW state for OpenRouter reasoning
+    const url = `${API_BASE}/chat/${chatId}/generate`;
+    const body = {
+        parent_message_id: parentMessageId,
+        model_name: modelName,
+        generation_args: generationArgs || {},
+        tools_enabled: toolsEnabled
+    };
 
     try {
-        console.log("Making fetch request to:", url);
         const response = await fetch(url, {
             method: 'POST',
-            headers: headers,
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream'
+            },
             body: JSON.stringify(body),
             signal: state.streamController.signal
         });
 
         if (!response.ok) {
-            const errorText = await response.text().catch(() => `HTTP ${response.status}`);
-            let errorDetail = errorText;
-            try { const errorJson = JSON.parse(errorText); errorDetail = errorJson.error?.message || errorJson.detail || JSON.stringify(errorJson.error) || errorText; } catch {}
-            throw new Error(`API Error (${response.status}): ${errorDetail}`);
+            let errorDetail = `Request failed with status ${response.status}`;
+            try {
+                const errorData = await response.json();
+                errorDetail = errorData.detail || JSON.stringify(errorData);
+            } catch {
+                errorDetail = await response.text().catch(() => errorDetail);
+            }
+            throw new Error(`Backend generation request failed: ${errorDetail}`);
         }
 
-        if (!response.body) { throw new Error("Response body is missing."); }
+        if (!response.body) {
+            throw new Error("Response body is missing.");
+        }
+
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
+        let streamEndedSuccessfully = false;
 
-        // --- Stream Reading Loop (Modified for OpenRouter Reasoning) ---
         while (true) {
+            if (state.streamController.signal.aborted) {
+                console.log("Frontend stream reading aborted by AbortController.");
+                throw new Error("Aborted by user");
+            }
+
             const { done, value } = await reader.read();
+
             if (done) {
-                console.log("LLM Stream finished reading.");
-                // If we were streaming reasoning when the stream ended, close the tag
-                if (isStreamingReasoning) {
-                    console.log("Stream ended while reasoning, adding closing tag.");
-                    onChunk("</think>\n", true); // Pass finalChunk=true
-                    isStreamingReasoning = false; // Reset state
+                console.log("Backend stream finished reading.");
+                if (!streamEndedSuccessfully) {
+                    console.warn("Stream ended without explicit 'done' event from backend.");
                 }
                 break;
             }
-            if (state.streamController?.signal.aborted) { console.log("Frontend stream reading aborted by AbortController."); break; }
 
             buffer += decoder.decode(value, { stream: true });
             let newlineIndex;
@@ -1798,662 +2205,354 @@ async function streamLLMResponse(provider, modelIdentifier, messages, genArgs, o
                 buffer = buffer.substring(newlineIndex + 1);
 
                 if (line.startsWith('data:')) {
-                    const data = line.substring(5).trim();
-                    if (data === '[DONE]') {
-                         console.log("Received [DONE] marker.");
-                         // If we were streaming reasoning when DONE arrived, close the tag
-                         if (isStreamingReasoning) {
-                             console.log("[DONE] received while reasoning, adding closing tag.");
-                             onChunk("</think>\n", true); // Pass finalChunk=true
-                             isStreamingReasoning = false; // Reset state
-                         }
-                    } else if (data) {
+                    const dataStr = line.substring(5).trim();
+                    if (dataStr) {
                         try {
-                            const json = JSON.parse(data);
-                            let reasoningChunk = null;
-                            let contentChunk = null;
+                            const eventData = JSON.parse(dataStr);
 
-                            if (lowerProvider === 'openrouter') {
-                                // Check for reasoning specifically in OpenRouter's delta
-                                reasoningChunk = json.choices?.[0]?.delta?.reasoning;
-                                contentChunk = json.choices?.[0]?.delta?.content;
-                                if (!reasoningChunk && !contentChunk && json.error) throw new Error(`OpenRouter API Error: ${json.error.message}`);
-
-                            } else if (lowerProvider === 'google') {
-                                contentChunk = json.candidates?.[0]?.content?.parts?.[0]?.text || '';
-                                if (!contentChunk && json.error) throw new Error(`Google API Error: ${json.error.message}`);
-                                // Google doesn't have standard 'reasoning' field here
-
-                            } else { // Local or other OpenAI-compatible
-                                contentChunk = json.choices?.[0]?.delta?.content || '';
-                                // Assume local models output <think> tags directly in content if they support it
-                                if (!contentChunk && json.error) throw new Error(`API Error in stream: ${json.error.message || JSON.stringify(json.error)}`);
-                            }
-
-
-                            // --- Process Reasoning Chunk (OpenRouter specific) ---
-                            if (reasoningChunk) {
-                                if (!isStreamingReasoning) {
-                                    // First reasoning chunk, start the block
-                                    console.log("Starting think block");
-                                    onChunk(`<think>${reasoningChunk}`, false); // Pass finalChunk=false
-                                    isStreamingReasoning = true;
-                                } else {
-                                    // Subsequent reasoning chunk
-                                    onChunk(reasoningChunk, false); // Pass finalChunk=false
-                                }
-                                // Accumulate reasoning for tool detection if needed? Unlikely.
-                                // accumulatedText += reasoningChunk; // Probably not needed here
-                            }
-
-                            // --- Process Content Chunk ---
-                            if (contentChunk) {
-                                if (isStreamingReasoning) {
-                                    // Content arrived *after* reasoning, close the think block first
-                                    console.log("Closing think block before content");
-                                    onChunk(`</think>\n${contentChunk}`, false); // Pass finalChunk=false
-                                    isStreamingReasoning = false; // Reset state
-                                } else {
-                                    // Normal content chunk
-                                    onChunk(contentChunk, false); // Pass finalChunk=false
-                                }
-                                accumulatedText += contentChunk; // Accumulate content for tool detection
-
-                                // --- Tool Detection Logic (applied only to content) ---
-                                if (state.toolsEnabled && !state.toolCallPending) {
-                                    TOOL_CALL_REGEX.lastIndex = 0;
-                                    const match = TOOL_CALL_REGEX.exec(accumulatedText);
-                                    if (match) {
-                                        console.log("Tool call pattern detected in content:", match[0]);
-                                        const toolName = match[1];
-                                        const argsString = match[2];
-                                        const toolArgs = parseAttributes(argsString);
-                                        const textBeforeTool = accumulatedText.substring(0, match.index);
-                                        const matchedToolCallString = match[0];
-                                        onToolCallDetected(textBeforeTool, { name: toolName, arguments: toolArgs }, matchedToolCallString);
-                                        break; // Exit inner 'while' loop
+                            switch (eventData.type) {
+                                case 'chunk':
+                                    if (typeof onChunk !== 'function') {
+                                        console.error("CRITICAL: onChunk is not a function!", onChunk);
+                                        throw new Error("Internal error: Invalid onChunk callback.");
                                     }
-                                }
-                                // --- End Tool Detection ---
+                                    if (eventData.data) onChunk(eventData.data);
+                                    break;
+                                case 'tool_start':
+                                    if (typeof onToolStart !== 'function') throw new Error("Internal error: Invalid onToolStart callback.");
+                                    onToolStart(eventData.name, eventData.args);
+                                    break;
+                                case 'tool_end':
+                                     if (typeof onToolEnd !== 'function') throw new Error("Internal error: Invalid onToolEnd callback.");
+                                    onToolEnd(eventData.name, eventData.result, eventData.error);
+                                    break;
+                                case 'error':
+                                    console.error("Backend generation error:", eventData.message);
+                                    streamEndedSuccessfully = false;
+                                    throw new Error(eventData.message || "Unknown backend generation error");
+                                case 'done':
+                                    console.log("Received 'done' event from backend.");
+                                    streamEndedSuccessfully = true;
+                                    break;
+                                default:
+                                    console.warn("Received unknown event type from backend:", eventData.type);
                             }
-                        } catch (e) { console.warn("Failed to parse/process SSE data chunk:", data, e); }
+                        } catch (e) {
+                            console.error("Failed to parse SSE data chunk:", dataStr, e);
+                            streamEndedSuccessfully = false;
+                            throw new Error(`Failed to parse backend event: ${e.message}`);
+                        }
                     }
                 }
-                if (state.streamController?.signal.aborted) { break; }
-            }
-            if (state.streamController?.signal.aborted) { console.log("Frontend stream reading aborted by AbortController after buffer processing."); break; }
-        }
+            } // end while (newlineIndex)
+        } // end while (true)
 
-        // Call onComplete ONLY if the stream finished normally (not aborted, not tool detected *and waiting*)
-        if (!state.streamController?.signal.aborted && !state.toolCallPending) {
+        if (streamEndedSuccessfully) {
+             if (typeof onComplete !== 'function') throw new Error("Internal error: Invalid onComplete callback.");
             onComplete();
         } else {
-            console.log("Stream ended due to abort or pending tool detection, skipping onComplete.");
-             // If aborted while reasoning, ensure tag is closed
-             if (isStreamingReasoning && state.streamController?.signal.aborted) {
-                  console.log("Aborted while reasoning, adding closing tag.");
-                  onChunk("</think>\n", true); // Pass finalChunk=true // Try sending final tag before error handling takes over
-                  isStreamingReasoning = false;
-             }
+            if (typeof onError !== 'function') throw new Error("Internal error: Invalid onError callback.");
+             onError(new Error("Stream processing finished unexpectedly."), false);
         }
 
     } catch (error) {
-        // Ensure reasoning state is reset on error too
-        const wasStreamingReasoningOnError = isStreamingReasoning;
-        isStreamingReasoning = false; // Reset state early
-
-        if (error.name === 'AbortError' || error.message.includes('aborted')) {
-            console.log("Stream fetch explicitly aborted.");
-            if (state.abortingForToolCall) {
-                console.log("Abort was triggered by tool detection logic.");
-                state.abortingForToolCall = false;
-            } else {
-                console.log("Abort was likely user-initiated or unexpected. Calling onError handler.");
-                // If we were aborted mid-reasoning by user, try to close the tag in the final content saved by onError
-                onError(error, wasStreamingReasoningOnError); // Pass flag to onError
-            }
-        } else {
-            console.error(`LLM Streaming Error (${provider}):`, error);
-            onError(error, wasStreamingReasoningOnError); // Pass flag to onError
-        }
+        const isAbort = error.name === 'AbortError' || error.message === "Aborted by user";
+        console.error(`Backend Streaming Error (${isAbort ? 'Abort' : 'Error'}):`, error);
+         if (typeof onError !== 'function') {
+              console.error("CRITICAL: onError callback is invalid during error handling!");
+         } else {
+             onError(error, isAbort);
+         }
     } finally {
-        // Final check, though should be handled above
-        isStreamingReasoning = false;
+       // Let generateAssistantResponse handle nullifying state.streamController via cleanup
     }
 }
 
-// --- Main Generation Function (No changes needed for this specific branch UI fix) ---
-// generateAssistantResponse remains the same as in the previous response.
-// It handles placeholder creation, streaming, tool detection/execution, saving,
-// and calling loadChat on completion/error.
-async function generateAssistantResponse(
-    userMessageId, // This is actually the parentId for the new assistant message
-    isContinuation = false,
-    continuationContext = null,
-    targetContentDiv = null // Passed during tool continuation recursion
-) {
-    console.log(`%c[generateAssistantResponse ENTRY] parentId: ${userMessageId}, isContinuation: ${isContinuation}, targetContentDiv provided: ${!!targetContentDiv}`, "color: purple; font-weight: bold;", { currentChatId: state.currentChatId, streamController: !!state.streamController, toolCallPending: state.toolCallPending, abortingForToolCall: state.abortingForToolCall });
+async function generateAssistantResponse(parentId, targetContentDiv, modelName, generationArgs, toolsEnabled, isEditing = false, initialText = '') {
+    console.log(`%c[generateAssistantResponse RUN - Backend Mode] parentId: ${parentId}, toolsEnabled: ${toolsEnabled}, isEditing: ${isEditing}, targetContentDiv provided: ${!!targetContentDiv}`, "color: purple; font-weight: bold;", { currentChatId: state.currentChatId });
 
-    // --- Initial Checks and Setup ---
-    if (!state.currentChatId || (state.streamController && !isContinuation) || state.toolCallPending) {
-        console.warn("generateAssistantResponse called while busy or no chat active. Aborting.", { currentChatId: state.currentChatId, streamController: !!state.streamController, toolCallPending: state.toolCallPending });
-        if (state.streamController && !state.toolCallPending && !state.streamController.signal.aborted) { state.streamController.abort(); }
-        cleanupAfterGeneration();
-        return;
-    }
-    stopButton.style.display = 'flex';
-    sendButton.disabled = true;
-    sendButton.innerHTML = '<div class="spinner"></div>';
-    // messageInput.disabled = true; // Input interaction is allowed
-    state.isAutoScrolling = true;
-    state.userHasScrolled = false;
-    const localScrollHandler = createScrollHandler();
-    chatContainer.addEventListener('scroll', localScrollHandler);
-
-    let contentDiv = targetContentDiv;
-    let placeholderRow = null;
-    let accumulatedStreamText = ''; // Tracks ALL text for saving/redraw
-    let parentId = userMessageId; // Explicitly use the passed ID as parent
-    let initialText = '';
-    let isEditingExistingMessage = false; // True ONLY during tool continuation recursion
-
-    if (isContinuation) {
-        // --- Continuation Setup (Tool Response) ---
-        if (!contentDiv) {
-             console.warn("[generateAssistantResponse] Continuation called without explicit targetContentDiv, trying state.currentAssistantMessageDiv.");
-             contentDiv = state.currentAssistantMessageDiv;
-        }
-        if (contentDiv) {
-            placeholderRow = contentDiv.closest('.message-row');
-            if (!placeholderRow) { console.error("Continuation error: Could not find parent message row for target contentDiv."); addSystemMessage("Error continuing generation.", "error"); cleanupAfterGeneration(); return; }
-            if (!state.toolContinuationContext) { console.error("Continuation error: toolContinuationContext is missing."); addSystemMessage("Error continuing generation state.", "error"); cleanupAfterGeneration(); return; }
-
-            // Combine previous text + tool call + tool result for the initial display
-            initialText = (state.toolContinuationContext.partialText || '') +
-                          (state.toolContinuationContext.toolCallPlaceholder || '') +
-                          (state.toolContinuationContext.toolResultPlaceholder || '');
-            parentId = state.toolContinuationContext.parentId; // Get the correct original parent from context
-            isEditingExistingMessage = true; // We are editing the message that was interrupted by the tool call
-
-            console.log("[generateAssistantResponse] Continuing generation after tool. Initial text length:", initialText.length, "Original Parent:", parentId, "Editing Msg ID:", placeholderRow.dataset.messageId);
-            buildContentHtml(contentDiv, initialText, true); // Initial render
-            contentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
-            contentDiv.classList.add('streaming');
-            state.currentAssistantMessageDiv = contentDiv; // Track the div being updated
-        } else {
-            console.error("Continuation state is invalid: Could not determine target contentDiv.");
-            addSystemMessage("Error continuing generation due to invalid state.", "error");
-            cleanupAfterGeneration(); return;
-        }
-    } else {
-        // --- New Generation Setup (User message, Regeneration, Branching) ---
-         if (contentDiv) { // Should not happen for new generation
-            console.error("[generateAssistantResponse] Non-continuation call received an unexpected targetContentDiv.");
-            addSystemMessage("Internal error: Invalid state for new generation.", "error");
-            cleanupAfterGeneration(); return;
-        }
-        const tempAssistantId = `temp_assistant_${Date.now()}`;
-        // Create the placeholder row with the correct PARENT ID
-        placeholderRow = createPlaceholderMessageRow(tempAssistantId, parentId);
-        messagesWrapper.appendChild(placeholderRow); // Append to the container
-        contentDiv = placeholderRow.querySelector('.message-content');
-        if (!contentDiv) { console.error("Failed to find placeholder message div."); addSystemMessage("Internal error preparing response area.", "error"); cleanupAfterGeneration(); return; }
-
-        contentDiv.innerHTML = '<span class="pulsing-cursor">█</span>'; // Initial render
-        contentDiv.classList.add('streaming');
-        state.currentAssistantMessageDiv = contentDiv; // Track the new div
-        scrollToBottom(); // Scroll to show the placeholder
-        initialText = ''; // No initial text for new generation
-        isEditingExistingMessage = false; // Not editing an existing message
-        console.log("[generateAssistantResponse] Starting new generation. Parent:", parentId, "Temp ID:", tempAssistantId);
+    if (!state.currentChatId) { console.error("generateAssistantResponse: No current chat ID."); cleanupAfterGeneration(); return; }
+    if (!targetContentDiv) { console.error("generateAssistantResponse: No target content div provided."); cleanupAfterGeneration(); return; }
+    if (targetContentDiv.classList.contains('streaming')) {
+         console.warn("generateAssistantResponse: Generation already in progress for this element.");
+         return;
     }
 
-    // --- Context, Model, Variables ---
-    const context = (isContinuation && state.toolContinuationContext && Array.isArray(state.toolContinuationContext.history))
-                    ? state.toolContinuationContext.history // Use history prepared by onToolCallDetected
-                    : getContextForGeneration(parentId, true); // Get history up to the parent
+    setGenerationInProgressUI(true);
+    state.currentAssistantMessageDiv = targetContentDiv;
+    targetContentDiv.classList.add('streaming');
+    // Initial render respects default via buildContentHtml -> renderMarkdown -> enhanceCodeBlock
+    buildContentHtml(targetContentDiv, initialText, true);
+    targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
-    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-    const modelName = selectedOption.value;
-    const modelIdentifier = selectedOption.dataset.modelIdentifier;
-    const provider = selectedOption.dataset.provider;
-    let finalFullText = initialText;
-    let messageSaved = false;
-    const currentContentDiv = contentDiv; // Capture the correct div for this scope
+    let fullRenderedContent = initialText;
+    let streamErrorOccurred = null;
 
     try {
-        await streamLLMResponse(
-            provider, modelIdentifier, context, defaultGenArgs,
-            // --- onChunk ---
-            (chunk, isFinalChunk = false) => {
-                if (!currentContentDiv || state.toolCallPending || messageSaved || (state.streamController?.signal.aborted && !isFinalChunk)) {
-                    return; // Stop processing if aborted, tool pending, etc.
+        await streamFromBackend(
+            state.currentChatId,
+            parentId,
+            modelName,
+            generationArgs,
+            toolsEnabled,
+            // --- onChunk Callback ---
+            (textChunk) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                fullRenderedContent += textChunk;
+                // buildContentHtml now applies default state internally
+                buildContentHtml(targetContentDiv, fullRenderedContent, true);
+                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
+                // Finalize blocks incrementally for responsiveness
+                finalizeStreamingCodeBlocks(targetContentDiv);
+            },
+            // --- onToolStart Callback ---
+            (name, args) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                console.log(`Tool Start received: ${name}`, args);
+                const rawTag = `<tool name="${name}" ${Object.entries(args).map(([k, v]) => `${k}="${v}"`).join(' ')} />`;
+                const contentEndsWithTag = fullRenderedContent.trimEnd().endsWith('/>') && fullRenderedContent.includes(`<tool name="${name}"`);
+                if (!contentEndsWithTag) {
+                    fullRenderedContent += rawTag;
                 }
-                accumulatedStreamText += chunk;
-                finalFullText = initialText + accumulatedStreamText;
-                buildContentHtml(currentContentDiv, finalFullText, true); // isStreaming=true
-                // Post-process NEW code blocks
-                currentContentDiv.querySelectorAll('pre > code').forEach(codeElem => {
-                    const preElem = codeElem.parentElement;
-                    if (preElem && preElem.tagName === 'PRE' && !preElem.closest('.code-block-wrapper')) {
-                        const langCls = Array.from(codeElem.classList).find(cls => cls.startsWith('language-'));
-                        const lang = langCls ? langCls.substring(9) : '';
-                        const codeTxt = codeElem.textContent;
-                        const wrapper = createCodeBlockWithContent(codeTxt, lang);
-                        wrapper.classList.add('streaming');
-                        preElem.replaceWith(wrapper);
-                    }
-                });
-                // Cursor management
-                currentContentDiv.querySelector('.pulsing-cursor')?.remove();
-                if (!isFinalChunk) {
-                    currentContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
+                buildContentHtml(targetContentDiv, fullRenderedContent, true);
+                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
+                 // Finalize blocks incrementally
+                finalizeStreamingCodeBlocks(targetContentDiv);
+            },
+            // --- onToolEnd Callback ---
+            (name, result, error) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                console.log(`Tool End received: ${name}`, error ? `Error: ${error}` : `Result: ${result}`);
+                const resultString = error ? `[Error: ${error}]` : result;
+                const encodedResult = resultString.replace(/"/g, '"');
+                const rawTag = `<tool_result tool_name="${name}" result="${encodedResult}" />`;
+                const contentEndsWithTag = fullRenderedContent.trimEnd().endsWith('/>') && fullRenderedContent.includes(`<tool_result tool_name="${name}"`);
+                 if (!contentEndsWithTag) {
+                    fullRenderedContent += rawTag;
                 }
-                // Auto-scroll
-                if (!state.userHasScrolled && state.isAutoScrolling) {
-                    scrollToBottom();
-                }
-           },
-            // --- onComplete ---
+                buildContentHtml(targetContentDiv, fullRenderedContent, true);
+                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
+                 // Finalize blocks incrementally
+                finalizeStreamingCodeBlocks(targetContentDiv);
+            },
+            // --- onComplete Callback ---
             async () => {
-                 if (state.toolCallPending || messageSaved || state.streamController?.signal.aborted) { console.log("onComplete skipped: Tool pending, message saved, or aborted."); return; }
-                 console.log("Streaming completed normally.");
-                 currentContentDiv?.classList.remove('streaming');
-                 currentContentDiv?.querySelector('.pulsing-cursor')?.remove();
-                 if (state.currentAssistantMessageDiv === currentContentDiv) { state.currentAssistantMessageDiv = null; }
-
-                 finalFullText = initialText + accumulatedStreamText;
-                 buildContentHtml(currentContentDiv, finalFullText, false); // Final render, isStreaming=false
-                 finalizeStreamingCodeBlocks(currentContentDiv); // Finalize highlighting
-
-                 try {
-                     console.log(`Saving final message (Complete). isEditing: ${isEditingExistingMessage}, Length: ${finalFullText.length}`);
-                     if (!finalFullText.trim()) {
-                         console.warn("Generated message is empty, removing placeholder.");
-                         currentContentDiv?.closest('.message-row')?.remove();
-                     } else {
-                         let saveResponse;
-                         const finalRow = currentContentDiv?.closest('.message-row');
-                         let messageIdToSave = null;
-
-                         // Determine if editing or adding
-                         if (isEditingExistingMessage && finalRow) { // True only for tool continuation
-                             messageIdToSave = finalRow.dataset.messageId;
-                             console.log(`[onComplete] Determined messageIdToSave (edit): ${messageIdToSave}`);
-                             if (!messageIdToSave || messageIdToSave.startsWith('temp_')) { console.error(`[onComplete] Error: Trying to edit with invalid message ID: ${messageIdToSave}`); isEditingExistingMessage = false; messageIdToSave = null; addSystemMessage("Error saving continuation, attempting to add as new.", "warning"); }
-                         } else if (!isEditingExistingMessage && finalRow && finalRow.dataset.messageId?.startsWith('temp_')) { // True for new message/regen/branch
-                             console.log(`[onComplete] Determined messageIdToSave (new): null (will add)`);
-                             messageIdToSave = null;
-                         } else {
-                             console.error(`[onComplete] Could not determine message ID or row state mismatch. isEditing: ${isEditingExistingMessage}`, finalRow?.dataset.messageId);
-                             // Don't throw, try to add as a failsafe if possible
-                             messageIdToSave = null;
-                             isEditingExistingMessage = false;
-                             addSystemMessage("Internal error determining message ID for saving. Attempting to add as new.", "warning");
-                             // Ensure parentId is set correctly for adding
-                             parentId = userMessageId; // Reset to the original parentId passed to the function
-                             if (state.toolContinuationContext) parentId = state.toolContinuationContext.parentId; // Or use the one from context if continuing
-                         }
-
-                         // Prepare message data common fields
-                         const messageData = { role: 'llm', message: finalFullText, attachments: [], model_name: modelName, tool_calls: null, tool_call_id: null };
-
-                         if (isEditingExistingMessage && messageIdToSave) {
-                             // Edit the message (used in tool continuation flow)
-                             console.log(`[onComplete] Sending EDIT request for ${messageIdToSave}`);
-                             saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageIdToSave}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(messageData) });
-                         } else {
-                             // Add a new message (user message reply, regen, branch)
-                             messageData.parent_message_id = parentId; // Set the parent ID
-                             console.log(`[onComplete] Sending ADD request (Parent: ${parentId})`);
-                             saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(messageData) });
-                         }
-
-                         if (!saveResponse.ok) {
-                            const errorData = await saveResponse.json().catch(() => ({ detail: saveResponse.statusText }));
-                            throw new Error(`Failed to save assistant message: ${errorData.detail || saveResponse.statusText}`);
-                         }
-                         messageSaved = true;
-                         console.log(`Assistant message ${messageIdToSave ? 'edited' : 'saved'} successfully.`);
-                         await loadChat(state.currentChatId); // Reload to get final state including correct IDs/branching
+                if (state.currentAssistantMessageDiv !== targetContentDiv) {
+                     console.warn("onComplete: Target div no longer the active streaming div. Skipping final updates.");
+                     if (state.streamController && !state.streamController.signal.aborted) {
+                         setGenerationInProgressUI(false);
                      }
-                 } catch (saveError) {
-                     console.error("Error saving assistant message:", saveError);
-                     addSystemMessage(`Error saving response: ${saveError.message}`, "error");
-                     if (currentContentDiv) {
-                         // Ensure final state is rendered even if save failed
-                         buildContentHtml(currentContentDiv, finalFullText, false);
-                         finalizeStreamingCodeBlocks(currentContentDiv);
-                         currentContentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Save Error</span>`);
-                     }
-                 } finally {
-                      cleanupAfterGeneration();
-                      chatContainer.removeEventListener('scroll', localScrollHandler);
-                 }
-            },
-             // --- onError ---
-            async (error, wasStreamingReasoning = false) => {
-                 if (messageSaved) { console.log("onError skipped: Message already saved."); return; }
-                 const finalContentDivOnError = currentContentDiv;
-                 const finalRowOnError = finalContentDivOnError?.closest('.message-row');
+                     return;
+                }
+                console.log("Backend generation completed successfully.");
+                targetContentDiv?.classList.remove('streaming');
+                targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
+                // Final buildContentHtml call applies default state
+                buildContentHtml(targetContentDiv, fullRenderedContent, false);
+                // Run finalize *after* the final build to highlight correctly
+                finalizeStreamingCodeBlocks(targetContentDiv);
+                streamErrorOccurred = false;
 
-                 finalFullText = initialText + accumulatedStreamText;
-                 if (wasStreamingReasoning && finalFullText.trim().startsWith('<think') && !finalFullText.includes('</think>')) {
-                     console.log("Appending closing </think> tag to partial message on abort/error.");
-                     finalFullText += "</think>";
-                 }
-                 buildContentHtml(finalContentDivOnError, finalFullText, false); // Render final partial text
-                 finalizeStreamingCodeBlocks(finalContentDivOnError); // Finalize highlighting
-
-                 finalContentDivOnError?.classList.remove('streaming');
-                 finalContentDivOnError?.querySelector('.pulsing-cursor')?.remove();
-                 if (state.currentAssistantMessageDiv === finalContentDivOnError) { state.currentAssistantMessageDiv = null; }
-
-                 if (error.name === 'AbortError' || error.message.includes('aborted')) {
-                     console.log("onError: Handling user-initiated stop or tool-triggered abort.");
-                     if (state.abortingForToolCall) {
-                          console.log("Abort was due to tool detection. Tool handler will proceed.");
-                          // Reset the flag, the tool handler takes over
-                          state.abortingForToolCall = false;
-                          // Do NOT save partial here, let the tool handler manage state.
-                          // Do NOT cleanup here yet.
-                     } else {
-                          console.log("Abort was user-initiated or unexpected.");
-                          // --- Save Partial Message (User Stop) ---
-                          console.log(`Saving partial message after abort. isEditing: ${isEditingExistingMessage}, Length: ${finalFullText.length}`);
-                          if (finalFullText.trim()) {
-                               try {
-                                   let saveResponse;
-                                   let messageIdToSave = null;
-                                   // Determine if editing or adding (same logic as onComplete)
-                                   if (isEditingExistingMessage && finalRowOnError) {
-                                       messageIdToSave = finalRowOnError.dataset.messageId;
-                                       console.log(`[onError-Abort] Determined messageIdToSave (edit): ${messageIdToSave}`);
-                                       if (!messageIdToSave || messageIdToSave.startsWith('temp_')) { console.error(`[onError-Abort] Error: Trying to edit partial with invalid message ID: ${messageIdToSave}`); isEditingExistingMessage = false; messageIdToSave = null; addSystemMessage("Error saving partial, attempting to add as new.", "warning"); }
-                                   } else if (!isEditingExistingMessage && finalRowOnError && finalRowOnError.dataset.messageId?.startsWith('temp_')) {
-                                       console.log(`[onError-Abort] Determined messageIdToSave (new): null (will add)`);
-                                       messageIdToSave = null;
-                                   } else {
-                                        console.error(`[onError-Abort] Could not determine message ID or row state mismatch. isEditing: ${isEditingExistingMessage}`, finalRowOnError?.dataset.messageId);
-                                        messageIdToSave = null; isEditingExistingMessage = false; addSystemMessage("Internal error: Could not determine message ID for saving partial. Attempting to add as new.", "error");
-                                        parentId = userMessageId; // Reset to original parentId
-                                        if (state.toolContinuationContext) parentId = state.toolContinuationContext.parentId;
-                                   }
-                                   const messageData = { role: 'llm', message: finalFullText, attachments: [], model_name: modelName + " (stopped)", tool_calls: null, tool_call_id: null };
-                                   if (isEditingExistingMessage && messageIdToSave) {
-                                       console.log(`[onError-Abort] Sending EDIT request for partial ${messageIdToSave}`);
-                                       saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageIdToSave}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(messageData) });
-                                   } else {
-                                       messageData.parent_message_id = parentId;
-                                       console.log(`[onError-Abort] Sending ADD request for partial (Parent: ${parentId})`);
-                                       saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(messageData) });
-                                   }
-                                   if (!saveResponse.ok) {
-                                        const errorData = await saveResponse.json().catch(() => ({ detail: saveResponse.statusText }));
-                                        throw new Error(`Failed to save partial message: ${errorData.detail || saveResponse.statusText}`);
-                                   }
-                                   messageSaved = true;
-                                   console.log(`Partial assistant message ${messageIdToSave ? 'edited' : 'saved'} successfully after abort.`);
-                                   await loadChat(state.currentChatId); // Reload state
-                               } catch (saveError) {
-                                   console.error("Error saving partial assistant message after abort:", saveError);
-                                   addSystemMessage(`Error saving partial response: ${saveError.message}`, "error");
-                                   finalContentDivOnError?.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Save Error</span>`);
-                               }
-                          } else {
-                               console.log("Aborted with no text generated, removing placeholder.");
-                               finalRowOnError?.remove();
-                          }
-                          addSystemMessage("Generation stopped.", "info", 1500);
-                          console.log("onError: Cleaning up UI state after user abort.");
-                          cleanupAfterGeneration(); // Clean up UI *after* handling user stop
-                          chatContainer.removeEventListener('scroll', localScrollHandler);
-                     }
-                 } else {
-                     // --- Handle Non-Abort Errors ---
-                     console.error("onError: Non-abort stream error occurred:", error);
-                     finalRowOnError?.remove(); // Remove the placeholder/row on stream errors
-                     addSystemMessage(`Generation Error: ${error.message}`, "error");
-                     console.log("onError: Cleaning up UI state after stream error.");
-                     cleanupAfterGeneration(); // Clean up UI
-                     chatContainer.removeEventListener('scroll', localScrollHandler);
-                 }
-            },
-            // --- onToolCallDetected ---
-            async (textBeforeTool, toolCallData, matchedToolCallString) => {
-                 const targetDiv = currentContentDiv; // The div being streamed into
-                 if (!targetDiv) { console.error("[onToolCallDetected] targetDiv is missing!"); return; }
-                 if (!state.toolsEnabled || state.toolCallPending || messageSaved) { console.warn("onToolCallDetected called unexpectedly.", { toolsEnabled: state.toolsEnabled, toolCallPending: state.toolCallPending, messageSaved: messageSaved }); return; }
-                 console.log(`%c[onToolCallDetected] START - Tool: ${toolCallData.name}`, "color: blue; font-weight: bold;", toolCallData.arguments);
-
-                 state.toolCallPending = true; // Block further actions
-                 state.currentToolCallId = `tool_${Date.now()}`; // Generate an ID for this call
-                 console.log("[onToolCallDetected] State updated: toolCallPending=true, currentToolCallId set.");
-
-                 // Abort the current stream segment. The `onError` handler will catch this.
-                 if (state.streamController && !state.streamController.signal.aborted) {
-                     console.log("[onToolCallDetected] Aborting current stream segment for tool call...");
-                     state.abortingForToolCall = true; // Signal the reason for abort
-                     state.streamController.abort();
-                     // IMPORTANT: Do not proceed further here. The onError handler will now run.
-                     // It will check state.abortingForToolCall. If true, it skips saving partial
-                     // and allows this handler (onToolCallDetected) to eventually resume control
-                     // after the stream is fully stopped. We need to wait for the abort to process.
-                     // Let's schedule the rest of the tool handling slightly later to ensure abort completes.
-                     setTimeout(async () => {
-                          console.log("[onToolCallDetected] Resuming after stream abort for tool call.");
-                          // --- UI Update after abort ---
-                          targetDiv.classList.remove('streaming');
-                          targetDiv.querySelector('.pulsing-cursor')?.remove();
-                          accumulatedStreamText = textBeforeTool; // Update accumulated text to before the tool
-                          const currentFullTextBeforeTool = initialText + accumulatedStreamText;
-                          buildContentHtml(targetDiv, currentFullTextBeforeTool, false); // Render final text before tool
-                          finalizeStreamingCodeBlocks(targetDiv); // Finalize highlight before adding tool UI
-                          renderToolCallPlaceholder(targetDiv, toolCallData.name, toolCallData.arguments); // Add placeholder UI
-                          scrollToBottom();
-                          console.log("[onToolCallDetected] UI updated with text and tool call placeholder.");
-                           // --- Store Context & Execute Tool ---
-                          state.toolContinuationContext = {
-                              history: context, // The history sent to the LLM initially for this turn
-                              partialText: currentFullTextBeforeTool, // Text generated *before* the tool call tag
-                              toolCallPlaceholder: matchedToolCallString, // The actual matched <tool .../> tag
-                              toolCallData: toolCallData, // Parsed {name, arguments}
-                              parentId: parentId, // The parent of this assistant message
-                              toolResultPlaceholder: '', // Will be filled after execution
-                              toolResultData: null
-                          };
-                          console.log("[onToolCallDetected] Continuation context stored.");
-                          try {
-                              console.log(`%c[onToolCallDetected] Executing tool: ${toolCallData.name}...`, "color: green;");
-                              addSystemMessage(`Calling tool: ${toolCallData.name}...`, 'info', 1500);
-                              const toolResponse = await fetch(`${API_BASE}/tools/execute`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tool_name: toolCallData.name, arguments: toolCallData.arguments }) });
-                              if (!toolResponse.ok) { const errorData = await toolResponse.json().catch(() => ({ detail: toolResponse.statusText })); throw new Error(`Tool execution failed: ${errorData.detail || toolResponse.statusText}`); }
-                              const toolResult = await toolResponse.json();
-                              console.log("[onToolCallDetected] Tool execution successful, result:", toolResult);
-                              const toolResultTag = `<tool_result tool_name="${toolCallData.name}" result="${toolResult.result.replace(/"/g, '"')}" />`; // Use quotes, JSON should handle escaping
-                              renderToolResult(targetDiv, toolResult.result); // Render tool result UI
-                              addSystemMessage(`Tool ${toolCallData.name} finished.`, 'info', 1500);
-                              scrollToBottom();
-                              // Update context with result info
-                              state.toolContinuationContext.toolResultPlaceholder = toolResultTag;
-                              state.toolContinuationContext.toolResultData = toolResult;
-                              console.log("[onToolCallDetected] UI updated with result, context updated.");
-                              // --- Prepare History for Next Call ---
-                              // History = original context + this assistant's turn (partial + tool call) + tool result
-                              const continuationHistoryPayload = [
-                                  ...state.toolContinuationContext.history, // History sent to LLM for this turn
-                                  { role: 'assistant', message: state.toolContinuationContext.partialText + state.toolContinuationContext.toolCallPlaceholder, attachments: [] },
-                                  { role: 'tool', message: toolResult.result, tool_call_id: state.currentToolCallId } // Backend might ignore tool_call_id if not using native calls
-                              ];
-                              console.log("[onToolCallDetected] Prepared history for continuation:", continuationHistoryPayload.length, "messages");
-                              // --- Reset State for Recursive Call ---
-                              console.log("[onToolCallDetected] Resetting state before recursive call...");
-                              state.toolCallPending = false;
-                              state.streamController = null; // Ensure controller is null before next call
-                              state.currentToolCallId = null;
-                              // state.abortingForToolCall was reset by onError
-                              console.log("[onToolCallDetected] State reset. Making recursive call to generateAssistantResponse...");
-                              // --- Recursive Call to Continue Generation ---
-                              // Pass parentId from context, set isContinuation=true, pass new history, pass the SAME targetContentDiv
-                              await generateAssistantResponse(state.toolContinuationContext.parentId, true, continuationHistoryPayload, targetDiv);
-                              console.log("[onToolCallDetected] Recursive call returned.");
-                          } catch (toolError) {
-                              console.error("[onToolCallDetected] Error during tool execution or continuation:", toolError);
-                              addSystemMessage(`Error executing tool ${toolCallData.name}: ${toolError.message}`, "error");
-                              renderToolResult(targetDiv, `[Error: ${toolError.message}]`); // Render tool error UI
-                              // --- Attempt to Save Partial Before Tool Error ---
-                              const textBeforeFailure = state.toolContinuationContext?.partialText + state.toolContinuationContext?.toolCallPlaceholder;
-                              if (textBeforeFailure) {
-                                  console.log("[onToolCallDetected] Attempting to save text before tool failure...");
-                                  try {
-                                      let saveResponse;
-                                      const finalRowOnError = targetDiv?.closest('.message-row');
-                                      let messageIdToSave = null;
-                                      // Determine if editing or adding (similar logic to onComplete/onError)
-                                       if (isEditingExistingMessage && finalRowOnError) { // True if original generation was interrupted
-                                           messageIdToSave = finalRowOnError.dataset.messageId;
-                                           if (!messageIdToSave || messageIdToSave.startsWith('temp_')) { console.error(`[onToolCallDetected][Error Path] Error: Trying to edit partial with invalid message ID: ${messageIdToSave}`); isEditingExistingMessage = false; messageIdToSave = null; addSystemMessage("Error saving partial after tool error, attempting to add as new.", "warning"); }
-                                       } else if (!isEditingExistingMessage && finalRowOnError && finalRowOnError.dataset.messageId?.startsWith('temp_')) { // True if original generation was new
-                                           messageIdToSave = null;
-                                       } else {
-                                            console.error(`[onToolCallDetected][Error Path] Could not determine message ID or row state mismatch. isEditing: ${isEditingExistingMessage}`, finalRowOnError?.dataset.messageId);
-                                            messageIdToSave = null; isEditingExistingMessage = false; addSystemMessage("Internal error: Could not determine message ID for saving partial after tool error. Attempting to add as new.", "error");
-                                            parentId = state.toolContinuationContext?.parentId; // Get parent from context
-                                       }
-                                      const messageData = { role: 'llm', message: textBeforeFailure + `\n[Tool Error: ${toolError.message}]`, attachments: [], model_name: modelName };
-                                      if (isEditingExistingMessage && messageIdToSave) {
-                                           saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageIdToSave}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(messageData) });
-                                      } else {
-                                           messageData.parent_message_id = parentId; // Use parent from context
-                                           saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/add_message`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(messageData) });
-                                      }
-                                      if (!saveResponse.ok) {
-                                            const errorData = await saveResponse.json().catch(() => ({ detail: saveResponse.statusText }));
-                                            throw new Error(`Failed to save message before tool failure: ${errorData.detail || saveResponse.statusText}`);
-                                      }
-                                      messageSaved = true;
-                                      await loadChat(state.currentChatId); // Reload state
-                                  } catch (saveErr) { console.error("Failed to save text before tool error:", saveErr); addSystemMessage(`Failed to save partial message after tool error: ${saveErr.message}`, "error"); }
-                              }
-                              // --- Final Cleanup After Tool Error ---
-                              console.log("[onToolCallDetected] Resetting state after tool error...");
-                              state.toolCallPending = false;
-                              state.streamController = null;
-                              state.currentToolCallId = null;
-                              if (state.currentAssistantMessageDiv === targetDiv) { state.currentAssistantMessageDiv = null; }
-                              // state.abortingForToolCall should already be false
-                              console.log("[onToolCallDetected] Calling cleanupAfterGeneration after tool error.");
-                              cleanupAfterGeneration();
-                              chatContainer.removeEventListener('scroll', localScrollHandler);
-                          }
-                          console.log(`%c[onToolCallDetected] END - Tool: ${toolCallData.name}`, "color: blue; font-weight: bold;");
-                     }, 10); // Small delay to allow abort signal to propagate in fetch
-
-                 } else {
-                     console.log("[onToolCallDetected] Stream controller not found or already aborted when tool detected.");
-                     // If the stream was *already* stopped before tool detect finished processing,
-                     // proceed with UI update and tool execution directly.
-                     // This path might occur if the stream ends *exactly* on a tool tag.
-
-                    // --- UI Update ---
-                     targetDiv.classList.remove('streaming');
-                     targetDiv.querySelector('.pulsing-cursor')?.remove();
-                     accumulatedStreamText = textBeforeTool;
-                     const currentFullTextBeforeTool = initialText + accumulatedStreamText;
-                     buildContentHtml(targetDiv, currentFullTextBeforeTool, false);
-                     finalizeStreamingCodeBlocks(targetDiv);
-                     renderToolCallPlaceholder(targetDiv, toolCallData.name, toolCallData.arguments);
-                     scrollToBottom();
-                     console.log("[onToolCallDetected] UI updated (stream already stopped path).");
-
-                    // --- Store Context & Execute Tool (same as above) ---
-                     state.toolContinuationContext = { history: context, partialText: currentFullTextBeforeTool, toolCallPlaceholder: matchedToolCallString, toolCallData: toolCallData, parentId: parentId, toolResultPlaceholder: '', toolResultData: null };
-                     console.log("[onToolCallDetected] Continuation context stored (stream already stopped path).");
-                     try {
-                        // ... (Identical tool execution and continuation logic as in the setTimeout above) ...
-                        console.log(`%c[onToolCallDetected] Executing tool: ${toolCallData.name}... (stream already stopped path)`, "color: green;");
-                        addSystemMessage(`Calling tool: ${toolCallData.name}...`, 'info', 1500);
-                        const toolResponse = await fetch(`${API_BASE}/tools/execute`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tool_name: toolCallData.name, arguments: toolCallData.arguments }) });
-                        if (!toolResponse.ok) { const errorData = await toolResponse.json().catch(() => ({ detail: toolResponse.statusText })); throw new Error(`Tool execution failed: ${errorData.detail || toolResponse.statusText}`); }
-                        const toolResult = await toolResponse.json();
-                        const toolResultTag = `<tool_result tool_name="${toolCallData.name}" result="${toolResult.result.replace(/"/g, '"')}" />`;
-                        renderToolResult(targetDiv, toolResult.result);
-                        addSystemMessage(`Tool ${toolCallData.name} finished.`, 'info', 1500);
-                        scrollToBottom();
-                        state.toolContinuationContext.toolResultPlaceholder = toolResultTag;
-                        state.toolContinuationContext.toolResultData = toolResult;
-                        const continuationHistoryPayload = [ ...state.toolContinuationContext.history, { role: 'assistant', message: state.toolContinuationContext.partialText + state.toolContinuationContext.toolCallPlaceholder, attachments: [] }, { role: 'tool', message: toolResult.result, tool_call_id: state.currentToolCallId } ];
-                        console.log("[onToolCallDetected] Resetting state before recursive call (stream already stopped path)...");
-                        state.toolCallPending = false;
-                        state.streamController = null;
-                        state.currentToolCallId = null;
-                        state.abortingForToolCall = false; // Ensure it's reset
-                        console.log("[onToolCallDetected] State reset. Making recursive call (stream already stopped path)...");
-                        await generateAssistantResponse(state.toolContinuationContext.parentId, true, continuationHistoryPayload, targetDiv);
-                        console.log("[onToolCallDetected] Recursive call returned (stream already stopped path).");
-                     } catch (toolError) {
-                         // ... (Identical error handling and partial save logic as in the setTimeout above) ...
-                          console.error("[onToolCallDetected] Error during tool execution or continuation (stream already stopped path):", toolError);
-                          addSystemMessage(`Error executing tool ${toolCallData.name}: ${toolError.message}`, "error");
-                          renderToolResult(targetDiv, `[Error: ${toolError.message}]`);
-                          const textBeforeFailure = state.toolContinuationContext?.partialText + state.toolContinuationContext?.toolCallPlaceholder;
-                          if (textBeforeFailure) { /* ... try saving ... */ }
-                          console.log("[onToolCallDetected] Resetting state after tool error (stream already stopped path)...");
-                          state.toolCallPending = false; state.streamController = null; state.currentToolCallId = null; state.currentAssistantMessageDiv = null; state.abortingForToolCall = false;
-                          console.log("[onToolCallDetected] Calling cleanupAfterGeneration after tool error (stream already stopped path).");
-                          cleanupAfterGeneration();
-                          chatContainer.removeEventListener('scroll', localScrollHandler);
-                     }
-                 }
-            } // End onToolCallDetected
-        ); // End streamLLMResponse call
-    } catch (error) {
-         // Catch synchronous errors during setup (e.g., finding model, initial context prep)
-         console.error("Error initiating generation stream:", error);
-         addSystemMessage(`Error starting generation: ${error.message}`, "error");
-         placeholderRow?.remove(); // Remove placeholder if setup failed
-         cleanupAfterGeneration();
-         chatContainer.removeEventListener('scroll', localScrollHandler);
-    }
-} // End generateAssistantResponse
-
-// --- NEW Helper Function: Finalize Streaming Code Blocks ---
-// Finds code blocks marked as streaming, removes the class, and highlights them.
-function finalizeStreamingCodeBlocks(containerElement) {
-    if (!containerElement) return;
-    console.log("Finalizing streaming code blocks...");
-    // Remove streaming class first
-    containerElement.querySelectorAll('.code-block-wrapper.streaming').forEach(wrapper => {
-         wrapper.classList.remove('streaming');
-         // console.log(`Removed streaming class from: ${wrapper.dataset.streamId || '(no stream id)'}`);
-         // wrapper.removeAttribute('data-stream-id'); // Optional: remove temp id
-    });
-
-    // Then highlight all code blocks within the container that need it
-    containerElement.querySelectorAll('.code-block-wrapper code').forEach(codeElement => {
-         try {
-             // Only highlight if not already highlighted by hljs (which adds 'hljs' class)
-             if (!codeElement.classList.contains('hljs')) {
-                 hljs.highlightElement(codeElement);
-                 // console.log(`Highlighted code block in wrapper.`);
-             }
-         } catch (e) {
-             console.error(`Error highlighting finalized code block:`, e, codeElement.textContent.substring(0,50));
-         }
-    });
-     // Also catch any pre>code that might not have been wrapped (e.g., if stream ended abruptly)
-     containerElement.querySelectorAll('pre > code:not(.hljs)').forEach(codeElement => {
-          if (!codeElement.closest('.code-block-wrapper')) { // Ensure it wasn't handled above
-                console.warn("Found unwrapped code block during finalization, attempting highlight.");
                 try {
-                    hljs.highlightElement(codeElement);
-                } catch(e) { console.error("Error highlighting unwrapped code block:", e); }
-          }
-     });
+                    console.log("Reloading chat state after successful backend generation.");
+                    if (state.currentChatId && targetContentDiv.closest('.message-row')) {
+                        await loadChat(state.currentChatId);
+                    } else {
+                         console.warn("Skipping chat reload in onComplete: Chat context changed or message row removed.");
+                    }
+                } catch (loadError) {
+                     console.error("Error reloading chat after successful generation:", loadError);
+                     addSystemMessage("Error refreshing chat: " + loadError.message, "error");
+                } finally {
+                    if (state.currentAssistantMessageDiv === targetContentDiv) {
+                         setGenerationInProgressUI(false);
+                         state.currentAssistantMessageDiv = null;
+                    }
+                }
+            },
+            // --- onError Callback ---
+             async (error, isAbort) => {
+                console.warn(`>>> onError called: isAbort=${isAbort}`, error.message);
+                streamErrorOccurred = error;
+
+                if (state.currentAssistantMessageDiv !== targetContentDiv && targetContentDiv) {
+                     console.warn("onError: Target div no longer the active streaming div. Skipping UI updates for this div.");
+                     if (state.streamController && state.streamController.signal.aborted) {
+                          setGenerationInProgressUI(false);
+                     }
+                     return;
+                }
+
+                targetContentDiv?.classList.remove('streaming');
+                targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
+                if (targetContentDiv) {
+                    // Final buildContentHtml applies default state even on error/abort
+                    buildContentHtml(targetContentDiv, fullRenderedContent, false);
+                    // Finalize highlighting
+                    finalizeStreamingCodeBlocks(targetContentDiv);
+                }
+
+                console.warn(">>> Calling setGenerationInProgressUI(false) from onError");
+                setGenerationInProgressUI(false);
+                if (state.currentAssistantMessageDiv === targetContentDiv) {
+                    console.warn(">>> Clearing currentAssistantMessageDiv in onError");
+                    state.currentAssistantMessageDiv = null;
+                }
+
+                if (isAbort) {
+                    addSystemMessage("Generation stopped. Reloading...", "info", 1500);
+                    console.warn(">>> User abort detected. Attempting reload after delay...");
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    try {
+                        if (state.currentChatId) {
+                           await loadChat(state.currentChatId);
+                           console.log("Chat reloaded after user abort.");
+                        } else {
+                           console.warn("Skipping reload after abort: No current chat ID.");
+                           startNewChat();
+                        }
+                    } catch (loadError) {
+                        console.error("Error reloading chat after abort:", loadError);
+                        addSystemMessage("Error refreshing chat state after stopping.", "error");
+                        targetContentDiv?.insertAdjacentHTML('beforeend', `<br><span class="system-info-row warning">Stopped. Refresh failed.</span>`);
+                    }
+                } else { // Handle non-abort errors
+                    addSystemMessage(`Generation Error: ${error.message}`, "error");
+                    targetContentDiv?.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Error: ${error.message}</span>`);
+                    const placeholderRow = targetContentDiv?.closest('.message-row.placeholder');
+                    if (placeholderRow) {
+                        console.warn(">>> Removing placeholder on error");
+                        placeholderRow.remove();
+                    }
+                }
+                console.warn(">>> Exiting onError handler");
+            }
+        );
+
+    } catch (error) {
+        console.error("Error setting up generation stream (SYNC):", error);
+        addSystemMessage(`Setup Error: ${error.message}`, "error");
+        targetContentDiv?.classList.remove('streaming');
+        targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
+        const placeholderRow = targetContentDiv?.closest('.message-row.placeholder');
+        if (placeholderRow) placeholderRow.remove();
+        cleanupAfterGeneration();
+    } finally {
+         console.log(">>> generateAssistantResponse function finally block executing.");
+         if (state.currentAssistantMessageDiv === targetContentDiv) {
+              // Ensure cleanup happens even if errors occurred during the process
+              targetContentDiv?.classList.remove('streaming');
+              targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
+              setGenerationInProgressUI(false); // Redundant with onError/onComplete but safe
+              state.currentAssistantMessageDiv = null;
+         } else {
+             // If the target div changed, ensure the global UI state is still cleaned up
+             if (stopButton.style.display !== 'none' || sendButton.disabled) {
+                 console.warn(">>> generateAssistantResponse finally: Target div changed, forcing UI cleanup.");
+                 setGenerationInProgressUI(false);
+             }
+         }
+         console.log(">>> generateAssistantResponse finally block finished.");
+    }
 }
 
+// (Replace the existing finalizeStreamingCodeBlocks function with this one)
+function finalizeStreamingCodeBlocks(containerElement) {
+    if (!containerElement) return;
+    // console.log("Finalizing code blocks (highlighting pass)...");
 
-// --- Send Message Flow (Frontend Generation) (MODIFIED) ---
+    // Find all code blocks within the container that might need highlighting.
+    // This targets code inside our wrappers.
+    containerElement.querySelectorAll('.code-block-wrapper code').forEach(codeElement => {
+         try {
+             // Re-highlight or highlight if missed. highlightElement is idempotent.
+             hljs.highlightElement(codeElement);
+         } catch (e) {
+             console.error(`Error during final highlight pass:`, e, codeElement.textContent.substring(0, 50));
+         }
+    });
+
+    // Clean up any potential streaming classes left over (belt-and-suspenders)
+    containerElement.querySelectorAll('.streaming').forEach(el => {
+        el.classList.remove('streaming');
+    });
+}
+
+/**
+ * Sets the UI state to indicate generation is in progress or finished.
+ * Handles Stop button display, disables send button.
+ * @param {boolean} inProgress - True if generation is starting, false if ending.
+ */
+function setGenerationInProgressUI(inProgress) {
+    console.log(`>>> setGenerationInProgressUI called with inProgress = ${inProgress}`);
+    if (inProgress) {
+        stopButton.style.display = 'flex';
+        sendButton.disabled = true;
+        sendButton.innerHTML = '<div class="spinner"></div>';
+        // REMOVED: isAutoScrolling logic
+    } else {
+        stopButton.style.display = 'none';
+        sendButton.disabled = false;
+        sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';
+        console.log(">>> Send button state reset in setGenerationInProgressUI");
+
+        // REMOVED: isAutoScrolling logic
+
+        if (state.streamController) {
+            if (!state.streamController.signal.aborted) {
+                console.warn(">>> Controller not aborted when setGenerationInProgressUI(false) called. Aborting now.");
+                state.streamController.abort();
+            }
+            state.streamController = null;
+            console.log(">>> Cleared streamController reference");
+        } else {
+             console.log(">>> No streamController reference to clear");
+        }
+
+        state.toolCallPending = false;
+        state.toolContinuationContext = null;
+        state.currentToolCallId = null;
+        state.abortingForToolCall = false;
+        console.log(">>> Reset tool state flags");
+    }
+}
+
+/**
+ * Clears the message input area, including text and attachment previews/state.
+ */
+function clearInputArea() {
+    messageInput.value = '';
+    state.currentImages = [];
+    state.currentTextFiles = [];
+    imagePreviewContainer.innerHTML = '';
+    adjustTextareaHeight(); // Reset height
+}
+
+/**
+ * Prepares the chat UI for receiving a new response (hides welcome, adjusts padding).
+ */
+function prepareChatUIForResponse() {
+    if (document.body.classList.contains('welcome-active')) {
+        document.body.classList.remove('welcome-active');
+        welcomeContainer.style.display = 'none';
+        adjustTextareaHeight(); // Recalculate padding for chat view
+    }
+}
+
+/**
+ * Checks if the chat is empty and shows the welcome screen if necessary.
+ */
+function checkAndShowWelcome() {
+    const hasVisibleMessages = state.messages.some(m => m.role !== 'system');
+    if (!hasVisibleMessages) {
+        welcomeContainer.style.display = 'flex';
+        document.body.classList.add('welcome-active');
+        if (chatContainer) chatContainer.style.paddingBottom = '0px'; // No padding for welcome
+    }
+}
 
 async function sendMessage() {
     const messageText = messageInput.value.trim();
@@ -2463,80 +2562,124 @@ async function sendMessage() {
     ];
 
     if (!messageText && attachments.length === 0) return;
-    if (state.streamController || state.toolCallPending) {
-        console.log("Already generating or tool call pending");
+    if (document.getElementById('send-button').disabled) {
+        addSystemMessage("Please wait for the current response to finish.", "warning");
         return;
     }
 
     const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-    if (!selectedOption || selectedOption.disabled) {
-         alert("Please select a valid model with an available API key."); return;
+    if (!selectedOption) {
+         alert("Please select a model."); return;
     }
-    const provider = selectedOption?.dataset.provider;
-    if (!provider || (!getApiKey(provider) && provider.toLowerCase() !== 'local')) {
-        alert(`API Key for ${provider} is missing or model invalid. Please check Settings or model selection.`); return;
-    }
+    const modelName = selectedOption.value;
 
-    const currentInputText = messageInput.value;
-    messageInput.value = '';
-    state.currentImages = []; state.currentTextFiles = [];
-    imagePreviewContainer.innerHTML = '';
-
-    // --- Ensure input area moves to bottom ---
-    document.body.classList.remove('welcome-active');
-    welcomeContainer.style.display = 'none';
-    adjustTextareaHeight(); // Adjust height and set correct bottom padding
-    // --- End input area adjustment ---
+    const currentInputText = messageInput.value; // Keep track of input before clearing
+    clearInputArea();
+    prepareChatUIForResponse();
 
     let currentChatId = state.currentChatId;
     let savedUserMessageId = null;
+    let assistantPlaceholderRow = null;
+    let assistantContentDiv = null;
 
-    sendButton.disabled = true; sendButton.innerHTML = '<div class="spinner"></div>';
-    // messageInput.disabled = true; // REMOVED: Input is no longer disabled
+    sendButton.disabled = true;
+    sendButton.innerHTML = '<div class="spinner"></div>';
 
     try {
         if (!currentChatId) {
-            const response = await fetch(`${API_BASE}/chat/new_chat`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ character_id: state.currentCharacterId })
-            });
-            if (!response.ok) throw new Error(`Failed to create chat: ${await response.text()}`);
-            const { chat_id } = await response.json();
-            currentChatId = chat_id; state.currentChatId = chat_id;
+            currentChatId = await createNewChatBackend();
+            if (!currentChatId) throw new Error("Failed to create a new chat session.");
+            state.currentChatId = currentChatId;
             await fetchChats();
             localStorage.setItem('lastChatId', currentChatId);
             highlightCurrentChatInSidebar();
         }
 
         const parentId = findLastActiveMessageId(state.messages);
-        const addUserResponse = await fetch(`${API_BASE}/chat/${currentChatId}/add_message`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                role: 'user', message: messageText || " ", attachments: attachments, parent_message_id: parentId
-            })
-        });
-        if (!addUserResponse.ok) throw new Error(`Failed to save user message: ${await addUserResponse.text()}`);
-        const { message_id } = await addUserResponse.json();
-        savedUserMessageId = message_id;
+        const userMessageData = {
+            role: 'user',
+            message: messageText || " ",
+            attachments: attachments,
+            parent_message_id: parentId
+        };
+        savedUserMessageId = await saveMessageToBackend(currentChatId, userMessageData);
+        if (!savedUserMessageId) throw new Error("Failed to save user message.");
         console.log(`User message saved with ID: ${savedUserMessageId}`);
 
-        await loadChat(currentChatId); // Reload state to include user message & render it
+        await loadChat(currentChatId); // Reload state (will render user msg, won't auto-scroll)
 
-        await generateAssistantResponse(savedUserMessageId); // Start generation
+        assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, savedUserMessageId);
+        messagesWrapper.appendChild(assistantPlaceholderRow);
+        assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
+
+        if (!assistantContentDiv) {
+             throw new Error("Failed to create assistant response placeholder element.");
+        }
+
+        await generateAssistantResponse(
+            savedUserMessageId,
+            assistantContentDiv,
+            modelName,
+            defaultGenArgs,
+            state.toolsEnabled
+        );
 
     } catch (error) {
         console.error('Error sending message or preparing generation:', error);
         addSystemMessage(`Error: ${error.message}`, "error");
-        messageInput.value = currentInputText; // Restore input on error
-        alert("Failed to send message. Please try again.");
-        sendButton.disabled = false; sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';
-        // messageInput.disabled = false; // REMOVED: Input is no longer disabled
-        // If sending failed, check if we should revert to welcome state
-        if (!state.messages || state.messages.length === 0 || state.messages.every(m => m.role === 'system')) {
-            document.body.classList.add('welcome-active');
-            welcomeContainer.style.display = 'flex';
-            adjustTextareaHeight(); // Ensure padding is removed
+        if (!messageInput.value) messageInput.value = currentInputText; // Restore input if needed
+        assistantPlaceholderRow?.remove();
+        cleanupAfterGeneration();
+        checkAndShowWelcome();
+        adjustTextareaHeight();
+        // Update button visibility on error
+        updateScrollButtonVisibility();
+    }
+}
+
+/**
+ * Creates a new chat session on the backend.
+ * @returns {Promise<string|null>} The new chat ID or null on failure.
+ */
+async function createNewChatBackend() {
+    try {
+        const response = await fetch(`${API_BASE}/chat/new_chat`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ character_id: state.currentCharacterId })
+        });
+        if (!response.ok) throw new Error(`Failed to create chat: ${await response.text()}`);
+        const { chat_id } = await response.json();
+        return chat_id;
+    } catch (error) {
+        console.error("Error creating new chat backend:", error);
+        addSystemMessage(`Error creating chat: ${error.message}`, "error");
+        return null;
+    }
+}
+
+/**
+ * Saves a message (user or assistant partial/error) to the backend.
+ * @param {string} chatId The chat ID.
+ * @param {object} messageData The message data ({role, message, attachments, parent_message_id, model_name?, tool_calls?, tool_call_id?}).
+ * @returns {Promise<string|null>} The saved message ID or null on failure.
+ */
+async function saveMessageToBackend(chatId, messageData) {
+    try {
+        const url = `${API_BASE}/chat/${chatId}/add_message`;
+        const response = await fetch(url, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(messageData)
+        });
+        if (!response.ok) {
+             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+             throw new Error(`Failed to save message (${messageData.role}): ${errorData.detail || response.statusText}`);
         }
+        const { message_id } = await response.json();
+        return message_id;
+    } catch (error) {
+        console.error("Error saving message to backend:", error);
+        addSystemMessage(`Error saving message: ${error.message}`, "error");
+        return null;
     }
 }
 
@@ -2594,114 +2737,93 @@ function findLastActiveMessageId(messages) {
      return lastActiveId;
 }
 
-
-// Helper to clean up UI state after generation ends (success, error, abort)
+/**
+ * Cleans up UI state after generation finishes or is stopped/errored.
+ */
 function cleanupAfterGeneration() {
     console.log("Running cleanupAfterGeneration");
     sendButton.disabled = false;
-    sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>'; // Reset send button icon
-    // messageInput.disabled = false; // REMOVED: Input is no longer disabled during generation
-    stopButton.style.display = 'none';
-    state.isAutoScrolling = false;
-    // Ensure any lingering stream controllers are nullified and aborted
-    if (state.streamController && !state.streamController.signal.aborted) {
-        console.warn("Cleaning up potentially active stream controller.");
-        state.streamController.abort();
-    }
-    state.streamController = null; // Nullify the controller reference
-    state.toolCallPending = false; // Reset tool pending flag
-    state.toolContinuationContext = null; // Clear context
-    state.currentAssistantMessageDiv = null; // Clear reference to streaming div
-    state.currentToolCallId = null; // Clear tool call ID
-    state.abortingForToolCall = false; // Reset abort reason flag
-    // Don't refocus input automatically as it might be disruptive
-    // messageInput.focus();
+    sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';
+    // REMOVED: isAutoScrolling logic
+    state.currentAssistantMessageDiv = null;
+    setGenerationInProgressUI(false); // Ensures flags/controller cleared
 }
 
-// --- renderToolCallPlaceholder (MODIFIED: Added collapse functionality) ---
+// (Replace the existing renderToolCallPlaceholder function with this one)
 function renderToolCallPlaceholder(messageContentDiv, toolName, args) {
     if (!messageContentDiv) return;
 
     const toolCallBlock = document.createElement('div');
-    // Start collapsed by default
-    toolCallBlock.className = 'tool-call-block collapsed';
+    toolCallBlock.className = 'tool-call-block collapsed'; // Start collapsed
     toolCallBlock.dataset.toolName = toolName;
 
     const toolHeader = document.createElement('div');
     toolHeader.className = 'tool-header';
-
     const toolNameSpan = document.createElement('span');
     toolNameSpan.className = 'tool-header-name';
-    const toolIcon = toolName === 'add' ? 'calculator' : 'tools'; // Example
+    const toolIcon = toolName === 'add' ? 'calculator' : (toolName === 'search' ? 'search' : 'tools'); // Added search icon
     toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> Calling: ${toolName}`;
-
-    // Create collapse button
-    const collapseBtn = document.createElement('button');
-    collapseBtn.className = 'tool-collapse-btn'; // Use specific class
-    collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>'; // Start collapsed icon
-    collapseBtn.title = 'Expand tool call details';
-    // Click handled by event delegation in setupEventListeners
-
-    // Actions div to hold the button (similar to code blocks)
     const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'tool-header-actions'; // Reuse class? Or make specific?
+    actionsDiv.className = 'tool-header-actions';
+    const collapseBtn = document.createElement('button');
+    collapseBtn.className = 'tool-collapse-btn'; // Class for delegation
+    collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>';
+    collapseBtn.title = 'Expand tool call details';
     actionsDiv.appendChild(collapseBtn);
-
     toolHeader.appendChild(toolNameSpan);
-    toolHeader.appendChild(actionsDiv); // Add actions (button) to header
+    toolHeader.appendChild(actionsDiv);
     toolCallBlock.appendChild(toolHeader);
 
     const toolArgsDiv = document.createElement('div');
-    toolArgsDiv.className = 'tool-arguments'; // Content to be collapsed
+    toolArgsDiv.className = 'tool-arguments';
     try {
-        toolArgsDiv.textContent = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+        // Pretty print JSON if args is an object
+        toolArgsDiv.textContent = typeof args === 'object' && args !== null ? JSON.stringify(args, null, 2) : String(args);
     } catch {
         toolArgsDiv.textContent = "[Invalid Arguments]";
     }
-    // Content starts hidden due to .collapsed class on parent
     toolCallBlock.appendChild(toolArgsDiv);
 
     messageContentDiv.appendChild(toolCallBlock);
 }
 
-// --- renderToolResult (MODIFIED: Added collapse functionality) ---
+// (Replace the existing renderToolResult function with this one)
 function renderToolResult(messageContentDiv, resultText) {
     if (!messageContentDiv) return;
 
-   const toolResultBlock = document.createElement('div');
-   // Start collapsed by default
-   toolResultBlock.className = 'tool-result-block collapsed';
+    const toolResultBlock = document.createElement('div');
+    toolResultBlock.className = 'tool-result-block collapsed'; // Start collapsed
 
-   const toolHeader = document.createElement('div');
-   toolHeader.className = 'tool-header';
+    const toolHeader = document.createElement('div');
+    toolHeader.className = 'tool-header';
+    const toolNameSpan = document.createElement('span');
+    toolNameSpan.className = 'tool-header-name';
+    // Check if result text indicates an error
+    const isError = typeof resultText === 'string' && resultText.toLowerCase().startsWith('[error:')
+    const iconClass = isError ? 'exclamation-circle-fill text-danger' : 'check-circle-fill'; // Use danger color for error icon
+    const titleText = isError ? 'Tool Error' : 'Tool Result';
+    toolNameSpan.innerHTML = `<i class="bi bi-${iconClass}"></i> ${titleText}`;
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'tool-header-actions';
+    const collapseBtn = document.createElement('button');
+    collapseBtn.className = 'tool-collapse-btn'; // Class for delegation
+    collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>';
+    collapseBtn.title = 'Expand tool result';
+    actionsDiv.appendChild(collapseBtn);
+    toolHeader.appendChild(toolNameSpan);
+    toolHeader.appendChild(actionsDiv);
+    toolResultBlock.appendChild(toolHeader);
 
-   const toolNameSpan = document.createElement('span');
-   toolNameSpan.className = 'tool-header-name';
-   toolNameSpan.innerHTML = `<i class="bi bi-check-circle-fill"></i> Tool Result`;
+    const toolResultContent = document.createElement('div');
+    toolResultContent.className = 'tool-result-content';
+     // Render result text potentially as markdown if it contains formatting like code blocks
+     toolResultContent.innerHTML = renderMarkdown(resultText || '[Empty Result]');
+    // Original simple text rendering:
+    // toolResultContent.textContent = resultText || '[Empty Result]';
 
-   // Create collapse button
-   const collapseBtn = document.createElement('button');
-   collapseBtn.className = 'tool-collapse-btn'; // Use specific class
-   collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>'; // Start collapsed icon
-   collapseBtn.title = 'Expand tool result';
-   // Click handled by event delegation
+    toolResultBlock.appendChild(toolResultContent);
 
-   // Actions div
-   const actionsDiv = document.createElement('div');
-   actionsDiv.className = 'tool-header-actions';
-   actionsDiv.appendChild(collapseBtn);
-
-   toolHeader.appendChild(toolNameSpan);
-   toolHeader.appendChild(actionsDiv); // Add actions to header
-   toolResultBlock.appendChild(toolHeader);
-
-   const toolResultContent = document.createElement('div');
-   toolResultContent.className = 'tool-result-content'; // Content to be collapsed
-   toolResultContent.textContent = resultText || '[Empty Result]';
-   // Content starts hidden due to .collapsed class on parent
-   toolResultBlock.appendChild(toolResultContent);
-
-   messageContentDiv.appendChild(toolResultBlock);
+    messageContentDiv.appendChild(toolResultBlock);
 }
 
 
@@ -2743,7 +2865,12 @@ function highlightRenderedCode(element) {
       });
  }
 
-// Helper to create placeholder row visually
+/**
+ * Creates a placeholder message row DOM element.
+ * @param {string} tempId - A temporary unique ID for the placeholder.
+ * @param {string} parentId - The ID of the parent message.
+ * @returns {HTMLElement} The placeholder row element.
+ */
 function createPlaceholderMessageRow(tempId, parentId) {
     const messageRow = document.createElement('div');
     messageRow.className = `message-row assistant-row placeholder`; // Add placeholder class
@@ -2753,14 +2880,13 @@ function createPlaceholderMessageRow(tempId, parentId) {
     const messageDiv = document.createElement('div');
     messageDiv.className = 'message';
 
-    // Placeholder for avatar/actions (can be minimal or match layout)
-    const avatarActionsDiv = document.createElement('div');
-    avatarActionsDiv.className = 'message-avatar-actions placeholder-actions';
-
-    // Message Content placeholder (initially empty or with cursor)
+    // Message Content placeholder (initially empty, cursor added by generateAssistantResponse)
     const contentDiv = document.createElement('div');
     contentDiv.className = 'message-content';
-    // contentDiv.innerHTML = '<span class="pulsing-cursor">▍</span>'; // Cursor added by caller
+
+    // Placeholder for avatar/actions
+    const avatarActionsDiv = document.createElement('div');
+    avatarActionsDiv.className = 'message-avatar-actions placeholder-actions'; // Minimal actions placeholder
 
     messageDiv.appendChild(contentDiv);
     messageDiv.appendChild(avatarActionsDiv); // Add actions below content
@@ -2768,126 +2894,6 @@ function createPlaceholderMessageRow(tempId, parentId) {
     return messageRow;
 }
 
-
-// --- Context Preparation ---
-// Get message context for sending to LLM - UPDATED for Tools Prompt and Think Blocks
-function getContextForGeneration(stopAtMessageId = null, includeStopMessage = false) {
-    const context = [];
-    const messageMap = new Map(state.messages.map(msg => [msg.message_id, { ...msg }]));
-    const rootMessages = [];
-
-    state.messages.forEach(msg => {
-        if (msg.role === 'system') return; // Skip DB system messages
-        const msgNode = messageMap.get(msg.message_id);
-        if (!msgNode) return;
-         if (msg.parent_message_id && messageMap.has(msg.parent_message_id)) {
-              const parent = messageMap.get(msg.parent_message_id);
-              if (!parent.children) parent.children = [];
-              parent.children.push(msgNode);
-              parent.children.sort((a, b) => a.timestamp - b.timestamp); // Ensure order
-         } else if (!msg.parent_message_id) {
-            rootMessages.push(msgNode);
-        }
-    });
-    // Sort roots by timestamp
-    rootMessages.sort((a, b) => a.timestamp - b.timestamp);
-
-    // Add the effective system prompt first if available
-    if (state.effectiveSystemPrompt) {
-        context.push({ role: 'system', message: state.effectiveSystemPrompt, attachments: [] });
-    }
-
-    // Traverse active branch(es) from roots
-    function traverse(messageId) {
-        const messageNode = messageMap.get(messageId);
-        if (!messageNode || messageNode.role === 'system') return false;
-
-        const shouldAdd = !stopAtMessageId || (messageNode.message_id !== stopAtMessageId || includeStopMessage);
-        let addedMessage = false; // Flag to track if a message was added for this node
-
-        if (shouldAdd) {
-            let roleForContext = messageNode.role; // llm, user, or tool
-            let messageContentForContext = messageNode.message || '';
-            let attachmentsForContext = (messageNode.attachments || []).map(att => ({
-                type: att.type,
-                content: att.content,
-                name: att.name
-            }));
-            let toolCallsForContext = messageNode.tool_calls || null;
-            let toolCallIdForContext = messageNode.tool_call_id || null;
-
-            // --- Think Block Handling ---
-            if (roleForContext === 'llm' && messageContentForContext.trim().startsWith('<think>')) {
-                 console.log(`[getContext] Detected think block in message ${messageNode.message_id}. Excluding from context.`);
-                 const endThinkTagIndex = messageContentForContext.indexOf('</think>');
-                 if (endThinkTagIndex !== -1) {
-                     // Extract content *after* the think block
-                     messageContentForContext = messageContentForContext.substring(endThinkTagIndex + '</think>'.length).trim();
-                 } else {
-                     // No closing tag or entire message was think block
-                     messageContentForContext = '';
-                 }
-
-                 // If there's no meaningful content left after the think block, skip adding this turn entirely.
-                 if (!messageContentForContext && attachmentsForContext.length === 0) {
-                     console.log(`[getContext] Skipping assistant turn ${messageNode.message_id} as it only contained a think block.`);
-                     // Don't push anything to context for this turn.
-                 } else {
-                      // If there IS content after the think block, add it.
-                     context.push({
-                         role: roleForContext,
-                         message: messageContentForContext, // Only content after think block
-                         attachments: attachmentsForContext, // Keep attachments if any existed (unlikely but possible)
-                         tool_calls: toolCallsForContext,
-                         tool_call_id: toolCallIdForContext,
-                     });
-                     addedMessage = true;
-                 }
-            } else {
-                 // --- Standard Message Handling (No leading think block) ---
-                 context.push({
-                     role: roleForContext,
-                     message: messageContentForContext,
-                     attachments: attachmentsForContext,
-                     tool_calls: toolCallsForContext,
-                     tool_call_id: toolCallIdForContext,
-                 });
-                 addedMessage = true;
-            }
-        }
-
-        // Check if we should stop traversal
-        if (stopAtMessageId && messageNode.message_id === stopAtMessageId) {
-             console.log(`Context generation ${addedMessage ? 'added and ' : ''}reached stopAtMessageId: ${stopAtMessageId}`);
-             return true; // Signal to stop
-        }
-
-        // Find active child ID
-        const childrenIds = messageNode.child_message_ids || [];
-        const childrenNodes = childrenIds.map(id => messageMap.get(id)).filter(Boolean);
-        childrenNodes.sort((a, b) => a.timestamp - b.timestamp);
-
-        if (childrenNodes.length > 0) {
-            const activeIndex = messageNode.active_child_index ?? 0;
-            const safeActiveIndex = Math.min(Math.max(0, activeIndex), childrenNodes.length - 1);
-            const activeChildNode = childrenNodes[safeActiveIndex];
-            if (activeChildNode) {
-                 if (traverse(activeChildNode.message_id)) return true; // Propagate stop signal
-            }
-        }
-        return false; // Continue traversal
-    }
-
-    // Start traversal from each root node
-    for (const rootNode of rootMessages) {
-        if (traverse(rootNode.message_id)) break;
-    }
-
-    console.log(`Context prepared (${context.length} messages) up to ${stopAtMessageId || 'end'}`);
-    return context;
-}
-
-// --- NEW Helper Function ---
 // Removes a specific message row and all its subsequent descendants *currently rendered in the DOM*.
 function removeMessageAndDescendantsFromDOM(startMessageId) {
     const startRow = messagesWrapper.querySelector(`.message-row[data-message-id="${startMessageId}"]`);
@@ -2920,95 +2926,160 @@ function removeMessageAndDescendantsFromDOM(startMessageId) {
     console.log("Finished removing branch from DOM, removed IDs:", Array.from(removedIds));
 }
 
-// --- Regeneration / Continuation (Frontend Orchestration) (MODIFIED for Branching UI) ---
-async function regenerateMessage(messageId, newBranch = false) {
-    if (!state.currentChatId || state.streamController || state.toolCallPending) {
-        addSystemMessage("Cannot regenerate while a response is being generated or a tool call is pending.", "warning");
+/**
+ * Deletes a message and its descendants from the backend.
+ * @param {string} chatId The chat ID.
+ * @param {string} messageId The ID of the message branch to delete.
+ * @returns {Promise<boolean>} True on success, false on failure.
+ */
+async function deleteMessageFromBackend(chatId, messageId) {
+    try {
+        const response = await fetch(`${API_BASE}/chat/${chatId}/delete_message/${messageId}`, { method: 'POST' }); // Use POST as per previous example
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+            throw new Error(`Failed to delete message: ${errorData.detail || response.statusText}`);
+        }
+        console.log(`Message ${messageId} deleted from backend.`);
+        return true;
+    } catch (error) {
+        console.error('Error deleting message from backend:', error);
+        addSystemMessage(`Error deleting message: ${error.message}`, "error");
+        return false;
+    }
+}
+
+
+async function regenerateMessage(messageIdToRegen, newBranch = false) {
+    const currentChatId = state.currentChatId;
+    // Use generation state flag check
+    if (!currentChatId || document.getElementById('send-button').disabled) {
+        addSystemMessage("Cannot regenerate while busy.", "warning");
         return;
     }
-    const messageToRegen = state.messages.find(m => m.message_id === messageId);
-    if (!messageToRegen || messageToRegen.role !== 'llm') {
-        addSystemMessage("Error: Can only regenerate assistant messages.", "error"); return;
+
+    const messageToRegen = state.messages.find(m => m.message_id === messageIdToRegen);
+    // We actually need the PARENT message to initiate regeneration from
+    const parentMessage = messageToRegen?.parent_message_id
+        ? state.messages.find(m => m.message_id === messageToRegen.parent_message_id)
+        : null;
+
+    // Ensure we are regenerating an assistant response and have its parent
+    if (!messageToRegen || messageToRegen.role !== 'llm' || !parentMessage) {
+        addSystemMessage("Can only regenerate assistant responses that have a parent.", "error");
+        return;
     }
-    const parentMessageId = messageToRegen.parent_message_id;
-    if (!parentMessageId) {
-        addSystemMessage("Error: Cannot regenerate message without a parent.", "error"); return;
+    const parentMessageId = parentMessage.message_id;
+
+    // Always use the currently selected model from the UI
+    const modelNameToUse = modelSelect.value;
+    if (!modelNameToUse) {
+        addSystemMessage("Please select a model before regenerating.", "error");
+        return;
     }
 
-    console.log(`Regenerating message ${messageId} (new branch: ${newBranch})`);
+    console.log(`Regenerating from parent ${parentMessageId} (replacing/branching from ${messageIdToRegen}, new branch: ${newBranch}) using model ${modelNameToUse}`);
+    let assistantPlaceholderRow = null;
+    let generationParentId = parentMessageId; // ID to pass to generateAssistantResponse
 
-    if (!newBranch) {
-        // --- Replace Logic ---
-        if (!confirm("Replacing this message will delete it and any subsequent messages in this branch. Proceed?")) {
-            return;
-        }
-        try {
-            console.log(`Deleting message ${messageId} and descendants before regeneration (replace).`);
-            // Find parent ID *before* deleting, in case the message object is removed from state
-            const parentOfDeleted = messageToRegen.parent_message_id;
+    try {
+        if (!newBranch) {
+            // --- Replace Logic ---
+            if (!confirm("Replacing will delete this message and all subsequent responses/branches in this specific branch. Proceed?")) return;
+            console.log(`Deleting message branch starting with ${messageIdToRegen} for replacement.`);
 
-            const deleteResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/delete_message/${messageId}`, { method: 'POST' }); // Use POST
-            if (!deleteResponse.ok) {
-                const errorData = await deleteResponse.json().catch(() => ({ detail: deleteResponse.statusText }));
-                throw new Error(`Failed to delete message for regeneration: ${errorData.detail || deleteResponse.statusText}`);
+            // 1. Remove visually first for responsiveness
+            removeMessageAndDescendantsFromDOM(messageIdToRegen);
+
+            // 2. Delete from backend
+            const deleteSuccess = await deleteMessageFromBackend(currentChatId, messageIdToRegen);
+            if (!deleteSuccess) throw new Error("Failed to delete message branch for replacement.");
+
+            // 3. Update local state (remove deleted messages) - NO intermediate render
+            const descendantIds = new Set();
+            const queue = [messageIdToRegen];
+            while(queue.length > 0) {
+                const currentId = queue.shift();
+                if (!currentId || descendantIds.has(currentId)) continue; // Prevent reprocessing
+                descendantIds.add(currentId);
+                // Find children efficiently from state
+                state.messages.forEach(m => {
+                    if (m.parent_message_id === currentId) {
+                         queue.push(m.message_id);
+                    }
+                });
             }
+            state.messages = state.messages.filter(m => !descendantIds.has(m.message_id));
+            console.log(`Locally removed ${descendantIds.size} messages from state.`);
+            // --- REMOVED intermediate renderActiveMessages() call ---
+            // The parent's child list and active index will be corrected by the backend
+            // and reflected accurately when loadChat is called after generation.
 
-            // Reload state to reflect deletion before starting new generation
-            await loadChat(state.currentChatId);
-
-            // Now, start generation as if sending a new message after the parent
-            if (parentOfDeleted) {
-                 await generateAssistantResponse(parentOfDeleted);
-            } else {
-                 // This case should be rare if parentMessageId was found initially
-                 console.error("Regeneration Error: Could not determine parent after deletion.");
-                 addSystemMessage("Error: Could not determine context after deletion.", "error");
-            }
-
-        } catch (error) {
-            console.error('Error during regeneration (replace - delete step):', error);
-            addSystemMessage(`Error preparing regeneration: ${error.message}`, "error");
-            cleanupAfterGeneration(); // Ensure UI is reset
-        }
-    } else {
-        // --- New Branch Logic (MODIFIED UI Handling) ---
-        try {
-            // 1. Find the parent message object in the current state to get branch info
-            const parentMessageNode = state.messages.find(m => m.message_id === parentMessageId);
-            if (!parentMessageNode) {
-                 // Fallback: Maybe the parent isn't in the local `state.messages` if history is truncated?
-                 // This indicates a potential issue, but we can proceed assuming backend has the info.
-                 // We won't be able to remove the old branch from the DOM proactively.
-                 console.warn(`Could not find parent message ${parentMessageId} in local state. Proceeding with generation, UI might show old branch temporarily.`);
-            } else {
-                // 2. Find the *currently active* child ID based on the parent's state
-                const childrenIds = parentMessageNode.child_message_ids || [];
-                const activeIndex = parentMessageNode.active_child_index ?? 0;
-                // Ensure activeIndex is valid for the children we know about
+        } else {
+            // --- New Branch Logic ---
+            console.log(`Branching: Removing current active branch visually before generating new one.`);
+            const parentNode = state.messages.find(m => m.message_id === parentMessageId);
+            if (parentNode) {
+                const childrenIds = parentNode.child_message_ids || [];
+                const activeIndex = parentNode.active_child_index ?? 0;
+                // Ensure index is valid even if child_message_ids is out of sync (shouldn't happen ideally)
                 const safeActiveIndex = Math.min(Math.max(0, activeIndex), childrenIds.length - 1);
                 const activeChildId = childrenIds.length > 0 ? childrenIds[safeActiveIndex] : null;
 
-                // 3. Find and remove the corresponding DOM elements for the *old* active branch
                 if (activeChildId) {
-                    console.log(`Branching: Attempting to remove current active branch starting with ${activeChildId} from DOM.`);
-                    removeMessageAndDescendantsFromDOM(activeChildId); // Use the helper function
+                    console.log(`Branching: Removing current active branch starting with ${activeChildId} from DOM.`);
+                    removeMessageAndDescendantsFromDOM(activeChildId); // Remove the currently displayed branch visually
                 } else {
-                    console.log("Branching: Parent had no known active children to remove from DOM.");
+                    console.log("Branching: Parent had no known active children in state to remove from DOM.");
                 }
+            } else {
+                console.warn(`Could not find parent ${parentMessageId} in local state for branch removal.`);
             }
-
-            // 4. Start generation from the parent. Backend handles actual branch creation & activation.
-            // generateAssistantResponse will append its placeholder to the messagesWrapper.
-            await generateAssistantResponse(parentMessageId);
-            // `loadChat` called by generateAssistantResponse's onComplete/onError will handle the final correct rendering based on the new state from the backend.
-
-        } catch (error) {
-             console.error('Error preparing new branch regeneration:', error);
-             addSystemMessage(`Error preparing new branch: ${error.message}`, "error");
-             cleanupAfterGeneration(); // Ensure UI is reset
+            // generationParentId remains parentMessageId
         }
+
+        // --- Create Placeholder & Start Generation (Common for both Replace and New Branch) ---
+        assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
+        // Find the parent row in the DOM to append after
+        const parentRow = messagesWrapper.querySelector(`.message-row[data-message-id="${generationParentId}"]`);
+        if (parentRow) {
+             // Insert the placeholder *immediately* after the parent row
+             parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
+        } else {
+             // Fallback: If parent row somehow not found (e.g., root message), append to end
+             console.warn(`Parent row ${generationParentId} not found in DOM, appending placeholder to end.`);
+             messagesWrapper.appendChild(assistantPlaceholderRow);
+        }
+
+        const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
+        if (!assistantContentDiv) {
+             // If placeholder creation failed, clean up and stop
+             assistantPlaceholderRow?.remove();
+             throw new Error("Failed to create assistant response placeholder element.");
+        }
+        scrollToBottom('smooth'); // Scroll to new placeholder smoothly
+
+        // Start generation - this will save the new message(s) and trigger loadChat on completion/error
+        await generateAssistantResponse(
+            generationParentId,
+            assistantContentDiv,
+            modelNameToUse,
+            defaultGenArgs,
+            state.toolsEnabled
+        );
+        // NOTE: loadChat inside generateAssistantResponse's callbacks will handle the final UI update
+
+    } catch (error) {
+        console.error(`Error during regeneration (new branch: ${newBranch}):`, error);
+        addSystemMessage(`Regeneration failed: ${error.message}`, "error");
+        assistantPlaceholderRow?.remove(); // Remove placeholder on error
+        // Consider reloading the chat to revert to a consistent state on failure
+        try { await loadChat(currentChatId); } catch(e) {
+            console.error("Failed to reload chat after regeneration error:", e);
+        }
+        cleanupAfterGeneration(); // Use standard cleanup
     }
 }
+
 
 
 // Scroll Utility
@@ -3021,342 +3092,97 @@ function scrollToBottom(behavior = 'auto') { // 'smooth' or 'auto'
     });
 }
 
-// Continuation is tricky. If the message ended mid-tool call, we can't easily continue.
-// If it ended mid-text *after* a tool call, we need the context up to the tool result.
-// Let's assume 'continue' means continue the text generation *after* the existing text.
-// This might produce weird results if the original stream was interrupted by a tool.
-async function continueMessage(messageId) {
-    if (!state.currentChatId || state.streamController || state.toolCallPending) {
-        addSystemMessage("Cannot continue while a response is being generated or a tool call is pending.", "warning");
+async function continueMessage(messageIdToContinue) {
+    // Use generation state flag
+    if (!state.currentChatId || document.getElementById('send-button').disabled) {
+        addSystemMessage("Cannot continue while busy.", "warning");
         return;
     }
-    const messageToContinue = state.messages.find(m => m.message_id === messageId);
-     // Allow continuing assistant messages
+    const messageToContinue = state.messages.find(m => m.message_id === messageIdToContinue);
     if (!messageToContinue || messageToContinue.role !== 'llm') {
-        addSystemMessage("Error: Can only continue assistant messages.", "error"); return;
+        addSystemMessage("Can only continue assistant messages.", "error"); return;
     }
-    // Simple check: If the message *looks* like it ends with a tool call/result tag in the raw content
+
+    // *** FIX: Always use the currently selected model from the UI ***
+    const modelNameToUse = modelSelect.value;
+    if (!modelNameToUse) {
+        addSystemMessage("Please select a model before continuing.", "error");
+        return; // Stop if no model is selected
+    }
+    // --- Removed fallback to messageToContinue.model_name ---
+
+    const parentId = messageToContinue.parent_message_id; // Need parent ID for backend context building
+
+    // --- Check if message ends with tool tag (simple check, backend might handle more robustly) ---
     const rawMessage = messageToContinue.message || '';
     TOOL_TAG_REGEX.lastIndex = 0; // Reset regex
     let endsWithToolTag = false;
     let match;
     let lastTagEnd = -1;
-    while ((match = TOOL_TAG_REGEX.exec(rawMessage)) !== null) {
-        lastTagEnd = match.index + match[0].length;
-    }
-    // Check if the last tag found ends exactly at the end of the string (ignoring trailing whitespace)
-    if (lastTagEnd > 0 && lastTagEnd >= rawMessage.trimEnd().length) {
-        endsWithToolTag = true;
-    }
+    while ((match = TOOL_TAG_REGEX.exec(rawMessage)) !== null) { lastTagEnd = match.index + match[0].length; }
+    if (lastTagEnd > 0 && lastTagEnd >= rawMessage.trimEnd().length) endsWithToolTag = true;
 
     if (endsWithToolTag) {
-         addSystemMessage("Cannot continue a message that ends with a tool action. Please regenerate.", "warning");
+         addSystemMessage("Cannot continue a message ending with a tool action. Please regenerate.", "warning");
          return;
     }
-
-
-    console.log(`Continuing message ${messageId}`);
-
-    // UI Loading state - reuse parts of generateAssistantResponse
-    stopButton.style.display = 'flex';
-    sendButton.disabled = true;
-    sendButton.innerHTML = '<div class="spinner"></div>';
-    messageInput.disabled = true;
-    state.isAutoScrolling = true; state.userHasScrolled = false;
-    const scrollHandler = createScrollHandler();
-    chatContainer.addEventListener('scroll', scrollHandler);
-
-    // Find the content div for the message to continue
-    const targetMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageId}"]`);
-    const contentDiv = targetMessageRow?.querySelector('.message-content');
-    if (!contentDiv) {
-         console.error("Cannot find content div to continue message.");
-         addSystemMessage("Error: Could not find message content area to continue.", "error");
-         cleanupAfterGeneration();
-         return;
+    if (!parentId) {
+         addSystemMessage("Cannot continue message without a parent.", "error"); return;
     }
 
-    // Prepare context *including* the message being continued
-    const context = getContextForGeneration(messageId, true);
+    console.log(`Continuing message ${messageIdToContinue} using model ${modelNameToUse}`);
 
-    let existingText = messageToContinue.message || '';
-    let continuationText = '';
-    contentDiv.classList.add('streaming');
-    // Re-render existing content using buildContentHtml and append cursor
-    buildContentHtml(contentDiv, existingText);
-    contentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">▍</span>');
-    highlightRenderedCode(contentDiv); // Re-highlight existing code
-    state.currentAssistantMessageDiv = contentDiv; // Track for updates
-    scrollToBottom();
-
-    // Use original model if possible, fallback to current selection
-    const originalModelName = messageToContinue.model_name || modelSelect.value;
-    const modelInfo = state.models.find(m => m.name === originalModelName) || state.models.find(m => m.name === modelSelect.value);
-    if (!modelInfo || !modelInfo.provider) {
-        addSystemMessage("Error: Could not determine model information for continuation.", "error");
-        cleanupAfterGeneration();
-        if (contentDiv) contentDiv.classList.remove('streaming');
-        state.currentAssistantMessageDiv = null;
-        return;
+    // --- Find Target Div ---
+    const targetMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageIdToContinue}"]`);
+    const targetContentDiv = targetMessageRow?.querySelector('.message-content');
+    if (!targetContentDiv) {
+        addSystemMessage("Error: Could not find message content area.", "error"); return;
     }
-    const modelIdentifier = modelInfo.model_identifier;
-    const provider = modelInfo.provider;
 
-
-    try {
-        // Use streamLLMResponse, but handle completion/error differently (edit instead of add)
-        await streamLLMResponse(
-            provider, modelIdentifier, context, defaultGenArgs,
-            // onChunk
-            (chunk) => {
-                 if (state.toolCallPending) return; // Should not happen in simple continuation
-                 continuationText += chunk;
-                 const fullText = existingText + continuationText;
-                 // Re-render full content with cursor
-                 buildContentHtml(contentDiv, fullText);
-                 contentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">▍</span>');
-                 highlightRenderedCode(contentDiv);
-                 if (!state.userHasScrolled && state.isAutoScrolling) scrollToBottom();
-            },
-            // onComplete
-            async () => {
-                 if (state.toolCallPending) return;
-                 console.log("Continuation streaming completed.");
-                 contentDiv.classList.remove('streaming');
-                 const finalCursor = contentDiv.querySelector('.pulsing-cursor');
-                 if (finalCursor) finalCursor.remove();
-                 state.currentAssistantMessageDiv = null;
-                 const finalFullText = existingText + continuationText;
-
-                 try {
-                      // Edit the existing message with the continued content
-                      const attachmentsForSave = (messageToContinue.attachments || []).map(att => ({ type: att.type, content: att.content, name: att.name }));
-                      const toolCallsForSave = messageToContinue.tool_calls || null; // Preserve original tool calls if they existed
-
-                      const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
-                          method: 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({
-                              message: finalFullText, attachments: attachmentsForSave,
-                              model_name: originalModelName, // Keep original model name
-                              tool_calls: toolCallsForSave // Preserve if existed
-                          })
-                      });
-                       if (!saveResponse.ok) throw new Error(`Failed to save continued message: ${await saveResponse.text()}`);
-                      console.log(`Continued message ${messageId} saved successfully.`);
-                      await loadChat(state.currentChatId); // Reload state
-
-                 } catch (saveError) {
-                      console.error("Error saving continued message:", saveError);
-                      addSystemMessage(`Error saving response: ${saveError.message}`, "error");
-                      // Show error in UI but keep the generated text
-                      buildContentHtml(contentDiv, finalFullText); // Re-render final text
-                      contentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Save Error</span>`);
-                 } finally {
-                      cleanupAfterGeneration();
-                 }
-            },
-            // onError
-            async (error) => {
-                 if (state.toolCallPending) return;
-                 console.error("Continuation streaming error:", error);
-                 contentDiv.classList.remove('streaming');
-                 const finalCursor = contentDiv.querySelector('.pulsing-cursor');
-                 if (finalCursor) finalCursor.remove();
-                 state.currentAssistantMessageDiv = null;
-                 const finalPartialText = existingText + continuationText;
-
-                 if (error.name === 'AbortError' || error.message.includes('aborted')) { // Check name property for AbortError
-                     console.log("Handling aborted continuation. Saving partial text:", finalPartialText);
-                     if (continuationText.trim()) { // Only save if something new was added
-                          try {
-                               const attachmentsForSave = (messageToContinue.attachments || []).map(att => ({ type: att.type, content: att.content, name: att.name }));
-                               const toolCallsForSave = messageToContinue.tool_calls || null;
-
-                               const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
-                                   method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                   body: JSON.stringify({
-                                       message: finalPartialText, attachments: attachmentsForSave,
-                                       model_name: originalModelName + " (incomplete)",
-                                       tool_calls: toolCallsForSave
-                                   })
-                               });
-                              if (!saveResponse.ok) throw new Error(`Failed to save partial continuation: ${await saveResponse.text()}`);
-                              await loadChat(state.currentChatId);
-                          } catch (saveError) {
-                               console.error("Error saving partial continuation:", saveError);
-                               addSystemMessage(`Error saving partial response: ${saveError.message}`, "error");
-                               buildContentHtml(contentDiv, finalPartialText); // Re-render partial text
-                               contentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Save Error</span>`);
-                          }
-                     } else {
-                          console.log("Aborted continuation with no new text, reverting.");
-                          // Revert UI to original text
-                          buildContentHtml(contentDiv, existingText);
-                          highlightRenderedCode(contentDiv);
-                     }
-                     addSystemMessage("Continuation stopped by user.", "info");
-                 } else { // Other errors
-                     buildContentHtml(contentDiv, finalPartialText); // Show partial text before error
-                     contentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Error: ${error.message}</span>`);
-                 }
-                 cleanupAfterGeneration();
-            },
-            // onToolCallDetected - Handle tool call detection during continuation
-             async (textBeforeTool, toolCallData, matchedToolCallString) => {
-                  if (!state.toolsEnabled) return;
-                  console.warn("Tool call detected during message continuation. Handling...");
-                  state.toolCallPending = true;
-                  state.currentToolCallId = `tool_${Date.now()}`;
-                  if (state.streamController && !state.streamController.signal.aborted) {
-                       state.abortingForToolCall = true; // Set flag
-                       state.streamController.abort(); // Abort the continuation stream
-                  }
-
-                  contentDiv.classList.remove('streaming');
-                  const finalCursor = contentDiv.querySelector('.pulsing-cursor');
-                  if (finalCursor) finalCursor.remove();
-                  // Show combined text before tool
-                  const combinedTextBefore = existingText + textBeforeTool;
-                  buildContentHtml(contentDiv, combinedTextBefore); // Render text before tool
-                  renderToolCallPlaceholder(contentDiv, toolCallData.name, toolCallData.arguments); // Render tool call visual
-                  highlightRenderedCode(contentDiv);
-                  scrollToBottom();
-
-                  // Prepare context for the *next* stream (if tool succeeds)
-                  // This context starts from the beginning up to the message being continued
-                  const baseContinuationContext = getContextForGeneration(messageId, true);
-
-                  // Execute tool (similar to generateAssistantResponse)
-                   try {
-                       addSystemMessage(`Calling tool: ${toolCallData.name}...`, 'info');
-                       const toolResponse = await fetch(`${API_BASE}/tools/execute`, {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                tool_name: toolCallData.name,
-                                arguments: toolCallData.arguments
-                            })
-                       });
-                       if (!toolResponse.ok) {
-                            const errorData = await toolResponse.json().catch(() => ({ detail: toolResponse.statusText }));
-                            throw new Error(`Tool execution failed: ${errorData.detail || toolResponse.statusText}`);
-                        }
-                       const toolResult = await toolResponse.json();
-                       const toolResultTag = `<tool_result tool_name="${toolCallData.name}" result="${toolResult.result.replace(/"/g, '&quot;')}" />`;
-                       renderToolResult(contentDiv, toolResult.result); // Render result visual
-                       addSystemMessage(`Tool ${toolCallData.name} finished.`, 'info');
-                       scrollToBottom();
-
-                       // Prepare history for the *next* stream continuation
-                       const nextContinuationHistory = [
-                            ...baseContinuationContext, // History up to and including original message
-                            // Add the assistant's partial response *including* text generated during initial continue + the tool call tag
-                            { role: 'assistant', message: combinedTextBefore + matchedToolCallString, attachments: [] },
-                            // Add tool result
-                            { role: 'tool', message: toolResult.result, tool_call_id: state.currentToolCallId }
-                       ];
-
-                       // Store context for the *next* step (this is slightly different from generateAssistantResponse)
-                       // We are still technically "editing" the original message (messageId)
-                       state.toolContinuationContext = {
-                           history: baseContinuationContext, // History *before* the assistant turn containing the tool call
-                           partialText: combinedTextBefore, // Text before the tool call
-                           toolCallPlaceholder: matchedToolCallString, // The <tool .../> tag
-                           toolResultPlaceholder: toolResultTag, // The <tool_result .../> tag
-                           toolCallData: toolCallData,
-                           toolResultData: toolResult,
-                           parentId: messageToContinue.parent_message_id // Parent of the message being continued
-                       };
-
-                       state.toolCallPending = false;
-                       state.streamController = null;
-                       state.currentToolCallId = null;
-                       // state.abortingForToolCall reset by onError handler
-
-                       // Start the *next* continuation, still technically editing the original message
-                       console.log("Starting continuation stream after tool call during initial continue...");
-                       // Pass the new history; isContinuation remains true
-                       // Pass the targetContentDiv so it continues updating the same block
-                       await generateAssistantResponse(messageToContinue.parent_message_id, true, nextContinuationHistory, contentDiv);
-
-
-                   } catch (toolError) {
-                        console.error("Error during tool execution triggered by continuation:", toolError);
-                        addSystemMessage(`Error executing tool ${toolCallData.name}: ${toolError.message}`, "error");
-                        renderToolResult(contentDiv, `[Error: ${toolError.message}]`); // Render error visual
-                        state.toolCallPending = false;
-                        state.streamController = null;
-                        state.currentToolCallId = null;
-                        state.currentAssistantMessageDiv = null;
-                        state.abortingForToolCall = false; // Reset flag
-
-                        // Attempt to save partial content up to failure
-                        const textBeforeFailure = combinedTextBefore + matchedToolCallString;
-                        try {
-                            const attachmentsForSave = (messageToContinue.attachments || []).map(att => ({ type: att.type, content: att.content, name: att.name }));
-                            const toolCallsForSave = messageToContinue.tool_calls || null;
-                            const saveResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
-                                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    message: textBeforeFailure + `\n[Tool Error: ${toolError.message}]`,
-                                    attachments: attachmentsForSave,
-                                    model_name: originalModelName + " (incomplete)",
-                                    tool_calls: toolCallsForSave
-                                })
-                            });
-                           if (!saveResponse.ok) throw new Error(`Failed to save partial on tool error: ${await saveResponse.text()}`);
-                           await loadChat(state.currentChatId);
-                        } catch (saveErr) { console.error("Failed to save partial after tool error in continuation:", saveErr); }
-
-                        cleanupAfterGeneration();
-                   }
-             }
-        );
-    } catch (error) { // Catch synchronous setup errors for continuation
-         console.error("Error initiating continuation stream:", error);
-         addSystemMessage(`Error starting continuation: ${error.message}`, "error");
-         cleanupAfterGeneration();
-         if (contentDiv) contentDiv.classList.remove('streaming');
-         state.currentAssistantMessageDiv = null;
-    } finally {
-         if (!state.toolCallPending) { // Only remove if no tool call pending
-              chatContainer.removeEventListener('scroll', scrollHandler);
-         }
-    }
+    // --- Start Generation ---
+    await generateAssistantResponse(
+        parentId, // Pass the original parent ID
+        targetContentDiv,
+        modelNameToUse, // Use the currently selected model
+        defaultGenArgs,
+        state.toolsEnabled,
+        true, // isEditing = true (we are effectively editing)
+        messageToContinue.message || '' // initialText = current message content
+    );
 }
 
 
-// Stop Streaming (Frontend Abort) - MODIFIED
-function stopStreaming() {
+async function stopStreaming() {
+    // Check the stream controller used by streamFromBackend
     if (state.streamController && !state.streamController.signal.aborted) {
         console.log("User requested stop. Aborting frontend fetch...");
-        // Set a flag *before* aborting if a tool call is pending,
-        // although the primary logic now resides in streamLLMResponse's onError.
-        // This flag is less critical now but can be kept for potential debugging.
-        if (state.toolCallPending) {
-            console.log("Stop requested during pending tool call flow.");
-            // state.userStoppedDuringToolFlow = true; // Optional flag
-        }
-        // The onError handler in streamLLMResponse will now catch this abort
-        // and handle saving partial state appropriately based on whether
-        // state.abortingForToolCall was set (meaning tool detected) or not (meaning user stop).
+        // 1. Abort the frontend fetch request (triggers onError in generateAssistantResponse)
         state.streamController.abort();
 
-        // DO NOT clean up UI state here. Let the onError handler do it after saving.
-        // cleanupAfterGeneration(); // Moved to onError
-
+        // 2. Signal the backend asynchronously (don't await this in the main stop flow)
+        if (state.currentChatId) {
+            console.log(`Signaling backend to abort generation for chat ${state.currentChatId}...`);
+            // Send signal without waiting for backend response here
+            fetch(`${API_BASE}/chat/${state.currentChatId}/abort_generation`, { method: 'POST' })
+                .then(response => {
+                    if (!response.ok) {
+                        console.error(`Backend abort request failed: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(result => console.log("Backend abort signal result:", result?.message || 'No message'))
+                .catch(err => console.error("Error sending abort signal to backend:", err));
+        } else {
+            console.warn("Cannot signal backend abort: No current chat ID.");
+        }
+        // NOTE: UI cleanup (buttons, etc.) is now handled by the onError callback
+        // triggered by state.streamController.abort() above.
     } else {
         console.log("No active frontend stream to stop or already aborted.");
-        // If stop is clicked when no stream is active but tool state is somehow stuck, reset it.
-        if (state.toolCallPending) {
-            console.warn("Stop clicked with toolCallPending=true but no active stream. Resetting tool state.");
-            addSystemMessage("Resetting potentially stuck tool state.", "warning");
-            state.toolCallPending = false;
-            state.toolContinuationContext = null;
-            state.currentToolCallId = null;
-            state.abortingForToolCall = false;
-            // Force cleanup if UI might be stuck
-            cleanupAfterGeneration();
+        // Cleanup potentially stuck UI state if stop is clicked unexpectedly
+        if (document.getElementById('send-button').disabled || stopButton.style.display === 'flex') {
+             console.warn("Stop clicked with no active stream, forcing UI cleanup.");
+             cleanupAfterGeneration(); // Force reset UI state
         }
     }
 }
@@ -3691,12 +3517,13 @@ function setupCharacterEvents() {
     });
 }
 
-// Helper function to update character action button states
 function updateCharacterActionButtons() {
-     const select = document.getElementById('character-select');
-     const selectedId = select.value;
-     document.getElementById('character-edit-btn').disabled = !selectedId;
-     document.getElementById('character-delete-btn').disabled = !selectedId;
+    const select = document.getElementById('character-select');
+    const selectedId = select.value; // Read the *current* value from the DOM element
+    const hasSelection = !!selectedId; // True if selectedId is not empty string or null/undefined
+
+    document.getElementById('character-edit-btn').disabled = !hasSelection;
+    document.getElementById('character-delete-btn').disabled = !hasSelection;
 }
 
 // --- Chat Actions ---
@@ -3736,9 +3563,14 @@ function startNewChat() {
     state.currentToolCallId = null;
     state.abortingForToolCall = false; // Reset abort reason
 
+    // Reset code block default for new chat
+    state.codeBlocksDefaultCollapsed = false; // Default to expanded
+    updateCodeblockToggleButton(); // Update the global button icon/title
+
     // Ensure chat container doesn't have leftover padding
     if (chatContainer) chatContainer.style.paddingBottom = '0px';
 }
+
 async function deleteCurrentChat() {
     if (!state.currentChatId) { alert("No chat selected to delete."); return; }
      if (state.streamController || state.toolCallPending) {
@@ -3792,8 +3624,8 @@ function setupThemeSwitch() {
         },
         claude_white: {
             '--bg-primary': '#ffffff',
-            '--bg-secondary': '#f7f6f4', 
-            '--bg-tertiary': '#FDFCFA',
+            '--bg-secondary': '#FAF9F5',
+            '--bg-tertiary': '#F5F4ED',
             '--text-primary': '#1f2328', 
             '--text-secondary': '#57606a', 
             '--accent-color': '#e97c5d',
@@ -3925,7 +3757,28 @@ function setupGenerationSettings() {
     updateSlidersUI(); // Initial UI update
 }
 
-// --- addSystemMessage (MODIFIED) ---
+// Helper to parse think block content and remaining text
+function parseThinkContent(text) {
+    let thinkContent = '';
+    let remainingText = '';
+    const thinkStartIndex = text.indexOf('<think>');
+    if (thinkStartIndex === -1) {
+        // Should not happen if called correctly, but handle anyway
+        return { thinkContent: null, remainingText: text };
+    }
+
+    let thinkEndIndex = text.indexOf('</think>');
+    if (thinkEndIndex === -1) {
+        // No closing tag, capture till end
+        thinkContent = text.substring(thinkStartIndex + '<think>'.length);
+        remainingText = '';
+    } else {
+        thinkContent = text.substring(thinkStartIndex + '<think>'.length, thinkEndIndex);
+        remainingText = text.substring(thinkEndIndex + '</think>'.length);
+    }
+    return { thinkContent: thinkContent.trim(), remainingText: remainingText.trim() };
+}
+
 // Added auto-removal timeout
 function addSystemMessage(text, type = "info", timeout = null) { // type can be 'info', 'error', 'warning'
     console.log(`System Message [${type}]: ${text}`);
