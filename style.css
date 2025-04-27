@@ -385,6 +385,7 @@ body.welcome-active .input-area .input-container {
     flex-direction: column;
     scroll-behavior: smooth;
     background-color: var(--bg-secondary);
+    max-width: 100vw;
 }
 
 .messages-wrapper {
@@ -683,6 +684,7 @@ body.welcome-active .input-area .input-container {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     line-height: 1.5;
     margin-bottom: 10px; /* Space below textarea */
+    text-wrap: nowrap;
 }
 
 ::placeholder { /* Make sure placeholder uses original color */
@@ -1674,4 +1676,246 @@ body.welcome-active .input-area .input-container {
 .scroll-bottom-button i {
     font-size: 20px;
     line-height: 1;
+}
+
+/* === ADD THESE RULES AT THE END OF YOUR style.css FILE === */
+
+.mobile-menu-btn {
+    display: none; /* Show the button */
+    position: absolute; /* Position it */
+    left: 10px;
+    top: 9px; /* Adjust vertical alignment */
+    z-index: 110; /* Ensure it's above header background but below sidebar */
+}
+
+@media (max-width: 768px) {
+
+    /* --- General Adjustments --- */
+    body {
+        font-size: 15px; /* Slightly smaller base font */
+        height: 100vh;
+    }
+
+    .theme-options{
+        flex-wrap: wrap;
+        flex-direction: column;
+    }
+
+    /* --- Sidebar (Already handled by existing rule, but ensure toggle is usable) --- */
+    /* Add a separate button for toggling sidebar if needed, style it here */
+
+    /* --- Header --- */
+    .header {
+        padding: 0 10px 0 50px; /* Reduced padding, keep space for potential toggle */
+        height: 50px; /* Slightly smaller header */
+    }
+
+    .active-prompt-container {
+        max-width: calc(100% - 150px); /* Further reduce max-width */
+        font-size: 13px; /* Smaller font */
+        padding: 2px 6px;
+    }
+
+    .header-actions {
+        gap: 5px; /* Less gap */
+    }
+
+    .header-btn {
+        width: 32px;
+        height: 32px;
+        font-size: 15px;
+    }
+
+    /* --- Chat Container --- */
+    .chat-container {
+        padding-top: 50px; /* Match smaller header height */
+    }
+
+    .messages-wrapper {
+        padding: 0 10px; /* Less horizontal padding */
+    }
+
+    .message {
+        max-width: 95%; /* Make messages take more width on mobile */
+    }
+
+    /* --- Input Area --- */
+    .input-area {
+        padding: 0; /* Reduce padding */
+    }
+
+    /* Center input container when welcome screen is active */
+    body.welcome-active .input-area .input-container {
+        width: 90%; /* Use percentage width */
+        margin-left: auto;
+        margin-right: auto;
+        border-radius: var(--border-radius-lg);
+    }
+
+    .input-container {
+        max-width: none; /* Allow full width within padding */
+        padding: 6px; /* Slightly less padding */
+        border-radius: var(--border-radius-lg) var(--border-radius-lg) 0 0;
+    }
+
+
+    #message-input {
+        font-size: 14px; /* Slightly smaller input font */
+        padding: 6px 10px;
+    }
+
+    .input-button, .input-control-btn {
+        width: 30px;
+        height: 30px;
+        font-size: 15px;
+    }
+
+     .model-select {
+        max-width: 120px; /* Reduce max width of model select */
+        font-size: 13px;
+        padding: 5px 18px 5px 6px; /* Adjust padding for arrow */
+        background-size: 10px;
+        background-position: right 6px center;
+     }
+
+    /* --- Popups & Modals --- */
+    .character-popup {
+        width: 180px; /* Slightly narrower character popup */
+    }
+
+    .theme-modal-content,
+    .character-modal-content,
+    .gen-settings-modal-content {
+        width: 90vw; /* Make modals wider */
+        padding: 15px;
+    }
+
+    .attachment-popup-container {
+        padding: 15px;
+        max-width: 95vw;
+        max-height: 85vh;
+    }
+
+    .attachment-popup-close {
+        top: 8px;
+        right: 8px;
+        width: 26px;
+        height: 26px;
+        font-size: 14px;
+    }
+
+    /* --- Welcome Screen --- */
+    .welcome-container {
+        height: calc(100% - 50px); /* Adjust height based on new header */
+        padding: 10px;
+    }
+
+    .welcome-title {
+        font-size: 28px; /* Smaller welcome title */
+    }
+
+    /* --- Scroll to Bottom Button --- */
+    .scroll-bottom-button {
+        bottom: 50px; /* Adjust position */
+        right: 15px;
+        width: 36px;
+        height: 36px;
+        opacity: 0.7; /* Make slightly more transparent */
+    }
+
+    .scroll-bottom-button i {
+        font-size: 18px;
+    }
+
+     /* --- Code Blocks --- */
+     .code-header-btn {
+         font-size: 11px; /* Smaller button text */
+         padding: 1px 5px;
+     }
+
+     .code-header-filetype {
+          font-size: 11px;
+     }
+
+     .code-block-wrapper.collapsed .collapse-info {
+         font-size: 11px;
+     }
+
+     .message code {
+        font-size: 13px; /* Smaller code font */
+     }
+
+     /* --- Tool/Think Blocks --- */
+     .tool-header, .think-header {
+         padding: 4px 8px;
+         font-size: 11px;
+     }
+     .tool-arguments, .tool-result-content, .think-content {
+         padding: 8px 12px;
+         font-size: 12px;
+     }
+
+     .tool-collapse-btn, .think-block-toggle {
+         width: 18px;
+         height: 18px;
+         font-size: 11px;
+     }
+
+         /* Show mobile menu button, hide desktop toggle */
+    .mobile-menu-btn {
+        display: flex; /* Show the button */
+        position: absolute; /* Position it */
+        left: 10px;
+        top: 9px; /* Adjust vertical alignment */
+        z-index: 110; /* Ensure it's above header background but below sidebar */
+    }
+    .sidebar-toggle {
+        display: none; /* Hide the original desktop toggle */
+    }
+
+    /* Adjust header padding to make space for mobile menu button */
+    .header {
+        padding: 0 10px 0 55px; /* Increased left padding */
+    }
+
+    /* Sidebar adjustments for mobile */
+    .sidebar {
+        position: fixed; /* Use fixed positioning */
+        top: 0;
+        left: 0;
+        bottom: 0;
+        z-index: 1000; /* High z-index */
+        transform: translateX(-100%);
+        transition: transform 0.3s ease-in-out;
+        box-shadow: 2px 0 5px rgba(0,0,0,0.2); /* Add shadow when open */
+        /* Ensure width applies correctly */
+        width: 260px; /* Or desired mobile width */
+        max-width: 80%; /* Limit width */
+    }
+    .sidebar.show {
+        transform: translateX(0);
+    }
+
+    /* Add an overlay for closing the sidebar */
+    .sidebar-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.4);
+        z-index: 999; /* Below sidebar, above content */
+    }
+    .sidebar-overlay.show {
+        display: block;
+    }
+
+    .theme-modal {
+        /* Ensure it's definitely fixed and covering */
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+    }
 }

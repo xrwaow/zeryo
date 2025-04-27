@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
 import traceback # <-- NEW: For detailed error logging
 import re # Add 're' import at the top of the file
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Chat Data API")
 
@@ -1537,6 +1538,7 @@ async def execute_tool(request: ExecuteToolRequest):
         print(f"Tool execution error: {e}")
         raise HTTPException(status_code=500, detail=f"Error executing tool '{tool_name}'.")
 
+app.mount("/", StaticFiles(directory=".", html = True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
@@ -1552,4 +1554,5 @@ if __name__ == "__main__":
 
     print("Model Configs Loaded:", len(model_configs.get('models', [])))
     print("Available Tools:", list(TOOL_REGISTRY.keys()))
+
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

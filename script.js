@@ -1,5 +1,7 @@
 // API Configuration (Backend Data API)
-const API_BASE = 'http://localhost:8000';
+// const API_BASE = 'http://localhost:8000';
+// API Configuration (Backend Data API)
+const API_BASE = 'http://192.168.1.5:8000'; // Use relative paths
 
 // Global Config (Fetched from backend)
 let PROVIDER_CONFIG = {
@@ -104,8 +106,6 @@ function parseAttributes(attrsString) {
     return attributes;
 }
 
-// (Replace the existing renderMarkdown function with this one)
-// ADDED: Optional temporaryId for state preservation during streaming
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
     let processedText = text || '';
     let html = '';
@@ -1745,7 +1745,6 @@ function copyMessageContent(contentDiv, buttonElement) {
     });
 }
 
-// --- Event Listeners Setup ---
 function setupEventListeners() {
     messageInput.addEventListener('keydown', handleInputKeydown);
     messageInput.addEventListener('input', adjustTextareaHeight);
@@ -1756,9 +1755,54 @@ function setupEventListeners() {
     newChatBtn.addEventListener('click', startNewChat);
     imageButton.addEventListener('click', () => openFileSelector('image/*'));
     fileButton.addEventListener('click', () => openFileSelector('.txt,.py,.js,.ts,.html,.css,.json,.md,.yaml,.sql,.java,.c,.cpp,.cs,.go,.php,.rb,.swift,.kt,.rs,.toml'));
-    sidebarToggle.addEventListener('click', toggleSidebar);
+    sidebarToggle.addEventListener('click', toggleSidebar); // Keep desktop toggle logic
     modelSelect.addEventListener('change', handleModelChange);
     document.addEventListener('paste', handlePaste);
+
+    // --- NEW Mobile Sidebar Toggle ---
+    const mobileMenuBtn = document.getElementById('mobile-menu-btn');
+    const sidebarElement = document.getElementById('sidebar');
+
+    // Create overlay element dynamically (ensure it's created only once)
+    let sidebarOverlay = document.querySelector('.sidebar-overlay');
+    if (!sidebarOverlay) { // Check if it already exists
+        sidebarOverlay = document.createElement('div');
+        sidebarOverlay.className = 'sidebar-overlay';
+        document.body.appendChild(sidebarOverlay); // Add it to the body
+    }
+
+    if (mobileMenuBtn && sidebarElement && sidebarOverlay) { // Check overlay exists too
+        mobileMenuBtn.addEventListener('click', (e) => {
+            e.stopPropagation(); // Prevent triggering document click listener
+            sidebarElement.classList.toggle('show');
+            sidebarOverlay.classList.toggle('show');
+        });
+
+        // Close sidebar if overlay is clicked
+        sidebarOverlay.addEventListener('click', () => {
+            sidebarElement.classList.remove('show');
+            sidebarOverlay.classList.remove('show');
+        });
+
+        // Optional: Close sidebar if clicking outside of it on mobile
+        document.addEventListener('click', (e) => {
+            if (window.innerWidth <= 768 && // Only on mobile screen size
+                sidebarElement.classList.contains('show') &&
+                !sidebarElement.contains(e.target) &&
+                !mobileMenuBtn.contains(e.target))
+            {
+                sidebarElement.classList.remove('show');
+                sidebarOverlay.classList.remove('show');
+            }
+        });
+    } else {
+         // Add logging if elements aren't found, helps debugging setup
+         if (!mobileMenuBtn) console.error("Mobile menu button #mobile-menu-btn not found!");
+         if (!sidebarElement) console.error("Sidebar element #sidebar not found!");
+         if (!sidebarOverlay) console.error("Sidebar overlay element .sidebar-overlay not created/found!");
+    }
+    // --- END NEW Mobile Sidebar Toggle ---
+
 
     // --- Delegated Event Listeners ---
     messagesWrapper.addEventListener('click', (event) => {
@@ -1792,9 +1836,36 @@ function setupEventListeners() {
     });
 
     // Settings button now opens theme modal
-    document.getElementById('settings-btn').addEventListener('click', () => {
-        document.getElementById('theme-modal').style.display = 'flex';
+    // MODIFIED: Added console.log for diagnostics
+    const settingsBtn = document.getElementById('settings-btn');
+    const themeModal = document.getElementById('theme-modal');
+    if (settingsBtn && themeModal) {
+        settingsBtn.addEventListener('click', () => {
+            console.log("Settings (Theme) button clicked!"); // <-- DIAGNOSTIC LOG ADDED
+            // alert("Settings (Theme) button clicked!"); // <-- Optional alert for quick phone test
+            themeModal.style.display = 'flex';
+        });
+    } else {
+        console.error("Settings button (#settings-btn) or Theme modal (#theme-modal) not found!");
+    }
+
+    // --- Theme Modal Options & Close ---
+    document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
+        button.addEventListener('click', () => {
+            // Assuming applyTheme function exists and handles the rest
+            applyTheme(button.dataset.theme);
+            // Optionally close modal after selection
+            // themeModal.style.display = 'none';
+        });
     });
+    // Close theme modal if background overlay is clicked
+    if (themeModal) {
+        themeModal.addEventListener('click', (e) => {
+            if (e.target === themeModal) {
+                themeModal.style.display = 'none';
+            }
+        });
+    }
 }
 
 function setupToolToggle() {
@@ -1871,20 +1942,24 @@ function toggleSidebar() {
 }
 
 function applySidebarState() {
-     const isCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
-     const icon = sidebarToggle.querySelector('i');
-     const textElements = sidebar.querySelectorAll('.sidebar-title span, .new-chat-btn span, .history-item span, .history-title');
-     if (isCollapsed) {
-          sidebar.classList.add('sidebar-collapsed');
-          icon.className = `bi bi-chevron-right`;
-          textElements.forEach(el => { el.style.display = 'none'; });
-          document.documentElement.style.setProperty('--sidebar-width', '0px');
-     } else {
-          sidebar.classList.remove('sidebar-collapsed');
-          icon.className = `bi bi-chevron-left`;
-          textElements.forEach(el => { el.style.display = ''; });
-          document.documentElement.style.setProperty('--sidebar-width', '260px');
-     }
+    // This function primarily controls the *desktop* collapsed state
+    // The mobile 'show' class is controlled by user interaction
+    const isCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
+    const icon = sidebarToggle.querySelector('i'); // Desktop toggle icon
+    const textElements = sidebar.querySelectorAll('.sidebar-title span, .new-chat-btn span, .history-item span, .history-title');
+
+    if (isCollapsed && window.innerWidth > 768) { // Apply only on desktop
+         sidebar.classList.add('sidebar-collapsed');
+         if(icon) icon.className = `bi bi-chevron-right`;
+         textElements.forEach(el => { el.style.display = 'none'; });
+         document.documentElement.style.setProperty('--sidebar-width', '0px');
+    } else if (window.innerWidth > 768) { // Apply only on desktop
+         sidebar.classList.remove('sidebar-collapsed');
+         if(icon) icon.className = `bi bi-chevron-left`;
+         textElements.forEach(el => { el.style.display = ''; });
+         document.documentElement.style.setProperty('--sidebar-width', '260px');
+    }
+    // Do NOT toggle the 'show' class here for mobile
 }
 
 function updateAttachButtons() {

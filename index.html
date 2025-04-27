@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css" integrity="sha384-GvrOXuhMATgEsSwCs4smul74iXGOixntILdUW9XmUC6+HX0sLNAK3q71HotJqlAn" crossorigin="anonymous">
     <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="xr_hehe.jpg" type="image/x-icon">
 </head>
 <body>
     <!-- Sidebar -->
@@ -28,16 +29,15 @@
             <div class="chat-history">
             </div>
         </div>
-
-        <div class="theme-modal" id="theme-modal">
-            <div class="theme-modal-content">
-                <h3>Appearance Settings</h3>
-                <div class="theme-options">
-                    <button class="theme-option" data-theme="white">White Theme</button>
-                    <button class="theme-option" data-theme="solarized">Solarized</button>
-                    <button class="theme-option" data-theme="dark">Dark Theme</button>
-                    <button class="theme-option" data-theme="claude_white">Claude White</button>
-                </div>
+    </div>
+    <div class="theme-modal" id="theme-modal">
+        <div class="theme-modal-content">
+            <h3>Appearance Settings</h3>
+            <div class="theme-options">
+                <button class="theme-option" data-theme="white">White Theme</button>
+                <button class="theme-option" data-theme="solarized">Solarized</button>
+                <button class="theme-option" data-theme="dark">Dark Theme</button>
+                <button class="theme-option" data-theme="claude_white">Claude White</button>
             </div>
         </div>
     </div>
@@ -67,6 +67,9 @@
     <div class="main-content">
         <div class="chat-container" id="chat-container">
             <div class="header">
+                <button class="header-btn mobile-menu-btn" id="mobile-menu-btn" title="Toggle Menu">
+                    <i class="bi bi-list"></i>
+                </button>
                  <!-- Active Prompt Display Area -->
                  <div id="active-prompt-container" class="active-prompt-container">
                       <!-- Content injected by JS -->
