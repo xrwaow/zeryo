@@ -15,6 +15,10 @@
   ```bash
   python api.py
   ```
+  or
+  ```bash
+  uvicorn api:app --reload --host 0.0.0.0 --port 8000
+  ```
   *   Open the `index.html` file in your web browser.
 
 ## Features
