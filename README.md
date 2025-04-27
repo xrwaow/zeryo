@@ -10,7 +10,7 @@
   *   You need to provide API keys for OpenRouter, Google AI in a file named `api_keys.yaml`, like api_keys_example.yaml.
 
   ```bash
-  pip install PyYAML fastapi requests beautifulsoup4 pydantic uvicorn
+  pip install PyYAML fastapi requests beautifulsoup4 pydantic uvicorn httpx
   ```
   ```bash
   python api.py
