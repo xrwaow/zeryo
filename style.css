@@ -368,7 +368,7 @@ body.welcome-active .input-area .input-container {
     border-color: var(--accent-color);
 }
 
-.header-btn.active { /* Style for active toggle buttons in header */
+.header-btn.active { /* Style for active toggle buttons in header OR NOW IN POPUP */
     background-color: var(--accent-color);
     border-color: var(--accent-color);
     color: white;
@@ -684,7 +684,6 @@ body.welcome-active .input-area .input-container {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     line-height: 1.5;
     margin-bottom: 10px; /* Space below textarea */
-    text-wrap: nowrap;
 }
 
 ::placeholder { /* Make sure placeholder uses original color */
@@ -836,25 +835,29 @@ body.welcome-active .input-area .input-container {
     }
 }
 
-/* Theme Modal */
-.theme-modal {
+.theme-modal,
+.gen-settings-modal,
+.character-modal { /* Added character modal for z-index consistency */
     display: none;
     position: fixed;
     top: 0;
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
-    z-index: 1000;
+    background: rgba(0, 0, 0, 0.6); /* Darker overlay for better focus */
+    z-index: 1050; /* High z-index for modals */
     align-items: center;
     justify-content: center;
 }
 
-.theme-modal-content {
+.theme-modal-content,
+.gen-settings-modal-content,
+.character-modal-content { /* Common modal content styling */
     background: var(--bg-secondary);
-    padding: 20px;
+    padding: 25px; /* Increased padding */
     border-radius: var(--border-radius-lg);
     border: 1px solid var(--border-color);
+    box-shadow: 0 5px 20px rgba(0,0,0,0.3); /* Enhanced shadow */
 }
 
 .theme-modal h3 {
@@ -880,6 +883,102 @@ body.welcome-active .input-area .input-container {
 .theme-option:hover {
     border-color: var(--accent-color);
     color: var(--accent-color);
+}
+
+.settings-popup {
+    position: absolute;
+    top: 55px; /* Position below the header */
+    right: 15px; /* Align with the settings gear icon */
+    width: 280px; /* Adjust width as needed */
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-lg);
+    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.25); /* Softer shadow */
+    z-index: 1040; /* Below modals, above most content */
+    overflow: hidden; /* Clip content to rounded corners */
+    padding-bottom: 5px; /* Small padding at the very bottom of popup */
+}
+
+.settings-popup-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background-color: var(--bg-tertiary); /* Slightly different background for header */
+    border-bottom: 1px solid var(--border-color);
+}
+
+.settings-popup-header h4 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.popup-close-btn { /* Generic close button for popups if needed elsewhere */
+    background: none;
+    border: none;
+    color: var(--text-secondary);
+    font-size: 20px; /* Larger icon */
+    cursor: pointer;
+    padding: 5px;
+    line-height: 1;
+    border-radius: 50%;
+}
+.popup-close-btn:hover {
+    color: var(--text-primary);
+    background-color: color-mix(in srgb, var(--text-secondary) 20%, transparent);
+}
+
+
+.settings-popup-content {
+    padding: 10px; /* Padding for the items area */
+    display: flex;
+    flex-direction: column;
+    gap: 8px; /* Gap between items */
+}
+
+.settings-popup-item {
+    display: flex;
+    align-items: center;
+    gap: 12px; /* Space between icon and text */
+    padding: 10px 12px;
+    background-color: transparent; /* Use main popup background initially */
+    color: var(--text-primary);
+    border: 1px solid transparent; /* For hover/active states */
+    border-radius: var(--border-radius-md);
+    text-align: left;
+    cursor: pointer;
+    font-size: 14px;
+    width: 100%; /* Make buttons full width of their container */
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.settings-popup-item i {
+    font-size: 16px; /* Icon size */
+    width: 20px; /* Fixed width for icon alignment */
+    text-align: center;
+    color: var(--text-secondary); /* Default icon color */
+    transition: color 0.2s ease;
+}
+
+.settings-popup-item:hover {
+    background-color: var(--bg-tertiary);
+    border-color: var(--border-color);
+    color: var(--accent-color); /* Text color changes to accent on hover */
+}
+.settings-popup-item:hover i {
+    color: var(--accent-color); /* Icon color changes to accent on hover */
+}
+
+/* Active state for toggle buttons within the popup */
+.settings-popup-item.active {
+    background-color: color-mix(in srgb, var(--accent-color) 15%, transparent);
+    border-color: var(--accent-color);
+    color: var(--accent-color); /* Text color for active state */
+}
+.settings-popup-item.active i {
+    color: var(--accent-color); /* Icon color for active state */
 }
 
 /* Message Content Formatting */
@@ -1770,13 +1869,13 @@ body.welcome-active .input-area .input-container {
         font-size: 15px;
     }
 
-     .model-select {
+    .model-select {
         max-width: 120px; /* Reduce max width of model select */
         font-size: 13px;
         padding: 5px 18px 5px 6px; /* Adjust padding for arrow */
         background-size: 10px;
         background-position: right 6px center;
-     }
+    }
 
     /* --- Popups & Modals --- */
     .character-popup {
@@ -1918,4 +2017,75 @@ body.welcome-active .input-area .input-container {
         right: 0;
         bottom: 0;
     }
+    .settings-popup {
+        width: calc(100% - 30px); /* More responsive width on mobile */
+        top: 60px; /* Adjust if header height changes on mobile */
+        right: 15px; 
+        left: 15px; /* Center it more or less */
+    }
+     /* Ensure modal content is scrollable on small screens if too many items */
+    .theme-modal-content,
+    .gen-settings-modal-content,
+    .character-modal-content {
+        width: 90vw;
+        max-height: 85vh; /* Limit height */
+        overflow-y: auto; /* Allow scrolling */
+    }
+}
+
+#close-theme-modal-btn {
+    display: block; /* Make it a block to take full width or center */
+    margin-left: auto; /* Center if block and parent is flex/grid or fixed width */
+    margin-right: auto;
+    min-width: 100px; /* Give it some min width */
+}
+
+#system-toast-messages-container {
+    position: fixed;
+    top: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    width: auto;
+    max-width: min(500px, 90vw);
+}
+.system-toast-message {
+    padding: 12px 18px;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    opacity: 0;
+    transform: translateY(-20px) scale(0.95);
+    transition: opacity 0.1s ease-in-out, transform 0.1s ease-in-out;
+    min-width: 280px;
+    max-width: 100%;
+    text-align: left;
+    font-size: 0.9rem;
+    display: flex;
+    align-items: center;
+    color: white; /* Default for error/warning */
+}
+.system-toast-message.info {
+    background-color: var(--bg-tertiary, #16161e);
+    color: var(--text-primary, #e0e0e8);
+    border: 1px solid var(--border-color, #2a2a38);
+}
+.system-toast-message.error {
+    background-color: var(--error-color, #d73a49);
+    border: 1px solid var(--error-hover, #b22222);
+}
+.system-toast-message.warning {
+    background-color: var(--accent-color, #b86a38); /* Using accent for warning */
+    border: 1px solid var(--accent-hover, #d07c46);
+}
+.system-toast-message i.bi {
+    margin-right: 10px;
+    font-size: 1.1rem;
+    flex-shrink: 0;
+}
+.system-toast-message span {
+    word-break: break-word;
 }

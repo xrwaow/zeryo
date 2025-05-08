@@ -20,3 +20,6 @@ models:
   - name: "local"
     provider: "local"
     supports_images: false
+  - name: "gemini-2.0-flash"
+    provider: "google"
+    supports_images: true

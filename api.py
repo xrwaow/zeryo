@@ -488,7 +488,6 @@ def save_assistant_message_tx(
     cursor.execute("UPDATE chats SET timestamp_updated = ? WHERE chat_id = ?", (timestamp, chat_id))
     return message_id
 
-# (Replace the existing format_messages_for_provider function with this one)
 def format_messages_for_provider(messages: List[Dict[str, Any]], provider: str) -> List[Dict[str, Any]]:
     """
     Formats an array of internal message objects (including attachments)
@@ -509,11 +508,14 @@ def format_messages_for_provider(messages: List[Dict[str, Any]], provider: str) 
         provider_role = internal_role
         if provider_lower == 'google':
             if internal_role == 'assistant' or internal_role == 'llm': provider_role = 'model'
-            elif internal_role == 'system': continue # Skip system for Google's message list
+            elif internal_role == 'system':
+                # System prompts for Google are handled by 'systemInstruction' field in the main request,
+                # not as part of the 'contents' array. So, skip them here.
+                continue
             elif internal_role == 'tool': provider_role = 'function' # Google uses 'function' for tool results
         elif provider_lower in ['openrouter', 'local', 'openai']: # OpenAI / Compatible
             if internal_role == 'llm': provider_role = 'assistant'
-            # System prompt IS part of the messages list
+            # System prompt IS part of the messages list for OpenAI
             # Tool role is 'tool'
         else: # Default to OpenAI compatible
              if internal_role == 'llm': provider_role = 'assistant'
@@ -534,153 +536,131 @@ def format_messages_for_provider(messages: List[Dict[str, Any]], provider: str) 
         image_attachments = []
         for attachment in attachments:
             if attachment['type'] == 'image':
-                # Handle image data based on provider
-                if attachment['content']: # Ensure content exists
-                    image_attachments.append(attachment) # Collect images first
+                if attachment['content']:
+                    image_attachments.append(attachment)
                 else:
                     print(f"Warning: Skipping image attachment with missing content (Name: {attachment.get('name', 'N/A')})")
             elif attachment['type'] == 'file':
-                # Append formatted file content to buffer
                 if attachment['content']:
                      files_content_buffer += f"\n\n--- Attached File: {attachment.get('name', 'file')} ---\n{attachment['content']}\n--- End File ---"
                 else:
                      print(f"Warning: Skipping file attachment with missing content (Name: {attachment.get('name', 'N/A')})")
 
-        # Append buffered file content to the last text part or add a new one
         if files_content_buffer:
             if provider_lower == 'google':
-                # Find last part that has 'text' key
                 last_text_part = next((part for part in reversed(content_parts) if 'text' in part), None)
                 if last_text_part:
                     last_text_part['text'] += files_content_buffer
                 else:
-                    content_parts.append({"text": files_content_buffer.lstrip()}) # Add as new part
+                    content_parts.append({"text": files_content_buffer.lstrip()})
             else: # OpenAI / Compatible
-                # Find last part with type 'text'
                 last_text_part = next((part for part in reversed(content_parts) if part.get('type') == 'text'), None)
                 if last_text_part:
                     last_text_part['text'] += files_content_buffer
                 else:
-                    content_parts.append({"type": "text", "text": files_content_buffer.lstrip()}) # Add as new part
+                    content_parts.append({"type": "text", "text": files_content_buffer.lstrip()})
 
-        # Add collected image attachments
         for img_attachment in image_attachments:
              img_content = img_attachment['content']
+             # Determine MIME type (very basic, assuming JPEG if not specified)
+             mime_type = "image/jpeg" # Default
+             # Could add more sophisticated MIME type detection here if name or content has hints
+             # e.g., if img_attachment['name'] has .png, .jpeg, etc.
+             # For now, sticking to JPEG as it was before.
              if provider_lower == 'google':
-                 content_parts.append({"inline_data": {"mime_type": "image/jpeg", "data": img_content}})
+                 content_parts.append({"inlineData": {"mimeType": mime_type, "data": img_content}}) # inlineData, mimeType, data
              else: # OpenAI / Compatible
-                 # Assume JPEG for now, could be enhanced to detect mime type if needed
                  content_parts.append({
                      "type": "image_url",
-                     "image_url": {"url": f"data:image/jpeg;base64,{img_content}"}
+                     "image_url": {"url": f"data:{mime_type};base64,{img_content}"}
                  })
 
         # 3. Assign Content/Parts and Tool Info to Final Object
         if provider_lower == 'google':
             if content_parts:
                 final_message_obj["parts"] = content_parts
-            # Handle Google function calls/responses if using native tools (requires specific structure)
-            # Example for function call result: role='function', parts=[{function_response: {name: ..., response: ...}}]
-            # This example assumes manual tool handling where result is in 'message'
-            elif provider_role == 'function': # Handle tool results added manually to context
-                 # Need to know the tool name if mapping to Google's native format
-                 # For manual flow, the result is likely just text, add it as such
-                  if content: # If result text was stored in 'message'
-                       final_message_obj["parts"] = [{"text": f"[Tool Result]: {content}"}] # Simple text representation
-                  else:
-                       print(f"Warning: Skipping Google function role message with no content.")
-                       continue # Skip empty function result message
+            elif provider_role == 'function': # Tool result message
+                 # For manual tool flow, content is the string result
+                 if content:
+                      final_message_obj["parts"] = [{"text": content}]
+                 else: # Should have content if it's a tool result
+                      final_message_obj["parts"] = [{"text": "[Tool Execution Result Missing]"}]
+            elif provider_role in ['user', 'model'] and not content_parts:
+                # Google API requires 'parts' to be non-empty for user/model roles.
+                # If after processing text and attachments, parts is still empty, add an empty text part.
+                print(f"Warning: Google message (Role: {provider_role}) has no content parts. Adding empty text part.")
+                final_message_obj["parts"] = [{"text": ""}] # Ensure parts is not empty
             else:
-                # Skip message if no parts and not a function call placeholder
-                 print(f"Warning: Skipping Google message with no parts (Role: {provider_role})")
-                 continue # Skip empty messages
+                 print(f"Warning: Skipping Google message with no parts (Role: {provider_role}, Content: '{content}')")
+                 continue
 
         else: # OpenAI / Compatible
             if content_parts:
-                # Use array content if multiple parts (text + images), otherwise just string for text-only
                 if len(content_parts) > 1:
                     final_message_obj["content"] = content_parts
                 elif len(content_parts) == 1 and content_parts[0]['type'] == 'text':
                      final_message_obj["content"] = content_parts[0]['text']
                 elif len(content_parts) == 1 and content_parts[0]['type'] == 'image_url':
-                     # API might require text part even if empty? Check specs.
-                     # Sending as array is safer for multimodal.
                      final_message_obj["content"] = content_parts
-                else: # Should not happen if logic is correct
+                else:
                      final_message_obj["content"] = None
 
-            # Add native tool calls (assistant asks to call tools)
             if provider_role == 'assistant' and tool_calls:
-                 if final_message_obj.get("content") is None: final_message_obj["content"] = "" # Some models might require non-null content with tool_calls
+                 if final_message_obj.get("content") is None: final_message_obj["content"] = ""
                  final_message_obj["tool_calls"] = tool_calls
-
-            # Add native tool result message
             elif provider_role == 'tool':
-                 # Requires content (result string) and tool_call_id
-                 if not content and attachments: # If result was only in attachment? Unlikely for tools.
-                      print("Warning: Tool message has no text content, using placeholder.")
-                      final_message_obj["content"] = "[Tool result data in attachment]" # Placeholder
+                 if not content and attachments:
+                      final_message_obj["content"] = "[Tool result data in attachment]"
                  elif not content:
                       print("Warning: Tool message has no text content, skipping.")
                       continue
                  else:
-                     final_message_obj["content"] = content # Content is the tool result string
-
+                     final_message_obj["content"] = content
                  if not tool_call_id:
                       print(f"Warning: Tool message missing tool_call_id.")
-                      # Cannot send without tool_call_id for native flow, skip?
-                      # continue # This would break manual flow where ID might not be tracked.
-                      # For manual flow, we shouldn't hit role='tool' formatted this way.
                  else:
                       final_message_obj["tool_call_id"] = tool_call_id
-
-            # Handle system message (content is string)
             elif provider_role == 'system':
-                 final_message_obj["content"] = content # System prompt is plain text
-
-            # Skip message if it ended up with no content and no tool calls
+                 final_message_obj["content"] = content
             elif final_message_obj.get("content") is None and not tool_calls:
                  print(f"Warning: Skipping OpenAI message with no content/tool_calls (Role: {provider_role})")
                  continue
 
         formatted.append(final_message_obj)
 
-    # --- Provider Specific Cleaning (Optional but good practice) ---
-    # (Keep existing cleaning logic - removing consecutive identical roles etc.)
     cleaned = []
     last_role = None
     for i, msg in enumerate(formatted):
         current_role = msg.get("role")
-        # Allow assistant followed by tool, or tool followed by assistant (for native flow)
         is_tool_assistant_sequence = (last_role == 'assistant' and current_role == 'tool') or \
                                      (last_role == 'tool' and current_role == 'assistant')
 
         if i > 0 and current_role == last_role and not is_tool_assistant_sequence:
-             # Don't remove consecutive user/model for Google - it expects alternation
              if provider_lower == 'google' and current_role in ['user', 'model']:
-                 pass # Allow but warn later if needed
-             elif current_role != 'system': # Allow multiple system prompts? Maybe not.
-                 print(f"Warning: Skipping consecutive message with role {current_role}")
+                 # Google strictly requires user/model alternation.
+                 # If this happens, it's an issue with the input message history construction.
+                 print(f"ERROR: Consecutive identical roles '{current_role}' for Google provider. This will likely cause an API error.")
+                 # Potentially raise an error or try to fix, but for now just warn and proceed.
+             elif current_role != 'system':
+                 print(f"Warning: Skipping consecutive message with role {current_role} for non-Google provider.")
                  continue
 
-        # Example: Ensure Google alternates user/model (Warn only)
         if provider_lower == 'google':
-            if last_role == 'model' and current_role not in ['user', 'function']: # Allow function after model
-                print(f"Warning: Google API often expects user message after model message. Got {current_role}.")
+            if last_role == 'model' and current_role not in ['user', 'function']:
+                print(f"Warning: Google API expects user/function message after model message. Got {current_role}.")
             if last_role == 'user' and current_role not in ['model']:
-                 print(f"Warning: Google API often expects model message after user message. Got {current_role}.")
+                 print(f"Warning: Google API expects model message after user message. Got {current_role}.")
             if last_role == 'function' and current_role not in ['model']:
-                 print(f"Warning: Google API often expects model message after function message. Got {current_role}.")
-
+                 print(f"Warning: Google API expects model message after function message. Got {current_role}.")
 
         cleaned.append(msg)
         last_role = current_role
-
-    # Final check: Google API might complain if the last message is 'model'
+    
+    if provider_lower == 'google' and cleaned and cleaned[0].get("role") == 'model':
+        print("Warning: First message for Google API request is 'model'. This might be an issue if no prior user message context exists (e.g. system prompt).")
     if provider_lower == 'google' and cleaned and cleaned[-1].get("role") == 'model':
-         print("Warning: Last message role is 'model' for Google API request.")
+         print("Warning: Last message role is 'model' for Google API request. Awaiting user input usually follows.")
 
-    # print("Formatted message sample:", json.dumps(cleaned[:2], indent=2)) # Debugging
     return cleaned
 
 async def _perform_generation_stream(
@@ -694,336 +674,408 @@ async def _perform_generation_stream(
     """
     Performs LLM generation, handles streaming, tool calls, saving distinct messages, and abortion.
     Yields Server-Sent Events (SSE) formatted strings targeting a *single* frontend message bubble.
+    Saves partial content if aborted by the user.
     """
-    conn_check = None # Used only for initial setup checks, not passed around
-    full_response_content_for_frontend = "" # Tracks cumulative content sent to frontend this turn
+    conn_check = None
+    full_response_content_for_frontend = "" # For display logging, not directly used by frontend from here
     current_llm_history = []
     stream_error = None
     generation_completed_normally = False
-    last_saved_message_id = parent_message_id # Track the ID of the last *saved* message in the sequence
+    last_saved_message_id = parent_message_id
     provider = None
-    backend_is_streaming_reasoning = False
+    backend_is_streaming_reasoning = False # Specific to OpenRouter/OpenAI <think> tags
+    current_turn_content_accumulated = "" # Accumulates all text from current LLM turn (segment)
 
     try:
-        # Get connection only for initial setup/context building, do not pass to create_message
         conn_check = get_db_connection()
         cursor_check = conn_check.cursor()
-
         print(f"[Gen Start] Chat: {chat_id}, Parent: {parent_message_id}, Model: {model_name}, Tools: {tools_enabled}")
         cursor_check.execute("SELECT character_id FROM chats WHERE chat_id = ?", (chat_id,))
         chat_info = cursor_check.fetchone()
         if not chat_info: raise HTTPException(status_code=404, detail="Chat not found")
-
-        system_prompt = ""
+        
+        system_prompt_text = ""
         if chat_info["character_id"]:
              cursor_check.execute("SELECT sysprompt FROM characters WHERE character_id = ?", (chat_info["character_id"],))
-             char_info = cursor_check.fetchone(); system_prompt = char_info["sysprompt"] if char_info else ""
+             char_info = cursor_check.fetchone(); system_prompt_text = char_info["sysprompt"] if char_info else ""
+        
+        tool_system_prompt_text = ""
+        if tools_enabled:
+            tool_system_prompt_text = format_tools_for_prompt(TOOLS_AVAILABLE)
 
-        tool_system_prompt = format_tools_for_prompt(TOOLS_AVAILABLE) if tools_enabled else ""
-        effective_system_prompt = (system_prompt + ("\n\n" + tool_system_prompt if tool_system_prompt else "")).strip()
-
+        effective_system_prompt = (system_prompt_text + ("\n\n" + tool_system_prompt_text if tool_system_prompt_text else "")).strip()
+        
         model_config = get_model_config(model_name)
         if not model_config: raise ValueError(f"Configuration for model '{model_name}' not found.")
-        provider = model_config.get('provider', 'openrouter')
+        provider = model_config.get('provider', 'openrouter').lower()
         model_identifier = model_config.get('model_identifier', model_name)
         api_details = get_llm_api_details(provider)
         print(f"[Gen Setup] Provider: {provider}, Identifier: {model_identifier}")
 
-        # Build initial context stopping at the parent of the first segment
-        current_llm_history = build_context_from_db(conn_check, cursor_check, chat_id, last_saved_message_id, effective_system_prompt)
+        _system_prompt_for_context_build = effective_system_prompt if provider not in ['google'] else None
+        current_llm_history = build_context_from_db(conn_check, cursor_check, chat_id, last_saved_message_id, _system_prompt_for_context_build)
 
-        # Close the check connection, it's no longer needed
-        conn_check.close()
-        conn_check = None
-        cursor_check = None
+        conn_check.close(); conn_check = None; cursor_check = None
 
-        tool_call_count = 0
-        max_tool_calls = 5 # Limit recursion
+        tool_call_count = 0 # For manual tool loop (currently only for non-Google)
+        max_tool_calls = 5
 
         while tool_call_count < max_tool_calls:
             if abort_event.is_set():
-                print(f"[Gen Abort] Before LLM call {tool_call_count + 1} for chat {chat_id}.")
                 stream_error = asyncio.CancelledError("Aborted before LLM call")
                 break
 
             print(f"[Gen LLM Call {tool_call_count + 1}] Chat: {chat_id}, History Len: {len(current_llm_history)}")
-            llm_messages = format_messages_for_provider(current_llm_history, provider)
-            llm_body = {"model": model_identifier, "messages": llm_messages, "stream": True, **gen_args}
-            request_url = f"{api_details['base_url'].rstrip('/')}/chat/completions"
-            headers = {'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
-            if api_details['api_key']: headers['Authorization'] = f"Bearer {api_details['api_key']}"
+            
+            llm_messages_for_api = format_messages_for_provider(current_llm_history, provider)
+            
+            request_url: str; llm_body: Dict[str, Any]; headers: Dict[str, str]
 
-            current_turn_content_accumulated = "" # Accumulates text *for this specific LLM call*
-            detected_tool_call_info = None # Stores {'name': ..., 'arguments': ..., 'raw_tag': ..., 'id': ...}
+            if provider == 'google':
+                request_url = f"{api_details['base_url'].rstrip('/')}/v1beta/models/{model_identifier}:streamGenerateContent?key={api_details['api_key']}"
+                llm_body = {"contents": llm_messages_for_api}
+                google_gen_config = {}
+                if gen_args: # Map standard args to Google's generationConfig
+                    if "temperature" in gen_args: google_gen_config["temperature"] = gen_args["temperature"]
+                    if "max_tokens" in gen_args: google_gen_config["maxOutputTokens"] = gen_args["max_tokens"]
+                    if "top_p" in gen_args: google_gen_config["topP"] = gen_args["top_p"]
+                    if "top_k" in gen_args: google_gen_config["topK"] = gen_args["top_k"]
+                if google_gen_config: llm_body["generationConfig"] = google_gen_config
+                if effective_system_prompt:
+                    llm_body["systemInstruction"] = {"parts": [{"text": effective_system_prompt}]}
+                headers = {'Content-Type': 'application/json'}
+            else: # OpenAI / OpenRouter / Local
+                request_url = f"{api_details['base_url'].rstrip('/')}/chat/completions"
+                llm_body = {"model": model_identifier, "messages": llm_messages_for_api, "stream": True, **gen_args}
+                headers = {'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
+                if api_details['api_key']: headers['Authorization'] = f"Bearer {api_details['api_key']}"
+            
+            # Reset per LLM call, tool calls might append to current_turn_content_accumulated from previous segment
+            # current_turn_content_accumulated = "" # This was reset outside, should be fine.
+            detected_tool_call_info = None 
+            # is_done_signal_from_llm: Indicates the current LLM call has finished sending content.
+            # For Google, it's when ']' of the array is processed or stream ends.
+            # For OpenAI, it's when "data: [DONE]" is received.
+            is_done_signal_from_llm = False
+
 
             try:
                 async with httpx.AsyncClient(timeout=600.0) as client:
                     async with client.stream("POST", request_url, json=llm_body, headers=headers) as response:
                         if response.status_code != 200:
-                            error_body = await response.aread()
+                            error_body_bytes = await response.aread()
                             detail = f"LLM API Error ({response.status_code})"
-                            try: detail += f" - {error_body.decode()}"
+                            try: detail += f" - {error_body_bytes.decode()}"
                             except Exception: pass
+                            print(f"LLM API Error: {detail} for URL: {request_url}")
                             raise HTTPException(status_code=response.status_code, detail=detail)
 
-                        async for line in response.aiter_lines():
-                            if abort_event.is_set():
-                                print(f"[Gen Abort] During LLM stream for chat {chat_id}.")
-                                stream_error = asyncio.CancelledError("Aborted by user during stream")
-                                break # Exit inner async for loop
+                        if provider == 'google':
+                            json_stream_decoder = json.JSONDecoder()
+                            buffer = ""
+                            first_bracket_parsed = False # True after '[' of the main array is consumed
 
-                            if not line.startswith("data:"): continue
-                            data_str = line[len("data:"):].strip()
-                            if data_str == "[DONE]":
-                                if backend_is_streaming_reasoning:
-                                    yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-                                    full_response_content_for_frontend += "</think>\n"
-                                    backend_is_streaming_reasoning = False
-                                break # Exit inner async for loop
-                            if not data_str: continue
+                            async for text_chunk in response.aiter_text(): # Iterate over text chunks for Google
+                                if abort_event.is_set():
+                                    stream_error = asyncio.CancelledError("Aborted by user during Google stream")
+                                    break
+                                buffer += text_chunk
+                                
+                                if not first_bracket_parsed:
+                                    stripped_buffer = buffer.lstrip()
+                                    if stripped_buffer.startswith('['):
+                                        first_bracket_parsed = True
+                                        buffer = stripped_buffer[1:] # Consume '['
+                                    elif not stripped_buffer: # Buffer is all whitespace
+                                        buffer = "" 
+                                        continue
+                                    elif len(buffer) > 4096: # Safety for very long non-JSON start
+                                        stream_error = ValueError("Google stream did not start with '[' or is too large before finding it.")
+                                        break
+                                    else: # Still waiting for '[' or more data
+                                        continue
+                                if not first_bracket_parsed: continue # Should not happen if break conditions are met
 
-                            try:
-                                data = json.loads(data_str)
-                                content_chunk, reasoning_chunk = None, None
-                                potential_tool_calls = None
+                                # Process buffer for JSON objects
+                                while buffer:
+                                    obj_start_idx = 0
+                                    # Skip leading whitespace and commas before the next object
+                                    while obj_start_idx < len(buffer) and (buffer[obj_start_idx].isspace() or buffer[obj_start_idx] == ','):
+                                        obj_start_idx += 1
+                                    
+                                    if obj_start_idx >= len(buffer): buffer = ""; break # Only whitespace/commas left
 
-                                # --- Extract data based on provider ---
-                                if provider in ['openrouter', 'local', 'openai']: # OpenAI compatible
+                                    if buffer[obj_start_idx] == ']': # End of the main array
+                                        is_done_signal_from_llm = True; buffer = buffer[obj_start_idx+1:]; break 
+
+                                    try:
+                                        # Attempt to decode one JSON object (GenerateContentResponse)
+                                        decoded_obj, consumed_length = json_stream_decoder.raw_decode(buffer, obj_start_idx)
+                                        buffer = buffer[consumed_length:] # Update buffer by removing the consumed part
+
+                                        if "error" in decoded_obj:
+                                            err_detail = decoded_obj["error"].get("message", str(decoded_obj["error"]))
+                                            raise HTTPException(status_code=decoded_obj["error"].get("code", 500), detail=f"Google API Stream Error: {err_detail}")
+
+                                        current_text_from_google_obj = ""
+                                        candidates = decoded_obj.get("candidates")
+                                        if candidates and isinstance(candidates, list) and len(candidates) > 0:
+                                            candidate = candidates[0]
+                                            if candidate.get("content") and candidate["content"].get("parts"):
+                                                text_parts = [part.get("text", "") for part in candidate["content"]["parts"] if "text" in part]
+                                                if text_parts: current_text_from_google_obj = "".join(text_parts)
+                                            # Check finishReason to see if this is the last piece of content
+                                            # if candidate.get("finishReason") in ["STOP", "MAX_TOKENS", "SAFETY", "RECITATION", "OTHER"]:
+                                            #    is_done_signal_from_llm = True # Content from this LLM call is finished.
+                                        
+                                        if current_text_from_google_obj:
+                                            yield f"data: {json.dumps({'type': 'chunk', 'data': current_text_from_google_obj})}\n\n"
+                                            full_response_content_for_frontend += current_text_from_google_obj
+                                            current_turn_content_accumulated += current_text_from_google_obj
+                                        
+                                    except json.JSONDecodeError: # Not enough data in buffer for a complete JSON object
+                                        break # Break from 'while buffer' to get more text_chunks
+                                    except HTTPException as e_http: stream_error = e_http; break # Propagate
+
+                                if stream_error or is_done_signal_from_llm : break # Break from 'while buffer' and 'aiter_text'
+                            
+                            # After Google's aiter_text loop
+                            if stream_error: pass # Will be raised later
+                            elif not is_done_signal_from_llm and first_bracket_parsed: # Stream ended without ']'
+                                if buffer.strip() and buffer.strip() != ']': # Check for unprocessed remnants
+                                    print(f"Warning: Google stream ended with unprocessed buffer: '{buffer[:200].strip()}'")
+                                is_done_signal_from_llm = True # Consider done as stream has ended
+                            elif not first_bracket_parsed and not stream_error :
+                                stream_error = ValueError("Google stream ended before '[' was found or processed.")
+                        
+                        else: # OpenAI / OpenRouter / Local (uses aiter_lines)
+                            async for line in response.aiter_lines():
+                                if abort_event.is_set():
+                                    stream_error = asyncio.CancelledError("Aborted by user during stream")
+                                    break
+                                
+                                line_strip = line.strip()
+                                if not line_strip: continue
+
+                                if not line_strip.startswith("data:"): continue
+                                data_str = line_strip[len("data:"):]
+                                if not data_str.strip(): continue # Handle "data: " lines with only whitespace after
+
+                                if data_str == "[DONE]":
+                                    is_done_signal_from_llm = True
+                                    if backend_is_streaming_reasoning:
+                                        yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
+                                        full_response_content_for_frontend += "</think>\n"
+                                        current_turn_content_accumulated += "</think>\n"
+                                        backend_is_streaming_reasoning = False
+                                    break # Exit aiter_lines loop
+
+                                try:
+                                    data = json.loads(data_str)
                                     delta = data.get("choices", [{}])[0].get("delta", {})
                                     content_chunk = delta.get("content")
-                                    reasoning_chunk = delta.get("reasoning")
-                                    potential_tool_calls = delta.get("tool_calls")
-                                elif provider == 'google':
-                                    part = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0]
-                                    content_chunk = part.get("text")
+                                    reasoning_chunk = delta.get("reasoning") # OpenRouter specific
+                                    potential_tool_calls = delta.get("tool_calls") # OpenAI native
 
-                                processed_yield = ""; processed_save = ""
+                                    processed_yield_openai = ""; processed_save_openai = ""
+                                    if reasoning_chunk:
+                                        if not backend_is_streaming_reasoning:
+                                            processed_yield_openai = "<think>" + reasoning_chunk; processed_save_openai = "<think>" + reasoning_chunk
+                                            backend_is_streaming_reasoning = True
+                                        else:
+                                            processed_yield_openai = reasoning_chunk; processed_save_openai = reasoning_chunk
+                                        yield f"data: {json.dumps({'type': 'chunk', 'data': processed_yield_openai})}\n\n"
+                                        full_response_content_for_frontend += processed_yield_openai
+                                        current_turn_content_accumulated += processed_save_openai
 
-                                if reasoning_chunk:
-                                    if not backend_is_streaming_reasoning:
-                                        processed_yield = "<think>" + reasoning_chunk; processed_save="<think>" + reasoning_chunk
-                                        backend_is_streaming_reasoning = True
-                                    else:
-                                        processed_yield = reasoning_chunk; processed_save = reasoning_chunk
-                                    yield f"data: {json.dumps({'type': 'chunk', 'data': processed_yield})}\n\n"
-                                    full_response_content_for_frontend += processed_yield
-                                    current_turn_content_accumulated += processed_save
+                                    if content_chunk:
+                                        if backend_is_streaming_reasoning:
+                                            processed_yield_openai = "</think>\n" + content_chunk; processed_save_openai = "</think>\n" + content_chunk
+                                            backend_is_streaming_reasoning = False
+                                        else:
+                                            processed_yield_openai = content_chunk; processed_save_openai = content_chunk
+                                        yield f"data: {json.dumps({'type': 'chunk', 'data': processed_yield_openai})}\n\n"
+                                        full_response_content_for_frontend += processed_yield_openai
+                                        current_turn_content_accumulated += processed_save_openai
+                                    
+                                    # --- Manual Tool Call Detection (for non-Google, if tools_enabled and no native calls) ---
+                                    if not potential_tool_calls and tools_enabled:
+                                        match = TOOL_CALL_REGEX.search(current_turn_content_accumulated) # Search in *accumulated* content
+                                        if match:
+                                            tool_name = match.group(1); args_str = match.group(2); raw_tag = match.group(0)
+                                            args = {k: v for k, v in re.findall(r'(\w+)="([^"]*)"', args_str)}
+                                            tool_call_id_manual = f"tool_{uuid.uuid4().hex[:8]}"
+                                            detected_tool_call_info = {"name": tool_name, "arguments": args, "raw_tag": raw_tag, "id": tool_call_id_manual, "type": "manual"}
+                                            
+                                            # Remove tag from content to be saved for assistant's text part
+                                            current_turn_content_accumulated = current_turn_content_accumulated[:match.start()]
+                                            if backend_is_streaming_reasoning: # Close think block if open
+                                                yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
+                                                full_response_content_for_frontend += "</think>\n"
+                                                current_turn_content_accumulated += "</think>\n"
+                                                backend_is_streaming_reasoning = False
+                                            break # Break from aiter_lines to process this tool call
+                                    
+                                    # --- TODO: Handle Native OpenAI Tool Calls (potential_tool_calls) ---
+                                    # if potential_tool_calls:
+                                    #   ... populate detected_tool_call_info ...
+                                    #   ... possibly yield tool_call events to frontend ...
+                                    #   ... break to process tool call ...
 
-                                if content_chunk:
-                                    if backend_is_streaming_reasoning:
-                                        processed_yield = "</think>\n" + content_chunk; processed_save = "</think>\n" + content_chunk
-                                        backend_is_streaming_reasoning = False
-                                    else:
-                                        processed_yield = content_chunk; processed_save = content_chunk
-                                    yield f"data: {json.dumps({'type': 'chunk', 'data': processed_yield})}\n\n"
-                                    full_response_content_for_frontend += processed_yield
-                                    current_turn_content_accumulated += processed_save
+                                except json.JSONDecodeError as json_err: print(f"Warning: JSON decode error for OpenAI stream: {json_err} - Data: '{data_str}'")
+                                except Exception as parse_err: stream_error = parse_err; break # from aiter_lines
 
-                                # --- Tool Call Detection (Manual XML-like Tag) ---
-                                if not potential_tool_calls and tools_enabled:
-                                    match = TOOL_CALL_REGEX.search(current_turn_content_accumulated)
-                                    if match:
-                                        tool_name = match.group(1)
-                                        args_str = match.group(2)
-                                        raw_tag = match.group(0)
-                                        print(f"Manual Tool Call Detected: {raw_tag}")
-                                        args = {}
-                                        arg_matches = re.findall(r'(\w+)="([^"]*)"', args_str)
-                                        for k, v in arg_matches: args[k] = v
-                                        tool_call_id = f"tool_{uuid.uuid4().hex[:8]}"
-                                        detected_tool_call_info = {
-                                            "name": tool_name, "arguments": args,
-                                            "raw_tag": raw_tag, "id": tool_call_id,
-                                            "type": "manual"
-                                        }
-                                        # Remove the tag from the *accumulated* content that will be saved
-                                        # or potentially used in the next history turn.
-                                        current_turn_content_accumulated = current_turn_content_accumulated[:match.start()]
-                                        break # Stop processing this LLM stream
-
-                                # --- TODO: Handle Native Tool Calls (`potential_tool_calls`) ---
-                                # if potential_tool_calls and tools_enabled: ...
-
-                            except json.JSONDecodeError as json_err:
-                                print(f"Warning: JSON decode error: {json_err} - Data: '{data_str}'")
-                            except Exception as parse_err:
-                                print(f"Error parsing LLM chunk: {parse_err}")
-                                stream_error = parse_err
-                                break # Break inner loop
-
-                        # --- After inner stream loop finishes/breaks ---
-                        if backend_is_streaming_reasoning and not stream_error:
-                            yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-                            full_response_content_for_frontend += "</think>\n"
-                            current_turn_content_accumulated += "</think>\n" # Add to saved content too
-                            backend_is_streaming_reasoning = False
-
-                        if stream_error: raise stream_error # Re-raise to be caught by outer try/except
+                            # After OpenAI/OpenRouter/Local aiter_lines loop
+                            if stream_error: pass # Handled below
+                            elif backend_is_streaming_reasoning and not is_done_signal_from_llm : # Stream ended naturally (not [DONE]) but think tag open
+                                yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
+                                full_response_content_for_frontend += "</think>\n"
+                                current_turn_content_accumulated += "</think>\n"
+                                backend_is_streaming_reasoning = False
+                        
+                        # Common error check after specific provider stream handling
+                        if stream_error: raise stream_error
 
             except (httpx.RequestError, HTTPException, asyncio.CancelledError, Exception) as e:
-                print(f"[Gen Stream Error Caught] Type: {type(e).__name__}, Msg: {e}")
-                stream_error = e
-                if backend_is_streaming_reasoning:
-                     yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"; backend_is_streaming_reasoning = False
-                error_message = f"Streaming Error: {e}"
-                if isinstance(e, asyncio.CancelledError): error_message = "Generation stopped by user."
-                elif isinstance(e, HTTPException): error_message = f"LLM API Error: {e.detail}"
-                elif isinstance(e, httpx.RequestError): error_message = f"Network Error: {e}"
-                yield f"data: {json.dumps({'type': 'error', 'message': error_message})}\n\n"
-                break # Break outer while loop on stream error
+                # This catches errors from client.stream setup, or propagated stream_error
+                stream_error = e # Ensure it's set for the finally block logic
+                if backend_is_streaming_reasoning: # Close think tag on any error during stream
+                     try: yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
+                     except Exception: pass
+                     current_turn_content_accumulated += "</think>\n" # Ensure saved part includes closing tag
+                     backend_is_streaming_reasoning = False
+                
+                error_message_for_frontend = f"Streaming Error: {getattr(e, 'detail', str(e))}"
+                if isinstance(e, asyncio.CancelledError): error_message_for_frontend = "Generation stopped by user."
+                # Avoid re-yielding error if it was an HTTPException from LLM already (it might be detailed)
+                if not isinstance(e, (asyncio.CancelledError, HTTPException)):
+                     try: yield f"data: {json.dumps({'type': 'error', 'message': error_message_for_frontend})}\n\n"
+                     except Exception: pass
+                elif isinstance(e, HTTPException) and response and response.status_code != 200 : # Yield explicit LLM API error if not already handled
+                     try: yield f"data: {json.dumps({'type': 'error', 'message': f'LLM API Error: {e.detail}'})}\n\n"
+                     except Exception: pass
 
-            # --- Process after stream attempt (either completed or tool detected) ---
+                break # Break outer while tool_call_count loop on any stream error
 
-            if not detected_tool_call_info:
-                # No tool detected, this is the final message segment for this turn.
-                print(f"[Gen Success] Finished chat {chat_id} normally (or final segment).")
-                if current_turn_content_accumulated: # Only save if there's content
+            # --- Process after stream (either completed or tool detected) ---
+            if not detected_tool_call_info: # No tool call, this is the final segment from LLM for this turn
+                if current_turn_content_accumulated:
+                    # Save the entire accumulated content for this turn (segment)
                     message_id_final = create_message(
-                        chat_id=chat_id,
-                        role=MessageRole.LLM,
+                        chat_id=chat_id, role=MessageRole.LLM,
                         content=current_turn_content_accumulated,
                         parent_message_id=last_saved_message_id,
-                        model_name=model_name,
-                        commit=True # Commit this final segment
+                        model_name=model_name, commit=True
                     )
                     last_saved_message_id = message_id_final
-                    print(f"Saved final LLM message segment: {message_id_final}")
+                    print(f"Saved final LLM message segment: {message_id_final} (Length: {len(current_turn_content_accumulated)})")
                 else:
-                    print("[Gen Info] Final LLM segment empty, not saving.")
+                    print("[Gen Info] Final LLM segment empty after full processing, not saving.")
                 generation_completed_normally = True
-                break # Exit the outer generation loop
-            else:
-                # --- Tool Call Detected ---
+                break # Exit the outer generation (tool call) loop
+            else: # Manual Tool Call Detected (currently only for non-Google providers)
                 tool_call_count += 1
-                tool_name = detected_tool_call_info["name"]
-                tool_args = detected_tool_call_info["arguments"]
-                tool_call_id = detected_tool_call_info["id"]
-                tool_call_type = detected_tool_call_info["type"]
-                raw_tag = detected_tool_call_info.get("raw_tag")
-
+                tool_name = detected_tool_call_info["name"]; tool_args = detected_tool_call_info["arguments"]
+                tool_call_id = detected_tool_call_info["id"]; raw_tag = detected_tool_call_info.get("raw_tag", "")
                 print(f"[Gen Tool] Executing Tool {tool_call_count}: '{tool_name}' (ID: {tool_call_id})")
 
-                # 1. Save Assistant Message (Part 1 - Requesting the tool)
-                content_for_msg_A = current_turn_content_accumulated # Content *before* the tag
-                # *** Append the raw_tag ONLY if it exists (manual detection) ***
-                if raw_tag:
-                    content_for_msg_A += raw_tag
-                    print(f"Appending raw tool tag to content for Message A: {raw_tag}")
-
-                tool_calls_for_db = [{"id": tool_call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}]
+                # Content *before* the tool tag + the tag itself for saving assistant's message part 1
+                # `current_turn_content_accumulated` already has content before the tag.
+                content_for_assistant_msg_with_call = current_turn_content_accumulated + raw_tag
+                db_tool_calls_data = [{"id": tool_call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}]
 
                 message_id_A = create_message(
-                    chat_id=chat_id,
-                    role=MessageRole.LLM,
-                    content=content_for_msg_A, # Now includes the raw tag if applicable
-                    parent_message_id=last_saved_message_id,
-                    model_name=model_name,
-                    tool_calls=tool_calls_for_db,
-                    commit=True
+                    chat_id=chat_id, role=MessageRole.LLM, content=content_for_assistant_msg_with_call,
+                    parent_message_id=last_saved_message_id, model_name=model_name,
+                    tool_calls=db_tool_calls_data, commit=True
                 )
                 last_saved_message_id = message_id_A
-                print(f"Saved Assistant Message (Part 1 - Call): {message_id_A}")
+                print(f"Saved Assistant Message (Part 1 - Manual Call): {message_id_A}")
 
-                # Add Message A to history for the *next* LLM call context
-                # Use the *original* content without the appended tag
-                assistant_msg_for_history = {
-                    "role": "assistant",
-                    "message": current_turn_content_accumulated, # Original content before tag append
-                    "tool_calls": tool_calls_for_db
-                }
-                if assistant_msg_for_history["message"] is None and assistant_msg_for_history["tool_calls"]:
-                    assistant_msg_for_history["message"] = ""
+                # Add to history for next LLM turn: assistant message *without* raw tag, but with tool_calls object
+                assistant_msg_for_history = {"role": "assistant", "message": current_turn_content_accumulated if current_turn_content_accumulated else "", "tool_calls": db_tool_calls_data}
                 current_llm_history.append(assistant_msg_for_history)
 
-                # 2. Yield Tool Start to Frontend
-                # The frontend stream already received the tag via chunk if manual.
-                # Send the structured event regardless.
                 yield f"data: {json.dumps({'type': 'tool_start', 'name': tool_name, 'args': tool_args})}\n\n"
 
-                # 3. Execute Tool
-                tool_result_content = None; tool_error = None
-                if tool_name not in TOOL_REGISTRY:
-                    tool_error = f"Tool '{tool_name}' not found."
-                else:
-                    try:
-                        tool_function = TOOL_REGISTRY[tool_name]
-                        if asyncio.iscoroutinefunction(tool_function):
-                             tool_result_content = await tool_function(**tool_args)
-                        else:
-                             tool_result_content = await asyncio.to_thread(tool_function, **tool_args) # Run sync in executor
-                        print(f"Tool '{tool_name}' executed, result: {str(tool_result_content)[:100]}...")
-                    except Exception as e:
-                        tool_error = f"Error executing tool '{tool_name}': {e}"
-                        print(f"Tool error: {tool_error}")
-                        traceback.print_exc()
-                result_for_llm = str(tool_result_content) if not tool_error else tool_error
+                tool_result_content_str = None; tool_error_str = None
+                try:
+                    tool_function = TOOL_REGISTRY[tool_name]
+                    if asyncio.iscoroutinefunction(tool_function): result = await tool_function(**tool_args)
+                    else: result = await asyncio.to_thread(tool_function, **tool_args)
+                    tool_result_content_str = str(result)
+                except KeyError: tool_error_str = f"Tool '{tool_name}' not found."
+                except Exception as e_tool: tool_error_str = f"Error executing tool '{tool_name}': {e_tool}"; traceback.print_exc()
+                
+                result_for_llm_context = tool_result_content_str if not tool_error_str else tool_error_str
 
-                # 4. Save Tool Result Message (Part 2)
                 message_id_B = create_message(
-                    chat_id=chat_id,
-                    role=MessageRole.TOOL,
-                    content=result_for_llm,
-                    parent_message_id=message_id_A,
-                    model_name=None,
-                    tool_call_id=tool_call_id,
-                    commit=True
+                    chat_id=chat_id, role=MessageRole.TOOL, content=result_for_llm_context,
+                    parent_message_id=message_id_A, model_name=None,
+                    tool_call_id=tool_call_id, commit=True
                 )
                 last_saved_message_id = message_id_B
-                print(f"Saved Tool Result Message (Part 2): {message_id_B}")
+                print(f"Saved Tool Result Message (Part 2 - Manual): {message_id_B}")
 
-                # Add Message B to history for the *next* LLM call context
-                tool_msg_for_history = {"role": "tool", "message": result_for_llm, "tool_call_id": tool_call_id}
+                tool_msg_for_history = {"role": "tool", "message": result_for_llm_context, "tool_call_id": tool_call_id}
                 current_llm_history.append(tool_msg_for_history)
+                
+                # Send tool result tag for frontend display (not for LLM context here, that's handled by tool_msg_for_history)
+                result_tag_for_frontend = f'<tool_result tool_name="{tool_name}" result="{json.dumps(result_for_llm_context)[1:-1]}" />'
+                yield f"data: {json.dumps({'type': 'chunk', 'data': result_tag_for_frontend})}\n\n"
+                yield f"data: {json.dumps({'type': 'tool_end', 'name': tool_name, 'result': tool_result_content_str, 'error': tool_error_str})}\n\n"
+                
+                current_turn_content_accumulated = "" # Reset for next LLM segment after tool use
+                detected_tool_call_info = None # Reset for next iteration of the while loop
+        # --- End of Outer Generation (tool call) Loop ---
 
-                # 5. Yield Tool End to Frontend
-                # Construct the result tag for visual display (streamed via chunk)
-                result_attr_value = json.dumps(str(result_for_llm))[1:-1]
-                result_tag = f'<tool_result tool_name="{tool_name}" result="{result_attr_value}" />'
-                full_response_content_for_frontend += result_tag
-                yield f"data: {json.dumps({'type': 'chunk', 'data': result_tag})}\n\n"
-                yield f"data: {json.dumps({'type': 'tool_end', 'name': tool_name, 'result': str(tool_result_content), 'error': tool_error})}\n\n"
-
-                detected_tool_call_info = None
-                # Loop continues...
-
-        # --- End of Outer Generation Loop ---
-
-    except (HTTPException, ValueError, asyncio.CancelledError) as e:
-        stream_error = e
-        err_msg = f"Error: {getattr(e, 'detail', str(e))}"
-        if isinstance(e, asyncio.CancelledError): err_msg = "Generation stopped by user."
-        print(f"[Gen Handled Error Outer] Chat {chat_id}: {err_msg}")
-        if not isinstance(e, (httpx.RequestError, HTTPException, asyncio.CancelledError)):
-             try: yield f"data: {json.dumps({'type': 'error', 'message': err_msg})}\n\n"
+    except (HTTPException, ValueError, asyncio.CancelledError) as e_outer:
+        stream_error = e_outer
+        err_msg_outer = f"Error: {getattr(e_outer, 'detail', str(e_outer))}"
+        if isinstance(e_outer, asyncio.CancelledError): err_msg_outer = "Generation stopped by user."
+        print(f"[Gen Handled Error Outer] Chat {chat_id}: {err_msg_outer}")
+        # Avoid re-yielding general errors if specific LLM HTTP error already yielded
+        if not isinstance(e_outer, (asyncio.CancelledError, HTTPException, httpx.RequestError)):
+             try: yield f"data: {json.dumps({'type': 'error', 'message': err_msg_outer})}\n\n"
              except Exception: pass
-    except Exception as e:
-        stream_error = e
-        print(f"[Gen Unhandled Error Outer] Chat {chat_id}: {e}\n{traceback.format_exc()}")
+    except Exception as e_unhandled:
+        stream_error = e_unhandled
+        print(f"[Gen Unhandled Error Outer] Chat {chat_id}: {e_unhandled}\n{traceback.format_exc()}")
         try: yield f"data: {json.dumps({'type': 'error', 'message': 'Internal Server Error: Please check backend logs.'})}\n\n"
         except Exception: pass
     finally:
-        print(f"[Gen Finally] Reached finally block for chat {chat_id}. Abort set: {abort_event.is_set()}, StreamError: {type(stream_error).__name__ if stream_error else 'None'}, Completed Normally: {generation_completed_normally}")
+        print(f"[Gen Finally] Chat {chat_id}. Abort: {abort_event.is_set()}, StreamError: {type(stream_error).__name__ if stream_error else 'None'}, Completed Loop: {generation_completed_normally}")
 
-        if backend_is_streaming_reasoning:
-             print("[Gen Finally Warning] Closing dangling think block in finally.")
+        if backend_is_streaming_reasoning: # Final safety net for OpenAI <think> tags
              try: yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
              except Exception: pass
+             if not stream_error or isinstance(stream_error, asyncio.CancelledError): # Only add to save if not a hard error mid-think
+                current_turn_content_accumulated += "</think>\n"
 
-        # Close check connection if it somehow remained open
+        if isinstance(stream_error, asyncio.CancelledError) and current_turn_content_accumulated:
+            print(f"[Gen Finally - Abort Save] Saving partial: {len(current_turn_content_accumulated)} chars.")
+            try:
+                aborted_message_id = create_message(
+                    chat_id=chat_id, role=MessageRole.LLM,
+                    content=current_turn_content_accumulated, # This is content from the segment being aborted
+                    parent_message_id=last_saved_message_id, model_name=model_name, commit=True
+                )
+                print(f"[Gen Finally - Abort Save] Saved partial message ID: {aborted_message_id}")
+            except Exception as save_err: print(f"[Gen Finally - Abort Save Error] Failed to save partial: {save_err}")
+        
         if conn_check:
-            try: conn_check.close(); print("[Gen Finally Warning] Closed leftover check connection.")
+            try: conn_check.close()
             except Exception: pass
 
         if chat_id in ACTIVE_GENERATIONS: del ACTIVE_GENERATIONS[chat_id]
-        print(f"[Gen Finish] Stream processing complete for chat {chat_id}.")
+        print(f"[Gen Finish] Stream processing ended for chat {chat_id}.")
 
         if generation_completed_normally and not stream_error and not abort_event.is_set():
-            print("[Gen Finish] Yielding done event.")
             try: yield f"data: {json.dumps({'type': 'done'})}\n\n"
             except Exception: pass
         else:
-             print("[Gen Finish] Skipping done event due to incomplete/error/abort.")
-     
+             print("[Gen Finish] Skipping 'done' event due to error, abort, or incomplete tool loop.")
+                      
 def create_message(
     chat_id: str,
     role: MessageRole,

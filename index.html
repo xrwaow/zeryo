@@ -30,6 +30,8 @@
             </div>
         </div>
     </div>
+    
+    <!-- Modals -->
     <div class="theme-modal" id="theme-modal">
         <div class="theme-modal-content">
             <h3>Appearance Settings</h3>
@@ -38,7 +40,9 @@
                 <button class="theme-option" data-theme="solarized">Solarized</button>
                 <button class="theme-option" data-theme="dark">Dark Theme</button>
                 <button class="theme-option" data-theme="claude_white">Claude White</button>
+                <button class="theme-option" data-theme="gpt_dark">GPT Dark</button>
             </div>
+            <button id="close-theme-modal-btn" class="btn-secondary" style="margin-top: 20px;">Close</button>
         </div>
     </div>
     
@@ -63,6 +67,49 @@
         </div>
     </div>
 
+    <div class="gen-settings-modal" id="gen-settings-modal">
+        <div class="gen-settings-modal-content">
+            <h3>Generation Settings</h3>
+            <div class="gen-setting">
+                <label>Temperature (0 to 2)</label>
+                <div class="slider-container">
+                    <input type="range" id="temp-slider" min="0" max="2" step="0.01" value="0.7">
+                    <span id="temp-value">0.7</span>
+                    <label><input type="checkbox" id="temp-none"> None</label>
+                </div>
+            </div>
+            <div class="gen-setting">
+                <label>Min P (0 to 0.5)</label>
+                <div class="slider-container">
+                    <input type="range" id="minp-slider" min="0" max="0.5" step="0.01" value="0.05">
+                    <span id="minp-value">0.05</span>
+                    <label><input type="checkbox" id="minp-none"> None</label>
+                </div>
+            </div>
+            <div class="gen-setting">
+                <label>Max Tokens (1 to 8192)</label>
+                <div class="slider-container">
+                    <input type="range" id="maxt-slider" min="1" max="8192" step="1" value="1024">
+                    <span id="maxt-value">1024</span>
+                    <label><input type="checkbox" id="maxt-none"> None</label>
+                </div>
+            </div>
+             <div class="gen-setting"> <!-- Added Top P slider -->
+                <label>Top P (0 to 1.0)</label>
+                <div class="slider-container">
+                    <input type="range" id="topp-slider" min="0" max="1.0" step="0.01" value="1.0">
+                    <span id="topp-value">1.0</span>
+                    <label><input type="checkbox" id="topp-none"> None</label>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button id="apply-gen-settings" class="btn-primary">Apply</button>
+                <button id="cancel-gen-settings" class="btn-secondary">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+
     <!-- Main Content -->
     <div class="main-content">
         <div class="chat-container" id="chat-container">
@@ -70,25 +117,14 @@
                 <button class="header-btn mobile-menu-btn" id="mobile-menu-btn" title="Toggle Menu">
                     <i class="bi bi-list"></i>
                 </button>
-                 <!-- Active Prompt Display Area -->
                  <div id="active-prompt-container" class="active-prompt-container">
-                      <!-- Content injected by JS -->
                  </div>
                 <div class="header-actions">
-                    <!-- Tool Toggle Button -->
-                    <button class="header-btn" id="toggle-tools-btn" title="Enable/Disable Tool Calls">
-                        <i class="bi bi-tools"></i>
-                    </button>
-                    <button id="toggle-codeblocks-btn" class="header-btn" title="Collapse All Code Blocks">
-                        <i class="bi bi-arrows-collapse"></i> <!-- Initial state: Expand means show collapse icon -->
-                    </button>
                     <button class="header-btn" id="delete-chat-btn" title="Delete chat">
                         <i class="bi bi-trash"></i>
                     </button>
-                    <button class="header-btn" id="gen-settings-btn" title="Generation Settings">
-                        <i class="bi bi-sliders"></i>
-                    </button>
-                    <button class="header-btn" id="settings-btn" title="Appearance Settings">
+                    <!-- Main Settings Button (Gear Icon) -->
+                    <button class="header-btn" id="settings-btn" title="Settings">
                         <i class="bi bi-gear"></i>
                     </button>
                 </div>
@@ -114,7 +150,6 @@
                         <button class="input-button" id="file-button" title="Attach file">
                              <i class="bi bi-file-earmark-text"></i>
                         </button>
-                        <!-- Character Selector MOVED here -->
                         <div class="character-select-container">
                              <button class="input-control-btn" id="character-btn" title="Select Character">
                                  <i class="bi bi-person-lines-fill"></i>
@@ -130,7 +165,6 @@
                         </div>
                     </div>
                     <div class="input-controls-right">
-                         <!-- Model Selector MOVED here -->
                          <div class="model-select-container">
                              <select class="model-select" id="model-select"></select>
                          </div>
@@ -138,49 +172,44 @@
                             <i class="bi bi-stop-fill"></i>
                         </button>
                         <button class="input-button send-button" id="send-button" title="Send message (Ctrl+Enter)">
-                            <i class="bi bi-arrow-up"></i> <!-- Changed Icon -->
+                            <i class="bi bi-arrow-up"></i>
                         </button>
                     </div>
                 </div>
             </div>
         </div>
-        <div class="gen-settings-modal" id="gen-settings-modal">
-            <div class="gen-settings-modal-content">
-                <h3>Generation Settings</h3>
-                <div class="gen-setting">
-                    <label>Temperature (0 to 2)</label>
-                    <div class="slider-container">
-                        <input type="range" id="temp-slider" min="0" max="2" step="0.01" value="0.7">
-                        <span id="temp-value">0.7</span>
-                        <label><input type="checkbox" id="temp-none"> None</label>
-                    </div>
-                </div>
-                <div class="gen-setting">
-                    <label>Min P (0 to 0.5)</label>
-                    <div class="slider-container">
-                        <input type="range" id="minp-slider" min="0" max="0.5" step="0.01" value="0.05">
-                        <span id="minp-value">0.05</span>
-                        <label><input type="checkbox" id="minp-none"> None</label>
-                    </div>
-                </div>
-                <div class="gen-setting">
-                    <label>Max Tokens (1 to 8192)</label>
-                    <div class="slider-container">
-                        <input type="range" id="maxt-slider" min="1" max="8192" step="1" value="1024">
-                        <span id="maxt-value">1024</span>
-                        <label><input type="checkbox" id="maxt-none"> None</label>
-                    </div>
-                </div>
-                <div class="form-actions">
-                    <button id="apply-gen-settings" class="btn-primary">Apply</button>
-                    <button id="cancel-gen-settings" class="btn-secondary">Cancel</button>
-                </div>
-            </div>
-        </div>
+        
         <!-- Snap to Bottom Button -->
         <button id="scroll-to-bottom-btn" class="scroll-bottom-button" style="display: none;" title="Scroll to bottom">
             <i class="bi bi-arrow-down"></i>
         </button>
+
+        <!-- Main Settings Popup (New) -->
+        <div class="settings-popup" id="main-settings-popup" style="display: none;">
+            <div class="settings-popup-header">
+                <h4>Settings</h4>
+                <button id="close-settings-popup-btn" class="popup-close-btn"><i class="bi bi-x"></i></button>
+            </div>
+            <div class="settings-popup-content">
+                <button class="settings-popup-item" id="gen-settings-btn" title="Generation Settings">
+                    <i class="bi bi-sliders"></i> <span>Generation Params</span>
+                </button>
+                <button class="settings-popup-item" id="appearance-settings-btn" title="Appearance Settings">
+                    <i class="bi bi-palette-fill"></i> <span>Appearance</span>
+                </button>
+                <hr>
+                <button class="settings-popup-item" id="toggle-tools-btn" title="Enable/Disable Tool Calls">
+                    <i class="bi bi-tools"></i> <span>Toggle Tools</span>
+                </button>
+                <button class="settings-popup-item" id="toggle-autoscroll-btn" title="Toggle Autoscroll">
+                    <i class="bi bi-unlock-fill"></i> <span>Autoscroll</span> <!-- Icon updated by JS -->
+                </button>
+                <button class="settings-popup-item" id="toggle-codeblocks-btn" title="Toggle Default Codeblock State">
+                    <i class="bi bi-arrows-collapse"></i> <span>Codeblocks Default</span> <!-- Icon updated by JS -->
+                </button>
+            </div>
+        </div>
+
     </div>
     
     <script src="script.js"></script>
