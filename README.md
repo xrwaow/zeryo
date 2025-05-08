@@ -10,10 +10,14 @@
   *   You need to provide API keys for OpenRouter, Google AI in a file named `api_keys.yaml`, like api_keys_example.yaml.
 
   ```bash
-  pip install PyYAML fastapi requests beautifulsoup4 pydantic uvicorn
+  pip install PyYAML fastapi requests beautifulsoup4 pydantic uvicorn httpx
   ```
   ```bash
   python api.py
+  ```
+  or
+  ```bash
+  uvicorn api:app --reload --host 0.0.0.0 --port 8000
   ```
   *   Open the `index.html` file in your web browser.
 
