@@ -63,7 +63,7 @@ const state = {
     abortingForToolCall: false,
     scrollDebounceTimer: null,
     codeBlocksDefaultCollapsed: false,
-    autoscrollEnabled: true,
+    autoscrollEnabled: false, // Default to false
 };
 
 // Default generation arguments
@@ -973,7 +973,6 @@ async function handleGenerateOrRegenerateFromUser(userMessageId) {
         }
 
         if (!isLastMessage) {
-            // Regenerate Logic (Replace existing response)
             console.log(`Regenerating response for user message ${userMessageId}. Replacing existing branch.`);
             const childMessage = state.messages.find(m =>
                 m.parent_message_id === userMessageId &&
@@ -1005,11 +1004,8 @@ async function handleGenerateOrRegenerateFromUser(userMessageId) {
              assistantPlaceholderRow?.remove();
              throw new Error("Failed to create assistant response placeholder element.");
         }
-        if (state.autoscrollEnabled) {
-           scrollToBottom('smooth');
-        } else {
-             requestAnimationFrame(updateScrollButtonVisibility);
-        }
+        
+        // The initial scroll to the placeholder will be handled by generateAssistantResponse.
 
         await generateAssistantResponse(
             userMessageId,
@@ -2027,18 +2023,17 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     targetContentDiv.classList.add('streaming');
     const messageDivForStream = targetContentDiv.closest('.message');
     if (messageDivForStream) {
-        messageDivForStream.style.minHeight = ''; // Clear minHeight on the .message div
+        messageDivForStream.style.minHeight = '';
     }
 
-
-    buildContentHtml(targetContentDiv, initialText);
+    buildContentHtml(targetContentDiv, initialText); // Initial render
     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
     let fullRenderedContent = initialText;
 
     const updateStreamingMinHeight = () => {
-        if (targetContentDiv) { // Ensure targetContentDiv is still valid
+        if (targetContentDiv) {
             const messageDiv = targetContentDiv.closest('.message');
             if (messageDiv) {
                 if (targetContentDiv.closest('.message-row') === messagesWrapper.lastElementChild) {
@@ -2049,6 +2044,13 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             }
         }
     };
+    updateStreamingMinHeight();
+    requestAnimationFrame(() => {
+        if (chatContainer) {
+            chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: 'smooth' });
+        }
+        updateScrollButtonVisibility();
+    });
 
     try {
         await streamFromBackend(
@@ -2057,19 +2059,16 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             modelName,
             generationArgs,
             toolsEnabled,
-            // --- onChunk Callback (MODIFIED FOR THINK BLOCK STREAMING) ---
+            // --- onChunk Callback ---
             (textChunk) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-
                 fullRenderedContent += textChunk;
                 const thinkBlockTempId = 'streaming-think-block';
                 const remainingContentTempId = 'streaming-remaining-content';
-
                 let existingThinkBlockInTarget = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
 
                 if (fullRenderedContent.trim().startsWith('<think>')) {
                     const { thinkContent, remainingText } = parseThinkContent(fullRenderedContent);
-
                     if (existingThinkBlockInTarget) {
                         const thinkContentDiv = existingThinkBlockInTarget.querySelector('.think-content');
                         if (thinkContentDiv) {
@@ -2078,7 +2077,6 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                             applyCodeBlockDefaults(thinkContentDiv);
                             finalizeStreamingCodeBlocks(thinkContentDiv);
                         }
-
                         let existingRemainingDiv = targetContentDiv.querySelector(`div[data-temp-id="${remainingContentTempId}"]`);
                         if (remainingText) {
                             const remainingHtml = renderMarkdown(remainingText, true, null);
@@ -2102,7 +2100,6 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     buildContentHtml(targetContentDiv, fullRenderedContent);
                     finalizeStreamingCodeBlocks(targetContentDiv);
                 }
-
                 targetContentDiv.querySelector('.pulsing-cursor')?.remove();
                 if (!state.streamController?.signal.aborted) {
                     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
@@ -2146,10 +2143,12 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                      return;
                 }
                 console.log("Backend generation completed successfully.");
-                targetContentDiv?.classList.remove('streaming');
-                targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
-                buildContentHtml(targetContentDiv, fullRenderedContent);
-                finalizeStreamingCodeBlocks(targetContentDiv);
+                if (targetContentDiv) {
+                    targetContentDiv.classList.remove('streaming');
+                    targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                    buildContentHtml(targetContentDiv, fullRenderedContent); // Final render of all content
+                    finalizeStreamingCodeBlocks(targetContentDiv);
+                }
 
                 if (state.autoscrollEnabled) {
                     scrollToBottom('smooth');
@@ -2159,22 +2158,20 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
 
                 try {
                     console.log("Reloading chat state after successful backend generation.");
-                    if (state.currentChatId && targetContentDiv.closest('.message-row')) {
-                        await loadChat(state.currentChatId); // loadChat calls renderActiveMessages which handles minHeight
+                    if (state.currentChatId && targetContentDiv?.closest('.message-row')) {
+                        await loadChat(state.currentChatId);
                     } else {
                          console.warn("Skipping chat reload in onComplete: Chat context changed or message row removed.");
                          const row = targetContentDiv?.closest('.message-row');
                          if (row && row.classList.contains('placeholder')) {
                             row.classList.remove('placeholder');
                          }
-                         // Reset minHeight for all other assistant messages' .message containers
                          messagesWrapper.querySelectorAll('.assistant-row .message').forEach(msgDiv => {
                             const currentContentDivInLoop = msgDiv.querySelector('.message-content');
                             if (!targetContentDiv || currentContentDivInLoop !== targetContentDiv) {
                                 msgDiv.style.minHeight = '';
                             }
                          });
-                         // Set minHeight for the current (now completed) message's .message container
                          const currentMessageDiv = targetContentDiv?.closest('.message');
                          if (currentMessageDiv) {
                              if (row && row === messagesWrapper.lastElementChild) {
@@ -2189,7 +2186,6 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                      addSystemMessage("Error refreshing chat: " + loadError.message, "error");
                      const row = targetContentDiv?.closest('.message-row');
                      if (row && row.classList.contains('placeholder')) row.classList.remove('placeholder');
-                     
                      messagesWrapper.querySelectorAll('.assistant-row .message').forEach(msgDiv => {
                         const currentContentDivInLoop = msgDiv.querySelector('.message-content');
                         if (!targetContentDiv || currentContentDivInLoop !== targetContentDiv) {
@@ -2211,56 +2207,91 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     }
                 }
             },
-            // --- onError Callback ---
-             async (error, isAbort) => {
+            // --- onError Callback (MODIFIED for abort content visibility) ---
+            async (error, isAbort) => {
                 console.warn(`>>> onError called: isAbort=${isAbort}`, error.message);
 
-                if (state.currentAssistantMessageDiv !== targetContentDiv && targetContentDiv) {
-                     console.warn("onError: Target div no longer the active streaming div. Skipping UI updates for this div.");
-                     if (isAbort && (stopButton.style.display !== 'none' || sendButton.disabled)) {
-                          setGenerationInProgressUI(false);
-                     }
-                     return;
-                }
+                const currentTargetDiv = state.currentAssistantMessageDiv === targetContentDiv ? targetContentDiv : null;
 
-                targetContentDiv?.classList.remove('streaming');
-                targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
-                if (targetContentDiv) {
-                    buildContentHtml(targetContentDiv, fullRenderedContent);
+                // 1. Finalize content display in the target div, regardless of anything else.
+                // This ensures partially streamed content is visible immediately.
+                if (targetContentDiv) { // Use targetContentDiv passed to this function instance
+                    targetContentDiv.classList.remove('streaming');
+                    targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                    buildContentHtml(targetContentDiv, fullRenderedContent); // Render the accumulated content
                     finalizeStreamingCodeBlocks(targetContentDiv);
+                    targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
+                } else if (currentTargetDiv) { // Fallback if targetContentDiv was somehow nulled but we have the global one
+                    currentTargetDiv.classList.remove('streaming');
+                    currentTargetDiv.querySelector('.pulsing-cursor')?.remove();
+                    buildContentHtml(currentTargetDiv, fullRenderedContent);
+                    finalizeStreamingCodeBlocks(currentTargetDiv);
+                    currentTargetDiv.querySelector('.generation-stopped-indicator')?.remove();
                 }
 
-                setGenerationInProgressUI(false);
-                if (state.currentAssistantMessageDiv === targetContentDiv) {
+
+                // 2. Reset global generation UI state
+                setGenerationInProgressUI(false); // This also nulls state.streamController
+                if (state.currentAssistantMessageDiv === targetContentDiv) { // Clear if it was the active one
                     state.currentAssistantMessageDiv = null;
                 }
 
+                // 3. Handle abort-specific logic (toast and potential reload for actions)
                 if (isAbort) {
                     addSystemMessage("Generation stopped by user.", "info", 2000);
-                    if (targetContentDiv) {
-                        if (!targetContentDiv.querySelector('.generation-stopped-indicator')) {
-                             targetContentDiv.insertAdjacentHTML('beforeend', `<span class="system-info-row info generation-stopped-indicator"><i class="bi bi-stop-circle-fill"></i> Stopped</span>`);
-                        }
-                        const row = targetContentDiv.closest('.message-row');
-                        const messageDiv = targetContentDiv.closest('.message');
-                        if (messageDiv) {
-                            if (row && row.classList.contains('placeholder')) {
-                                row.classList.remove('placeholder');
+
+                    const rowBeingStreamedTo = targetContentDiv?.closest('.message-row');
+
+                    // Attempt to reload the chat to get proper message ID and actions from backend.
+                    // The content is ALREADY visible due to step 1. This step is for "finalizing" with actions.
+                    if (state.currentChatId && rowBeingStreamedTo) {
+                        try {
+                            console.log("Reloading chat state after user abort to refresh message for actions.");
+                            await loadChat(state.currentChatId);
+                        } catch (loadError) {
+                            console.error("Error reloading chat after user abort. Content is visible, but actions might be missing/delayed until next refresh.", loadError);
+                            // If loadChat fails, the content is already there.
+                            // We might just remove placeholder class if it was a placeholder.
+                            if (rowBeingStreamedTo && rowBeingStreamedTo.classList.contains('placeholder')) {
+                                rowBeingStreamedTo.classList.remove('placeholder');
+                                console.warn("Fallback: Placeholder class removed from aborted message. Full actions may require refresh if loadChat failed.");
                             }
-                            if (row && row === messagesWrapper.lastElementChild) {
-                                messageDiv.style.minHeight = 'calc(-384px + 100dvh)';
-                            } else {
-                                messageDiv.style.minHeight = '';
+                            // Adjust min-height if it was the last message.
+                            const messageDiv = rowBeingStreamedTo?.querySelector('.message');
+                            if (messageDiv) {
+                                if (rowBeingStreamedTo === messagesWrapper.lastElementChild) {
+                                    messageDiv.style.minHeight = 'calc(-384px + 100dvh)';
+                                } else {
+                                    messageDiv.style.minHeight = '';
+                                }
+                            }
+                        }
+                    } else {
+                        console.warn("Skipping chat reload in abort's onError: No current chat or row not found. Content should be visible.");
+                        if (rowBeingStreamedTo && rowBeingStreamedTo.classList.contains('placeholder')) {
+                            rowBeingStreamedTo.classList.remove('placeholder'); // At least make it not look like a temp item
+                             console.log("Placeholder class removed from aborted message as no chat context for reload.");
+                        }
+                        // Adjust min-height of the (potentially new) last message
+                        const lastMessageRow = messagesWrapper.lastElementChild;
+                        if (lastMessageRow && lastMessageRow.classList.contains('assistant-row') && !lastMessageRow.classList.contains('placeholder')) {
+                            const lastAssistantMessageDiv = lastMessageRow.querySelector('.message');
+                            if (lastAssistantMessageDiv) {
+                                lastAssistantMessageDiv.style.minHeight = 'calc(-384px + 100dvh)';
                             }
                         }
                     }
-                } else {
+                } else { // Non-abort error
                     addSystemMessage(`Generation Error: ${error.message}`, "error");
-                    targetContentDiv?.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Error: ${error.message}</span>`);
+                    // Content is already rendered by step 1. Add error message below.
+                    if (targetContentDiv) {
+                        targetContentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Error: ${error.message}</span>`);
+                    }
                     const placeholderRow = targetContentDiv?.closest('.message-row.placeholder');
-                    if (placeholderRow) {
+                    if (placeholderRow) { // If it was an error on a brand new placeholder, remove it.
                         placeholderRow.remove();
                     }
+                     // Adjust min-height of the (potentially new) last message
                     const lastMessageRow = messagesWrapper.lastElementChild;
                     if (lastMessageRow && lastMessageRow.classList.contains('assistant-row') && !lastMessageRow.classList.contains('placeholder')) {
                         const lastAssistantMessageDiv = lastMessageRow.querySelector('.message');
@@ -2272,24 +2303,23 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 requestAnimationFrame(updateScrollButtonVisibility);
             }
         );
-    } catch (error) {
+    } catch (error) { // Catch errors from streamFromBackend setup itself
         console.error("Error setting up generation stream (SYNC):", error);
         addSystemMessage(`Setup Error: ${error.message}`, "error");
-        targetContentDiv?.classList.remove('streaming');
-        targetContentDiv?.querySelector('.pulsing-cursor')?.remove();
-        
-        const messageDivOfTarget = targetContentDiv?.closest('.message');
-        if (messageDivOfTarget) {
-            messageDivOfTarget.style.minHeight = '';
+        if (targetContentDiv) { // Clean up the target div if it exists
+            targetContentDiv.classList.remove('streaming');
+            targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+            const messageDivOfTarget = targetContentDiv.closest('.message');
+            if (messageDivOfTarget) {
+                messageDivOfTarget.style.minHeight = '';
+            }
+            const placeholderRow = targetContentDiv.closest('.message-row.placeholder');
+            if (placeholderRow) {
+                placeholderRow.remove();
+            }
         }
-
-        const placeholderRow = targetContentDiv?.closest('.message-row.placeholder');
-        if (placeholderRow) {
-            placeholderRow.remove();
-        }
-        cleanupAfterGeneration();
+        cleanupAfterGeneration(); // Ensures UI is reset generally
         requestAnimationFrame(updateScrollButtonVisibility);
-        
         const lastMessageRowAfterError = messagesWrapper.lastElementChild;
         if (lastMessageRowAfterError && lastMessageRowAfterError.classList.contains('assistant-row') && !lastMessageRowAfterError.classList.contains('placeholder')) {
             const lastAssistantMessageDiv = lastMessageRowAfterError.querySelector('.message');
@@ -2298,10 +2328,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             }
         }
     } finally {
+         // Final min-height adjustment if the streamed message wasn't the last one
          if (targetContentDiv) {
              const messageDiv = targetContentDiv.closest('.message');
-             // If the message corresponding to targetContentDiv is NOT the last one, ensure its minHeight is cleared.
-             // This handles cases where loadChat might not have run, or other messages were added.
              if (messageDiv && targetContentDiv.closest('.message-row') !== messagesWrapper.lastElementChild) {
                  messageDiv.style.minHeight = '';
              }
@@ -2336,6 +2365,7 @@ function setGenerationInProgressUI(inProgress) {
         console.log(">>> Send button state reset in setGenerationInProgressUI");
         requestAnimationFrame(updateScrollButtonVisibility);
 
+        // Ensure the controller is aborted and nulled if we are truly done.
         if (state.streamController) {
             if (!state.streamController.signal.aborted) {
                  console.warn(">>> Controller not aborted when setGenerationInProgressUI(false) called. Aborting now.");
@@ -2344,8 +2374,9 @@ function setGenerationInProgressUI(inProgress) {
             state.streamController = null;
             console.log(">>> Cleared streamController reference");
         } else {
-             console.log(">>> No streamController reference to clear");
+             console.log(">>> No streamController reference to clear or already cleared");
         }
+        // Resetting tool state flags, assuming this is a general "generation ended" state.
         state.toolCallPending = false;
         state.toolContinuationContext = null;
         state.currentToolCallId = null;
@@ -2441,11 +2472,9 @@ async function sendMessage() {
              throw new Error("Failed to create assistant response placeholder element.");
         }
 
-        if (state.autoscrollEnabled) {
-             scrollToBottom('smooth');
-        } else {
-            requestAnimationFrame(updateScrollButtonVisibility);
-        }
+        // The initial scroll to the placeholder will be handled by generateAssistantResponse
+        // No explicit scroll here is needed. updateScrollButtonVisibility will be called
+        // by generateAssistantResponse's initial scroll logic.
 
         await generateAssistantResponse(
             savedUserMessageId,
@@ -2552,10 +2581,15 @@ function findLastActiveMessageId(messages) {
 
 function cleanupAfterGeneration() {
     console.log("Running cleanupAfterGeneration");
-    sendButton.disabled = false;
-    sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';
-    state.currentAssistantMessageDiv = null;
+    // Main UI reset is handled by setGenerationInProgressUI
     setGenerationInProgressUI(false);
+    // Ensure currentAssistantMessageDiv is cleared if not already by onError/onComplete
+    if (state.currentAssistantMessageDiv) {
+        state.currentAssistantMessageDiv.classList.remove('streaming');
+        state.currentAssistantMessageDiv.querySelector('.pulsing-cursor')?.remove();
+        state.currentAssistantMessageDiv = null;
+    }
+    // Any other specific cleanup that isn't covered by setGenerationInProgressUI
 }
 
 function renderToolCallPlaceholder(messageContentDiv, toolName, args) {
@@ -2739,8 +2773,6 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         return;
     }
 
-    // messageIdToRegen is the ID of the LLM message we are basing the action on.
-    // Its parent is the user message (or prior LLM message) from which we'll generate.
     const messageToRegen = state.messages.find(m => m.message_id === messageIdToRegen);
     const parentMessage = messageToRegen?.parent_message_id
         ? state.messages.find(m => m.message_id === messageToRegen.parent_message_id)
@@ -2759,23 +2791,21 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
 
     console.log(`Regenerating from parent ${parentMessageId} (targeting llm message ${messageIdToRegen}, new branch: ${newBranch}) using model ${modelNameToUse}`);
     let assistantPlaceholderRow = null;
-    const generationParentId = parentMessageId; // The new response will be a child of this parent.
+    const generationParentId = parentMessageId;
 
     try {
         const parentRow = messagesWrapper.querySelector(`.message-row[data-message-id="${parentMessageId}"]`);
         if (!parentRow) {
              console.error(`Parent row ${parentMessageId} not found in DOM. Cannot place placeholder correctly.`);
              addSystemMessage("Error: Parent message UI not found. Aborting regeneration.", "error");
-             // Attempt to reload chat to fix DOM, though this might not be ideal during an action.
              await loadChat(currentChatId);
              cleanupAfterGeneration();
              return;
         }
 
         if (!newBranch) {
-            // --- Replace Logic ---
             console.log(`Replacing: Deleting message branch starting with ${messageIdToRegen}.`);
-            removeMessageAndDescendantsFromDOM(messageIdToRegen); // Visual removal
+            removeMessageAndDescendantsFromDOM(messageIdToRegen);
             const deleteSuccess = await deleteMessageFromBackend(currentChatId, messageIdToRegen);
             if (!deleteSuccess) {
                 addSystemMessage("Failed to delete old message from backend. Reloading chat.", "error");
@@ -2783,8 +2813,6 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
                 cleanupAfterGeneration();
                 return;
             }
-
-            // Update local state for replacement
             const descendantIds = new Set();
             const queue = [messageIdToRegen];
             while(queue.length > 0) {
@@ -2803,19 +2831,13 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
                 );
             }
             console.log(`Locally removed ${descendantIds.size} messages from state for replacement.`);
-
         } else {
-            // --- New Branch Logic ---
             console.log(`Branching: Visually clearing current active branch from parent ${parentMessageId} before generating new one.`);
-            // Find the *currently active* child of the parentMessageId in the DOM and remove it and its descendants.
-            // This child is the one that was rendered based on parentMessage.active_child_index.
-            // We look it up from state to be sure.
             const parentNodeInState = state.messages.find(m => m.message_id === parentMessageId);
             if (parentNodeInState && parentNodeInState.child_message_ids && parentNodeInState.child_message_ids.length > 0) {
                 const activeChildIndex = parentNodeInState.active_child_index ?? 0;
                 const safeActiveIndex = Math.min(Math.max(0, activeChildIndex), parentNodeInState.child_message_ids.length - 1);
                 const activeChildIdToClear = parentNodeInState.child_message_ids[safeActiveIndex];
-
                 if (activeChildIdToClear) {
                     console.log(`Branching: Visually removing current active branch starting with ${activeChildIdToClear} from DOM.`);
                     removeMessageAndDescendantsFromDOM(activeChildIdToClear);
@@ -2825,26 +2847,17 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
             } else {
                 console.warn(`Branching: Parent ${parentMessageId} has no children in state, or child_message_ids is empty. No DOM branch to clear visually.`);
             }
-            // The backend and subsequent loadChat will handle setting the new branch as active.
-            // We don't delete the old branch from the backend/state here, as it's still a valid (inactive) branch.
         }
 
-        // --- Create Placeholder & Start Generation (Common for both Replace and New Branch) ---
         assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
-        // Insert the placeholder directly after the parent's row.
         parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
-
         const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
         if (!assistantContentDiv) {
-             assistantPlaceholderRow?.remove(); // Clean up placeholder if content div fails
+             assistantPlaceholderRow?.remove();
              throw new Error("Failed to create assistant response placeholder element.");
         }
 
-        if (state.autoscrollEnabled) {
-            scrollToBottom('smooth');
-        } else {
-             requestAnimationFrame(updateScrollButtonVisibility);
-        }
+        // The initial scroll to the placeholder will be handled by generateAssistantResponse.
 
         await generateAssistantResponse(
             generationParentId,
@@ -2853,16 +2866,14 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
             defaultGenArgs,
             state.toolsEnabled
         );
-        // `loadChat` will be called by `generateAssistantResponse`'s onComplete/onError,
-        // which will then render the correct active branch including the newly generated one.
 
     } catch (error) {
         console.error(`Error during regeneration (new branch: ${newBranch}):`, error);
         addSystemMessage(`Regeneration failed: ${error.message}`, "error");
-        assistantPlaceholderRow?.remove(); // Clean up placeholder on error
+        assistantPlaceholderRow?.remove();
         try {
             console.log("Reloading chat due to regeneration error to restore consistency.");
-            await loadChat(currentChatId); // Attempt to restore a consistent view
+            await loadChat(currentChatId);
         } catch(e) {
             console.error("Failed to reload chat after regeneration error:", e);
         }
@@ -2937,30 +2948,46 @@ async function continueMessage(messageIdToContinue) {
 async function stopStreaming() {
     if (state.streamController && !state.streamController.signal.aborted) {
         console.log("User requested stop. Aborting frontend fetch...");
-        state.streamController.abort();
+        state.streamController.abort(); // This will trigger onError in generateAssistantResponse
 
+        // Send abort signal to backend (best-effort)
         if (state.currentChatId) {
             console.log(`Signaling backend to abort generation for chat ${state.currentChatId}...`);
             fetch(`${API_BASE}/chat/${state.currentChatId}/abort_generation`, { method: 'POST' })
                 .then(response => {
                     if (!response.ok) {
                         console.error(`Backend abort request failed: ${response.status}`);
-                        return response.text().then(text => {
-                            console.error(`Backend abort response text: ${text}`);
-                        });
+                        return response.text().then(text => { // Get text for more detailed error logging
+                            console.error(`Backend abort response text: ${text || '(empty response)'}`);
+                            // Potentially throw an error here or handle it based on status
+                            // For now, just logging
+                        }).catch(() => console.error(`Backend abort request failed: ${response.status} (could not parse text)`));
                     }
-                    return response.json();
+                    // Try to parse as JSON, but don't fail if it's not JSON (e.g., empty 200 OK)
+                    return response.text().then(text => {
+                        try {
+                            return JSON.parse(text);
+                        } catch (e) {
+                            return { message: text || "Backend acknowledged abort (non-JSON response)." };
+                        }
+                    });
                 })
-                .then(result => console.log("Backend abort signal result:", result?.message || 'No message'))
-                .catch(err => console.error("Error sending abort signal to backend:", err));
+                .then(result => console.log("Backend abort signal result:", result?.message || 'No message content in result'))
+                .catch(err => console.error("Error sending abort signal to backend or processing its response:", err));
         } else {
             console.warn("Cannot signal backend abort: No current chat ID.");
         }
     } else {
         console.log("No active frontend stream to stop or already aborted.");
+        // If UI is stuck in generating state without an active stream, force cleanup.
         if (document.getElementById('send-button').disabled || stopButton.style.display === 'flex') {
-             console.warn("Stop clicked with no active stream, forcing UI cleanup.");
-             cleanupAfterGeneration();
+             console.warn("Stop clicked with no active stream or UI stuck, forcing UI cleanup via setGenerationInProgressUI(false).");
+             setGenerationInProgressUI(false);
+             if (state.currentAssistantMessageDiv) {
+                state.currentAssistantMessageDiv.classList.remove('streaming');
+                state.currentAssistantMessageDiv.querySelector('.pulsing-cursor')?.remove();
+                state.currentAssistantMessageDiv = null;
+             }
              requestAnimationFrame(updateScrollButtonVisibility);
         }
     }
@@ -3300,8 +3327,10 @@ function startNewChat() {
     state.abortingForToolCall = false;
     state.codeBlocksDefaultCollapsed = false;
     updateCodeblockToggleButton();
-    state.autoscrollEnabled = true;
-    localStorage.setItem('autoscrollEnabled', 'true');
+
+    // Set autoscroll to OFF by default for new chats
+    state.autoscrollEnabled = false;
+    localStorage.setItem('autoscrollEnabled', 'false');
     updateAutoscrollButton();
 
     if (chatContainer) chatContainer.style.paddingBottom = '0px';
@@ -3548,31 +3577,30 @@ function addSystemMessage(text, type = "info", timeout = null) {
     }
 
     const messageRow = document.createElement('div');
-    messageRow.className = `system-toast-message ${type}`; // Use a more specific class
+    messageRow.className = `system-toast-message ${type}`;
 
     const iconClass = type === 'error' ? 'exclamation-octagon-fill' : (type === 'warning' ? 'exclamation-triangle-fill' : 'info-circle-fill');
     messageRow.innerHTML = `<i class="bi bi-${iconClass}"></i> <span>${text}</span>`;
 
-    toastContainer.appendChild(messageRow); // Add to bottom of container, visually appears at bottom of stack
+    toastContainer.appendChild(messageRow);
 
-    // Animate in
     requestAnimationFrame(() => {
         messageRow.style.opacity = '1';
         messageRow.style.transform = 'translateY(0) scale(1)';
     });
 
-    const effectiveTimeout = (timeout && typeof timeout === 'number' && timeout > 0) ? timeout : 500;
+    const effectiveTimeout = (timeout && typeof timeout === 'number' && timeout > 0) ? timeout : (type === 'error' || type === 'warning' ? 5000 : 3000); // Longer default for errors/warnings
+
 
     setTimeout(() => {
         messageRow.style.opacity = '0';
-        messageRow.style.transform = 'translateY(-20px) scale(0.95)'; // Animate out upwards
+        messageRow.style.transform = 'translateY(-20px) scale(0.95)';
         setTimeout(() => {
             messageRow.remove();
-            if (toastContainer.children.length === 0) {
-                // Optionally remove container if empty, or keep it for future messages
-                // toastContainer.remove();
-            }
-        }, 300); // Removal after transition (must match transition duration)
+            // if (toastContainer.children.length === 0) {
+            //     toastContainer.remove(); // Optionally remove if you prefer
+            // }
+        }, 300); // Must match CSS transition duration
     }, effectiveTimeout);
 }
 
@@ -3582,7 +3610,8 @@ function setupAutoscrollToggle() {
         return;
     }
     const savedAutoscrollState = localStorage.getItem('autoscrollEnabled');
-    state.autoscrollEnabled = savedAutoscrollState !== null ? savedAutoscrollState === 'true' : true;
+    // Default to false if not found in localStorage or if state is freshly initialized
+    state.autoscrollEnabled = savedAutoscrollState !== null ? savedAutoscrollState === 'true' : false;
     updateAutoscrollButton();
 
     toggleAutoscrollBtn.addEventListener('click', () => {

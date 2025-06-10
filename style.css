@@ -475,7 +475,8 @@ body.welcome-active .input-area .input-container {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    background-color: color-mix(in srgb, var(--text-secondary) 15%, transparent);
+    background-color: var(--bg-tertiary);
+    /*background-color: color-mix(in srgb, var(--text-secondary) 15%, transparent);*/
     padding: 6px 12px;
     border-top-left-radius: var(--border-radius-sm);
     border-top-right-radius: var(--border-radius-sm);

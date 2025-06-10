@@ -5,3 +5,4 @@ ugh/
 *.sqlite
 api_keys.yaml
 __pycache__
+*save*
