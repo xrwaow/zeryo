@@ -1,7 +1,5 @@
 // API Configuration (Backend Data API)
-// const API_BASE = 'http://localhost:8000';
-// API Configuration (Backend Data API)
-const API_BASE = 'http://192.168.1.5:8000'; // Use relative paths
+const API_BASE = 'http://localhost:8000';
 
 // Global Config (Fetched from backend)
 let PROVIDER_CONFIG = {
