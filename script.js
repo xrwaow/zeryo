@@ -72,6 +72,76 @@ const defaultGenArgs = {
     top_p: null,
 };
 
+const THEMES_CONFIG = {
+    white: {
+        '--bg-primary': '#ffffff', '--bg-secondary': '#f7f7f7', '--bg-tertiary': '#f0f0f0',
+        '--text-primary': '#101010', '--text-secondary': '#57606a', '--accent-color': '#101010',
+        '--accent-hover': '#101010', '--accent-color-highlight': '#101010', '--error-color': '#d73a49', '--error-hover': '#b22222',
+        '--message-user': '#f0f0f0', '--scrollbar-bg': '#f0f0f0',
+        '--scrollbar-thumb': '#cccccc', '--border-color': '#d0d7de',
+        '--tool-call-bg': 'rgba(0, 0, 0, 0.03)', '--tool-call-border': '#444',
+        '--tool-result-bg': 'rgba(0, 0, 0, 0.02)', '--tool-result-border': '#aaa',
+    },
+    solarized: {
+        '--bg-primary': '#fdf6e3', '--bg-secondary': '#eee8d5', '--bg-tertiary': '#e8e1cf',
+        '--text-primary': '#657b83', '--text-secondary': '#839496', '--accent-color': '#2aa198',
+        '--accent-hover': '#217d77', '--accent-color-highlight': 'rgba(42, 161, 152, 0.3)', '--error-color': '#dc322f', '--error-hover': '#b52a27',
+        '--message-user': '#eee8d5', '--scrollbar-bg': '#eee8d5',
+        '--scrollbar-thumb': '#93a1a1', '--border-color': '#d9cfb3',
+        '--tool-call-bg': 'rgba(42, 161, 152, 0.08)', '--tool-call-border': '#2aa198',
+        '--tool-result-bg': 'rgba(147, 161, 161, 0.08)', '--tool-result-border': '#93a1a1',
+    },
+    dark: {
+        '--bg-primary': '#000000', '--bg-secondary': '#050505', '--bg-tertiary': '#0a0a0a',
+        '--text-primary': '#ffffff', '--text-secondary': '#cccccc', '--accent-color': '#b8860b',
+        '--accent-hover': '#daa520', '--accent-color-highlight': 'rgba(184, 134, 11, 0.3)', '--error-color': '#ff4444', '--error-hover': '#ff6666',
+        '--message-user': '#080808', '--scrollbar-bg': '#0f0f0f',
+        '--scrollbar-thumb': '#333333', '--border-color': '#1a1a1a',
+        '--tool-call-bg': 'rgba(184, 134, 11, 0.08)', '--tool-call-border': '#b8860b',
+        '--tool-result-bg': 'rgba(184, 134, 11, 0.05)', '--tool-result-border': '#9a6f09',
+    },
+    claude_white: {
+        '--bg-primary': '#ffffff',
+        '--bg-secondary': '#FAF9F5',
+        '--bg-tertiary': '#F5F4ED',
+        '--text-primary': '#1f2328',
+        '--text-secondary': '#57606a',
+        '--accent-color': '#e97c5d',
+        '--accent-hover': '#D97757',
+        '--accent-color-highlight': '#1f2328',
+        '--error-color': '#d73a49',
+        '--error-hover': '#b22222',
+        '--message-user': '#F5F4ED',
+        '--scrollbar-bg': '#F5F4ED',
+        '--scrollbar-thumb': '#cccccc',
+        '--border-color': '#e0e0e0',
+        '--tool-call-bg': 'rgba(233, 124, 93, 0.05)',
+        '--tool-call-border': '#e97c5d',
+        '--tool-result-bg': 'rgba(0, 0, 0, 0.02)',
+        '--tool-result-border': '#aaa',
+    },
+    gpt_dark: {
+        '--bg-primary': '#303030',
+        '--bg-secondary': '#212121',
+        '--bg-tertiary': '#171717',
+        '--text-primary': '#e0e0e8',
+        '--text-secondary': '#e0e0e8',
+        '--accent-color': '#c0c0c8',
+        '--accent-hover': '#e0e0e8',
+        '--accent-color-highlight': '#e0e0e8',
+        '--error-color': '#d73a49',
+        '--error-hover': '#b22222',
+        '--message-user': '#F5F4ED',
+        '--scrollbar-bg': '#F5F4ED',
+        '--scrollbar-thumb': '#cccccc',
+        '--border-color': '#424242',
+        '--tool-call-bg': 'rgba(233, 124, 93, 0.05)',
+        '--tool-call-border': '#e97c5d',
+        '--tool-result-bg': 'rgba(0, 0, 0, 0.02)',
+        '--tool-result-border': '#aaa',
+    }
+};
+
 // Configure marked
 marked.setOptions({
     breaks: true,
@@ -206,18 +276,18 @@ function handleCodeCopy(copyBtn) {
     }
 
     navigator.clipboard.writeText(codeText).then(() => {
-        copyBtn.innerHTML = '<i class="bi bi-check-lg"></i> Copied';
+        copyBtn.innerHTML = '<i class="bi bi-check-lg"></i>';
         copyBtn.disabled = true;
         setTimeout(() => {
-            copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
+            copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
             copyBtn.disabled = false;
-        }, 1500);
+        }, 500);
     }).catch(err => {
         console.error('Failed to copy code:', err);
         copyBtn.innerHTML = 'Error';
          setTimeout(() => {
-             copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
-         }, 1500);
+             copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
+         }, 500);
     });
 }
 
@@ -341,9 +411,7 @@ async function init() {
     setupGenerationSettings();
     setupToolToggle();
     setupCodeblockToggle();
-
     startNewChat();
-    applySidebarState();
 }
 
 async function fetchProviderConfig() {
@@ -828,7 +896,7 @@ function createCodeBlockWithContent(codeText, lang) {
     actionsDiv.appendChild(collapseBtn);
     const copyBtn = document.createElement('button');
     copyBtn.className = 'code-header-btn copy-btn';
-    copyBtn.innerHTML = '<i class="bi bi-clipboard"></i> Copy';
+    copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
     copyBtn.title = 'Copy code';
     actionsDiv.appendChild(copyBtn);
     header.appendChild(actionsDiv);
@@ -1618,32 +1686,14 @@ function adjustTextareaHeight() {
 
 function toggleSidebar() {
     const isCollapsed = sidebar.classList.toggle('sidebar-collapsed');
-    const icon = sidebarToggle.querySelector('i');
+    //const icon = sidebarToggle.querySelector('i');
     const textElements = sidebar.querySelectorAll('.sidebar-title span, .new-chat-btn span, .history-item span, .history-title');
-    icon.className = `bi bi-chevron-${isCollapsed ? 'right' : 'left'}`;
+    //icon.className = `bi bi-chevron-${isCollapsed ? 'right' : 'left'}`;
     document.documentElement.style.setProperty('--sidebar-width', isCollapsed ? '0px' : '260px');
     textElements.forEach(el => {
          el.style.display = isCollapsed ? 'none' : '';
     });
     localStorage.setItem('sidebarCollapsed', isCollapsed);
-}
-
-function applySidebarState() {
-    const isCollapsed = localStorage.getItem('sidebarCollapsed') === 'true';
-    const icon = sidebarToggle.querySelector('i');
-    const textElements = sidebar.querySelectorAll('.sidebar-title span, .new-chat-btn span, .history-item span, .history-title');
-
-    if (isCollapsed && window.innerWidth > 768) {
-         sidebar.classList.add('sidebar-collapsed');
-         if(icon) icon.className = `bi bi-chevron-right`;
-         textElements.forEach(el => { el.style.display = 'none'; });
-         document.documentElement.style.setProperty('--sidebar-width', '0px');
-    } else if (window.innerWidth > 768) {
-         sidebar.classList.remove('sidebar-collapsed');
-         if(icon) icon.className = `bi bi-chevron-left`;
-         textElements.forEach(el => { el.style.display = ''; });
-         document.documentElement.style.setProperty('--sidebar-width', '260px');
-    }
 }
 
 function updateAttachButtons() {
@@ -2387,13 +2437,12 @@ async function sendMessage() {
     sendButton.innerHTML = '<div class="spinner"></div>';
 
     try {
-        if (!currentChatId) {
+        const isNewChat = !currentChatId;
+        if (isNewChat) {
             currentChatId = await createNewChatBackend();
             if (!currentChatId) throw new Error("Failed to create a new chat session.");
             state.currentChatId = currentChatId;
-            await fetchChats();
             localStorage.setItem('lastChatId', currentChatId);
-            highlightCurrentChatInSidebar();
         }
 
         const parentId = findLastActiveMessageId(state.messages);
@@ -2406,6 +2455,11 @@ async function sendMessage() {
         savedUserMessageId = await saveMessageToBackend(currentChatId, userMessageData);
         if (!savedUserMessageId) throw new Error("Failed to save user message.");
         console.log(`User message saved with ID: ${savedUserMessageId}`);
+
+        if (isNewChat) {
+            await fetchChats();
+            highlightCurrentChatInSidebar();
+        }
 
         await loadChat(currentChatId);
 
@@ -3308,82 +3362,27 @@ async function deleteCurrentChat() {
     } catch (error) { console.error('Error deleting chat:', error); addSystemMessage(`Failed to delete chat: ${error.message}`, "error"); }
 }
 
+function styleThemeOptionButtons() {
+    document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
+        const themeName = button.dataset.theme;
+        const themeConfig = THEMES_CONFIG[themeName];
+        if (themeConfig) {
+            button.style.backgroundColor = themeConfig['--bg-primary'];
+            button.style.color = themeConfig['--text-primary'];
+            // Add a border to make buttons with light backgrounds visible
+            button.style.border = `1px solid ${themeConfig['--accent-color']}`;
+        }
+    });
+}
+
 function setupThemeSwitch() {
+    styleThemeOptionButtons();
     const savedTheme = localStorage.getItem('theme') || 'dark';
     applyTheme(savedTheme);
 }
 
 function applyTheme(themeName) {
-    const themes = {
-       white: {
-           '--bg-primary': '#ffffff', '--bg-secondary': '#f7f7f7', '--bg-tertiary': '#f0f0f0',
-           '--text-primary': '#1f2328', '--text-secondary': '#57606a', '--accent-color': '#101010',
-           '--accent-hover': '#1f2328', '--accent-color-highlight': 'rgba(31, 35, 40, 0.3)', '--error-color': '#d73a49', '--error-hover': '#b22222',
-           '--message-user': '#f0f0f0', '--scrollbar-bg': '#f0f0f0',
-           '--scrollbar-thumb': '#cccccc', '--border-color': '#d0d7de',
-            '--tool-call-bg': 'rgba(0, 0, 0, 0.03)', '--tool-call-border': '#444',
-            '--tool-result-bg': 'rgba(0, 0, 0, 0.02)', '--tool-result-border': '#aaa',
-       },
-       solarized: {
-           '--bg-primary': '#fdf6e3', '--bg-secondary': '#eee8d5', '--bg-tertiary': '#e8e1cf',
-           '--text-primary': '#657b83', '--text-secondary': '#839496', '--accent-color': '#2aa198',
-           '--accent-hover': '#217d77', '--accent-color-highlight': 'rgba(42, 161, 152, 0.3)', '--error-color': '#dc322f', '--error-hover': '#b52a27',
-           '--message-user': '#eee8d5', '--scrollbar-bg': '#eee8d5',
-           '--scrollbar-thumb': '#93a1a1', '--border-color': '#d9cfb3',
-           '--tool-call-bg': 'rgba(42, 161, 152, 0.08)', '--tool-call-border': '#2aa198',
-           '--tool-result-bg': 'rgba(147, 161, 161, 0.08)', '--tool-result-border': '#93a1a1',
-       },
-       dark: {
-           '--bg-primary': '#0a0a10', '--bg-secondary': '#0f0f15', '--bg-tertiary': '#16161e',
-           '--text-primary': '#e0e0e8', '--text-secondary': '#a0a0b0', '--accent-color': '#b86a38',
-           '--accent-hover': '#d07c46', '--accent-color-highlight': 'rgba(184, 106, 56, 0.3)', '--error-color': '#e53e3e', '--error-hover': '#ff6666',
-           '--message-user': '#141419', '--scrollbar-bg': '#1a1a24',
-           '--scrollbar-thumb': '#38383f', '--border-color': '#2a2a38',
-           '--tool-call-bg': 'rgba(184, 106, 56, 0.08)', '--tool-call-border': '#b86a38',
-           '--tool-result-bg': 'rgba(184, 106, 56, 0.05)', '--tool-result-border': '#9a5a30',
-       },
-       claude_white: {
-           '--bg-primary': '#ffffff',
-           '--bg-secondary': '#FAF9F5',
-           '--bg-tertiary': '#F5F4ED',
-           '--text-primary': '#1f2328',
-           '--text-secondary': '#57606a',
-           '--accent-color': '#e97c5d',
-           '--accent-hover': '#D97757',
-           '--accent-color-highlight': 'rgba(233,124,93,0.3)',
-           '--error-color': '#d73a49',
-           '--error-hover': '#b22222',
-           '--message-user': '#F5F4ED',
-           '--scrollbar-bg': '#F5F4ED',
-           '--scrollbar-thumb': '#cccccc',
-           '--border-color': '#e0e0e0',
-           '--tool-call-bg': 'rgba(233, 124, 93, 0.05)',
-           '--tool-call-border': '#e97c5d',
-           '--tool-result-bg': 'rgba(0, 0, 0, 0.02)',
-           '--tool-result-border': '#aaa',
-       },
-       gpt_dark: {
-        '--bg-primary': '#303030',
-        '--bg-secondary': '#212121',
-        '--bg-tertiary': '#171717',
-        '--text-primary': '#e0e0e8',
-        '--text-secondary': '#e0e0e8',
-        '--accent-color': '#e97c5d',
-        '--accent-hover': '#D97757',
-        '--accent-color-highlight': 'rgba(233,124,93,0.3)',
-        '--error-color': '#d73a49',
-        '--error-hover': '#b22222',
-        '--message-user': '#F5F4ED',
-        '--scrollbar-bg': '#F5F4ED',
-        '--scrollbar-thumb': '#cccccc',
-        '--border-color': '#424242',
-        '--tool-call-bg': 'rgba(233, 124, 93, 0.05)',
-        '--tool-call-border': '#e97c5d',
-        '--tool-result-bg': 'rgba(0, 0, 0, 0.02)',
-        '--tool-result-border': '#aaa',
-    }
-   };
-    const theme = themes[themeName] || themes.dark;
+    const theme = THEMES_CONFIG[themeName] || THEMES_CONFIG.dark;
 
     Object.entries(theme).forEach(([prop, value]) => {
         document.documentElement.style.setProperty(prop, value);
