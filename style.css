@@ -273,27 +273,6 @@ body.highlight-drop::after {
     height: 60px;
 }
 
-/* Container for prompt display in header */
-.active-prompt-container {
-    color: var(--text-secondary);
-    font-size: 14px;
-    display: flex;
-    align-items: center;
-    gap: 6px; /* Space between icon and text */
-    overflow: hidden; /* Prevent overflow */
-    white-space: nowrap; /* Keep on one line */
-    text-overflow: ellipsis; /* Add ellipsis if too long */
-    flex-shrink: 1; /* Allow shrinking */
-    max-width: calc(100% - 300px); /* Limit width to avoid overlap with buttons (increased margin for tools button) */
-    cursor: pointer; /* Make the whole container clickable */
-    padding: 4px 8px; /* Add some padding */
-    border-radius: var(--border-radius-md);
-    transition: background-color 0.2s ease;
-}
-.active-prompt-container:hover {
-     background-color: color-mix(in srgb, var(--text-secondary) 10%, transparent); /* Subtle hover */
-}
-
 /* Input Area - Centered state (when body has .welcome-active) */
 body.welcome-active .input-area {
     bottom: auto; /* Remove bottom constraint */
@@ -307,14 +286,6 @@ body.welcome-active .input-area .input-container {
     margin-left: auto;
     margin-right: auto;
     width: 640px;
-}
-
-/* Style for the prompt name within the header display */
-.active-prompt-name {
-    color: var(--text-primary); /* Use primary text color for name */
-    font-weight: 500;
-    text-overflow: ellipsis;
-    overflow: hidden;
 }
 
 .system-prompt-popup-text {
@@ -424,7 +395,7 @@ body.welcome-active .input-area .input-container {
 
 .message code {
     font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Menlo', monospace;
-    font-size: 14px;
+    font-size: 12px;
     line-height: 1.6;
 }
 
@@ -808,10 +779,6 @@ body.welcome-active .input-area .input-container {
     .header {
          padding: 0 10px; /* Less padding */
     }
-    .active-prompt-container {
-         max-width: calc(100% - 200px); /* Less max-width */
-         font-size: 13px;
-    }
     .header-actions {
          gap: 5px; /* Less gap */
     }
@@ -1018,33 +985,41 @@ body.welcome-active .input-area .input-container {
     display: flex;
     gap: 10px;
 }
-.edit-buttons button {
-    /* Use existing button classes */
-}
 
 /* Character Selection */
-
 .character-select-container {
     position: relative;
 }
-.input-control-btn { /* Style for the button that triggers the character popup */
+
+/* Style for the button that triggers the character popup & displays name */
+.input-control-btn {
     background-color: var(--bg-secondary);
-    border: 1px solid #00000000;
+    border: 1px solid transparent; /* Use transparent for consistent layout */
     color: var(--text-secondary);
-    width: 32px;
     height: 32px;
     border-radius: var(--border-radius-md);
-    display: flex;
+    display: inline-flex; /* Use inline-flex for content alignment */
     align-items: center;
     justify-content: center;
+    gap: 8px; /* Space between icon and text */
     cursor: pointer;
     transition: all 0.2s ease;
-    font-size: 16px;
-    padding: 0;
+    font-size: 14px; /* Slightly smaller font */
+    padding: 0 10px; /* Horizontal padding */
+    white-space: nowrap; /* Prevent wrapping */
+    max-width: 180px; /* Prevent it from getting too long */
+    overflow: hidden;
 }
+
+.input-control-btn .character-display-name {
+    overflow: hidden;
+    text-overflow: ellipsis; /* Add ellipsis if name is too long */
+}
+
 .input-control-btn:hover {
     background-color: var(--bg-tertiary);
     color: var(--accent-color);
+    border-color: var(--border-color); /* Show border on hover */
 }
 
 .character-popup {
@@ -1182,8 +1157,8 @@ body.welcome-active .input-area .input-container {
 
 .think-header {
     display: flex;
-    justify-content: space-between;
     align-items: center;
+    gap: 12px;
     padding: 6px 12px;
     font-size: 12px;
     font-weight: 500;
@@ -1203,7 +1178,15 @@ body.welcome-active .input-area .input-container {
     font-size: 14px; /* Icon size */
 }
 
+.think-timer {
+    font-family: 'JetBrains Mono', monospace;
+    color: var(--text-secondary);
+    min-width: 35px; /* Prevents layout shift as timer updates */
+    text-align: left;
+}
+
 .think-header-actions {
+    margin-left: auto;
     display: flex;
     align-items: center;
 }
@@ -1801,12 +1784,6 @@ body.welcome-active .input-area .input-container {
         height: 50px; /* Slightly smaller header */
     }
 
-    .active-prompt-container {
-        max-width: calc(100% - 150px); /* Further reduce max-width */
-        font-size: 13px; /* Smaller font */
-        padding: 2px 6px;
-    }
-
     .header-actions {
         gap: 5px; /* Less gap */
     }
@@ -1859,6 +1836,11 @@ body.welcome-active .input-area .input-container {
         width: 30px;
         height: 30px;
         font-size: 15px;
+    }
+    
+    .input-control-btn {
+        width: auto; /* Allow character button to expand */
+        max-width: 120px;
     }
 
     .model-select {

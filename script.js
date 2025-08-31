@@ -46,6 +46,10 @@ const state = {
     streamController: null, // AbortController for fetch
     currentAssistantMessageDiv: null, // The div being actively streamed into
     currentCharacterId: null,
+
+    // Timer for streaming <think> blocks
+    streamingThinkTimer: { intervalId: null, startTime: null },
+
     activeSystemPrompt: null, // Store the actual character prompt text
     effectiveSystemPrompt: null, // Character prompt + optional tools prompt
     activeBranchInfo: {}, // { parentMessageId: { activeIndex: number, totalBranches: number } } -> Derived from messages during render
@@ -192,76 +196,486 @@ function parseAttributes(attrsString) {
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
     let processedText = text || '';
     let html = '';
-    let thinkContent = '';
-    let remainingTextAfterThink = '';
     let isThinkBlockSegment = processedText.trim().startsWith('<think>');
 
+    // This local function performs the complete rendering pipeline for a given piece of markdown.
+    // It correctly handles code blocks and KaTeX rendering in the proper order.
+    const renderCore = (markdownText) => {
+        if (!markdownText) return '';
+
+        // 1. Parse markdown into an HTML string. marked.js handles the initial structure.
+        let htmlString = marked.parse(markdownText);
+
+        // 2. Protect code blocks by replacing them with placeholders.
+        const protectedCodeBlocks = [];
+        htmlString = htmlString.replace(/<pre>[\s\S]*?<\/pre>/g, (match) => {
+            const placeholder = `%%CODE_BLOCK_${protectedCodeBlocks.length}%%`;
+            protectedCodeBlocks.push(match);
+            return placeholder;
+        });
+
+        // 3. Now that code blocks are safe, run the KaTeX placeholder logic on the remaining HTML.
+        const katexBlocks = [];
+        const katexInlines = [];
+
+        htmlString = htmlString.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+            const placeholder = `%%LATEX_BLOCK_${katexBlocks.length}%%`;
+            katexBlocks.push(latex.trim());
+            return placeholder;
+        });
+
+        htmlString = htmlString.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
+            const placeholder = `%%LATEX_INLINE_${katexInlines.length}%%`;
+            katexInlines.push(latex.trim());
+            return placeholder;
+        });
+        
+        // 4. Render the KaTeX placeholders into final HTML.
+        htmlString = htmlString.replace(/%%LATEX_BLOCK_(\d+)%%/g, (match, index) => {
+            const latex = katexBlocks[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX block rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Block LaTeX Error]</span>`;
+            }
+        });
+
+        htmlString = htmlString.replace(/%%LATEX_INLINE_(\d+)%%/g, (match, index) => {
+            const latex = katexInlines[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX inline rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
+            }
+        });
+
+        // 5. Restore the original code blocks.
+        htmlString = htmlString.replace(/%%CODE_BLOCK_(\d+)%%/g, (match, index) => {
+            return protectedCodeBlocks[parseInt(index, 10)];
+        });
+
+        // 6. Finally, enhance the restored code blocks with our custom wrappers.
+        const tempContainer = document.createElement('div');
+        tempContainer.innerHTML = htmlString;
+        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
+
+        return tempContainer.innerHTML;
+    };
+
     if (isThinkBlockSegment) {
-        const parseResult = parseThinkContent(processedText);
-        thinkContent = parseResult.thinkContent;
-        remainingTextAfterThink = parseResult.remainingText;
+        const { thinkContent, remainingText } = parseThinkContent(processedText);
 
         const thinkBlockWrapper = document.createElement('div');
         thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
-        if (temporaryId) {
-            thinkBlockWrapper.dataset.tempId = temporaryId;
-        }
+        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
 
         const header = document.createElement('div');
         header.className = 'think-header';
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'think-header-title';
-        titleSpan.innerHTML = '<i class="bi bi-lightbulb"></i> Thought Process';
-        header.appendChild(titleSpan);
-        const actionsDiv = document.createElement('div');
-        actionsDiv.className = 'think-header-actions';
-        const collapseBtn = document.createElement('button');
-        collapseBtn.className = 'think-block-toggle';
-        collapseBtn.innerHTML = `<i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>`;
-        collapseBtn.title = `${initialCollapsedState ? 'Expand' : 'Collapse'} thought process`;
-        actionsDiv.appendChild(collapseBtn);
-        header.appendChild(actionsDiv);
+        header.innerHTML = `
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <span class="think-timer"></span>
+            <div class="think-header-actions">
+                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
+                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
+                </button>
+            </div>`;
         thinkBlockWrapper.appendChild(header);
 
         const thinkContentDiv = document.createElement('div');
         thinkContentDiv.className = 'think-content';
-        thinkContentDiv.innerHTML = marked.parse(thinkContent || '');
-        thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
+        // Use the unified core renderer for the think block's content.
+        thinkContentDiv.innerHTML = renderCore(thinkContent);
         thinkBlockWrapper.appendChild(thinkContentDiv);
 
         html += thinkBlockWrapper.outerHTML;
-        processedText = remainingTextAfterThink;
+        processedText = remainingText; // Set the rest of the text to be processed.
     }
 
     if (processedText) {
-        let remainingHtml = marked.parse(processedText);
-        const tempContainer = document.createElement('div');
-        tempContainer.innerHTML = remainingHtml;
-        tempContainer.querySelectorAll('pre').forEach(preElement => {
-            enhanceCodeBlock(preElement);
-        });
-
-        let finalHtml = tempContainer.innerHTML;
-        finalHtml = finalHtml.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
-            try {
-                const decodedLatex = latex.replace(/</g, '<').replace(/>/g, '>').replace(/&/g, '&');
-                return katex.renderToString(decodedLatex.trim(), { displayMode: true, throwOnError: false });
-            } catch (e) { console.error('KaTeX block rendering error:', e, "Input:", latex); return `<span class="katex-error">[Block LaTeX Error]</span>`; }
-        });
-        finalHtml = finalHtml.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
-            try {
-                const decodedLatex = latex.replace(/</g, '<').replace(/>/g, '>').replace(/&/g, '&');
-                return katex.renderToString(decodedLatex.trim(), { displayMode: false, throwOnError: false });
-            } catch (e) { console.error('KaTeX inline rendering error:', e, "Input:", latex); return `<span class="katex-error">[Inline LaTeX Error]</span>`; }
-        });
-
+        // Use the unified core renderer for the main/remaining content.
+        const renderedMainContent = renderCore(processedText);
+        
         if (isThinkBlockSegment && temporaryId) {
-            const remainingContentTempId = 'streaming-remaining-content';
-            html += `<div data-temp-id="${remainingContentTempId}">${finalHtml}</div>`;
+            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
         } else {
-            html += finalHtml;
+            html += renderedMainContent;
         }
     }
+
+    return html;
+}/**
+ * Renders markdown text, handling think blocks, code blocks, and LaTeX.
+ * It does NOT handle the special <tool> or <tool_result> tags itself.
+ * Code block enhancement respects the global state.codeBlocksDefaultCollapsed.
+ *
+ * @param {string} text The raw text segment to render (can include <think> block).
+ * @param {boolean} [initialCollapsedState=true] Initial collapsed state for think blocks (if any).
+ * @param {string|null} [temporaryId=null] Optional temporary ID for the think block wrapper (used during streaming).
+ * @returns {string} The rendered HTML string.
+ */
+function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
+    let processedText = text || '';
+    let html = '';
+    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+
+    // This local function performs the complete rendering pipeline for a given piece of markdown.
+    // It correctly handles code blocks and KaTeX rendering in the proper order.
+    const renderCore = (markdownText) => {
+        if (!markdownText) return '';
+
+        // 1. Parse markdown into an HTML string. marked.js handles the initial structure.
+        let htmlString = marked.parse(markdownText);
+
+        // 2. Protect code blocks by replacing them with placeholders.
+        const protectedCodeBlocks = [];
+        htmlString = htmlString.replace(/<pre>[\s\S]*?<\/pre>/g, (match) => {
+            const placeholder = `%%CODE_BLOCK_${protectedCodeBlocks.length}%%`;
+            protectedCodeBlocks.push(match);
+            return placeholder;
+        });
+
+        // 3. Now that code blocks are safe, run the KaTeX placeholder logic on the remaining HTML.
+        const katexBlocks = [];
+        const katexInlines = [];
+
+        // For Block-level KaTeX ($$ ... $$)
+        htmlString = htmlString.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+            const placeholder = `%%LATEX_BLOCK_${katexBlocks.length}%%`;
+            // **THE FIX:** Clean up <br> tags inserted by marked.js due to the `breaks: true` option.
+            const cleanedLatex = latex.replace(/<br\s*\/?>/gi, '\n');
+            katexBlocks.push(cleanedLatex.trim());
+            return placeholder;
+        });
+
+        // For Inline KaTeX ($ ... $)
+        htmlString = htmlString.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
+            const placeholder = `%%LATEX_INLINE_${katexInlines.length}%%`;
+            katexInlines.push(latex.trim());
+            return placeholder;
+        });
+
+        // 4. Render the KaTeX placeholders into final HTML.
+        htmlString = htmlString.replace(/%%LATEX_BLOCK_(\d+)%%/g, (match, index) => {
+            const latex = katexBlocks[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX block rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Block LaTeX Error]</span>`;
+            }
+        });
+
+        htmlString = htmlString.replace(/%%LATEX_INLINE_(\d+)%%/g, (match, index) => {
+            const latex = katexInlines[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX inline rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
+            }
+        });
+
+        // 5. Restore the original code blocks.
+        htmlString = htmlString.replace(/%%CODE_BLOCK_(\d+)%%/g, (match, index) => {
+            return protectedCodeBlocks[parseInt(index, 10)];
+        });
+
+        // 6. Finally, enhance the restored code blocks with our custom wrappers.
+        const tempContainer = document.createElement('div');
+        tempContainer.innerHTML = htmlString;
+        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
+
+        return tempContainer.innerHTML;
+    };
+
+    if (isThinkBlockSegment) {
+        const { thinkContent, remainingText } = parseThinkContent(processedText);
+
+        const thinkBlockWrapper = document.createElement('div');
+        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
+        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
+
+        const header = document.createElement('div');
+        header.className = 'think-header';
+        header.innerHTML = `
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <span class="think-timer"></span>
+            <div class="think-header-actions">
+                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
+                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
+                </button>
+            </div>`;
+        thinkBlockWrapper.appendChild(header);
+
+        const thinkContentDiv = document.createElement('div');
+        thinkContentDiv.className = 'think-content';
+        // Use the unified core renderer for the think block's content.
+        thinkContentDiv.innerHTML = renderCore(thinkContent);
+        thinkBlockWrapper.appendChild(thinkContentDiv);
+
+        html += thinkBlockWrapper.outerHTML;
+        processedText = remainingText; // Set the rest of the text to be processed.
+    }
+
+    if (processedText) {
+        // Use the unified core renderer for the main/remaining content.
+        const renderedMainContent = renderCore(processedText);
+        
+        if (isThinkBlockSegment && temporaryId) {
+            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
+        } else {
+            html += renderedMainContent;
+        }
+    }
+
+    return html;
+}/**
+ * Renders markdown text, handling think blocks, code blocks, and LaTeX.
+ * It does NOT handle the special <tool> or <tool_result> tags itself.
+ * Code block enhancement respects the global state.codeBlocksDefaultCollapsed.
+ *
+ * @param {string} text The raw text segment to render (can include <think> block).
+ * @param {boolean} [initialCollapsedState=true] Initial collapsed state for think blocks (if any).
+ * @param {string|null} [temporaryId=null] Optional temporary ID for the think block wrapper (used during streaming).
+ * @returns {string} The rendered HTML string.
+ */
+function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
+    let processedText = text || '';
+    let html = '';
+    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+
+    // This local function performs the complete rendering pipeline for a given piece of markdown.
+    // It correctly handles code blocks and KaTeX rendering in the proper order.
+    const renderCore = (markdownText) => {
+        if (!markdownText) return '';
+
+        // 1. Parse markdown into an HTML string.
+        let htmlString = marked.parse(markdownText);
+
+        // 2. Protect code blocks by replacing them with a markdown-safe placeholder.
+        const protectedCodeBlocks = [];
+        // Using @@...@@ as a placeholder to avoid markdown parsers interpreting _ or *
+        htmlString = htmlString.replace(/<pre>[\s\S]*?<\/pre>/g, (match) => {
+            const placeholder = `@@CODE_BLOCK_${protectedCodeBlocks.length}@@`;
+            protectedCodeBlocks.push(match);
+            return placeholder;
+        });
+
+        // 3. Now that code blocks are safe, run the KaTeX placeholder logic on the remaining HTML.
+        const katexBlocks = [];
+        const katexInlines = [];
+
+        htmlString = htmlString.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+            // Using @@...@@ as a placeholder to avoid markdown parsers.
+            const placeholder = `@@LATEX_BLOCK_${katexBlocks.length}@@`;
+            const cleanedLatex = latex.replace(/<br\s*\/?>/gi, '\n');
+            katexBlocks.push(cleanedLatex.trim());
+            return placeholder;
+        });
+
+        htmlString = htmlString.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
+            // Using @@...@@ as a placeholder to avoid markdown parsers.
+            const placeholder = `@@LATEX_INLINE_${katexInlines.length}@@`;
+            katexInlines.push(latex.trim());
+            return placeholder;
+        });
+
+        // 4. Render the KaTeX placeholders into final HTML.
+        htmlString = htmlString.replace(/@@LATEX_BLOCK_(\d+)@@/g, (match, index) => {
+            const latex = katexBlocks[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX block rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Block LaTeX Error]</span>`;
+            }
+        });
+
+        htmlString = htmlString.replace(/@@LATEX_INLINE_(\d+)@@/g, (match, index) => {
+            const latex = katexInlines[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX inline rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
+            }
+        });
+
+        // 5. Restore the original code blocks.
+        htmlString = htmlString.replace(/@@CODE_BLOCK_(\d+)@@/g, (match, index) => {
+            return protectedCodeBlocks[parseInt(index, 10)];
+        });
+
+        // 6. Finally, enhance the restored code blocks with our custom wrappers.
+        const tempContainer = document.createElement('div');
+        tempContainer.innerHTML = htmlString;
+        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
+
+        return tempContainer.innerHTML;
+    };
+
+    if (isThinkBlockSegment) {
+        const { thinkContent, remainingText } = parseThinkContent(processedText);
+
+        const thinkBlockWrapper = document.createElement('div');
+        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
+        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
+
+        const header = document.createElement('div');
+        header.className = 'think-header';
+        header.innerHTML = `
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <span class="think-timer"></span>
+            <div class="think-header-actions">
+                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
+                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
+                </button>
+            </div>`;
+        thinkBlockWrapper.appendChild(header);
+
+        const thinkContentDiv = document.createElement('div');
+        thinkContentDiv.className = 'think-content';
+        // Use the unified core renderer for the think block's content.
+        thinkContentDiv.innerHTML = renderCore(thinkContent);
+        thinkBlockWrapper.appendChild(thinkContentDiv);
+
+        html += thinkBlockWrapper.outerHTML;
+        processedText = remainingText; // Set the rest of the text to be processed.
+    }
+
+    if (processedText) {
+        // Use the unified core renderer for the main/remaining content.
+        const renderedMainContent = renderCore(processedText);
+        
+        if (isThinkBlockSegment && temporaryId) {
+            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
+        } else {
+            html += renderedMainContent;
+        }
+    }
+
+    return html;
+}/**
+ * Renders markdown text, handling think blocks, code blocks, and LaTeX.
+ * This version uses a robust multi-pass strategy to correctly handle LaTeX
+ * by isolating it before the markdown parser can interfere.
+ *
+ * @param {string} text The raw text segment to render (can include <think> block).
+ * @param {boolean} [initialCollapsedState=true] Initial collapsed state for think blocks (if any).
+ * @param {string|null} [temporaryId=null] Optional temporary ID for the think block wrapper (used during streaming).
+ * @returns {string} The rendered HTML string.
+ */
+function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
+    let processedText = text || '';
+    let html = '';
+    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+
+    // This local function performs the complete rendering pipeline.
+    const renderCore = (markdownText) => {
+        if (!markdownText) return '';
+
+        const katexBlocks = [];
+        const katexInlines = [];
+
+        // 1. ISOLATE AND PROTECT LATEX FIRST.
+        // This is the crucial step. We remove LaTeX from the string before the
+        // markdown parser can see and corrupt characters like '_' or '|'.
+        let textWithPlaceholders = markdownText.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+            const placeholder = `@@LATEX_BLOCK_${katexBlocks.length}@@`;
+            katexBlocks.push(latex.trim());
+            return placeholder;
+        });
+
+        textWithPlaceholders = textWithPlaceholders.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
+            const placeholder = `@@LATEX_INLINE_${katexInlines.length}@@`;
+            katexInlines.push(latex.trim());
+            return placeholder;
+        });
+
+        // 2. PARSE THE SCRUBBED MARKDOWN.
+        // The markdown parser now operates on text that contains no LaTeX source, only placeholders.
+        let htmlString = marked.parse(textWithPlaceholders);
+
+        // 3. RENDER KATEX by replacing the placeholders with KaTeX's HTML output.
+        htmlString = htmlString.replace(/@@LATEX_BLOCK_(\d+)@@/g, (match, index) => {
+            const latex = katexBlocks[parseInt(index, 10)];
+            try {
+                // Decode entities that might have been pasted in, just in case.
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX block rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Block LaTeX Error]</span>`;
+            }
+        });
+
+        htmlString = htmlString.replace(/@@LATEX_INLINE_(\d+)@@/g, (match, index) => {
+            const latex = katexInlines[parseInt(index, 10)];
+            try {
+                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
+            } catch (e) {
+                console.error('KaTeX inline rendering error:', e, "Input:", latex);
+                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
+            }
+        });
+
+        // 4. ENHANCE CODE BLOCKS as the final step.
+        const tempContainer = document.createElement('div');
+        tempContainer.innerHTML = htmlString;
+        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
+
+        return tempContainer.innerHTML;
+    };
+
+    if (isThinkBlockSegment) {
+        const { thinkContent, remainingText } = parseThinkContent(processedText);
+
+        const thinkBlockWrapper = document.createElement('div');
+        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
+        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
+
+        const header = document.createElement('div');
+        header.className = 'think-header';
+        header.innerHTML = `
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <span class="think-timer"></span>
+            <div class="think-header-actions">
+                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
+                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
+                </button>
+            </div>`;
+        thinkBlockWrapper.appendChild(header);
+
+        const thinkContentDiv = document.createElement('div');
+        thinkContentDiv.className = 'think-content';
+        // Use the unified core renderer for the think block's content.
+        thinkContentDiv.innerHTML = renderCore(thinkContent);
+        thinkBlockWrapper.appendChild(thinkContentDiv);
+
+        html += thinkBlockWrapper.outerHTML;
+        processedText = remainingText; // Set the rest of the text to be processed.
+    }
+
+    if (processedText) {
+        // Use the unified core renderer for the main/remaining content.
+        const renderedMainContent = renderCore(processedText);
+        
+        if (isThinkBlockSegment && temporaryId) {
+            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
+        } else {
+            html += renderedMainContent;
+        }
+    }
+
     return html;
 }
 
@@ -346,13 +760,27 @@ function updateEffectiveSystemPrompt() {
         toolsPrompt = `\n\n${TOOLS_SYSTEM_PROMPT}`;
     }
     state.effectiveSystemPrompt = (basePrompt + toolsPrompt).trim() || null;
+    
+    let characterNameToDisplay = null;
+
+    const updateDisplay = (name) => {
+         displayActiveSystemPrompt(name, state.effectiveSystemPrompt);
+    };
+
     if (state.currentCharacterId) {
-        fetchCharacters().then(characters => {
-            const char = characters.find(c => c.character_id === state.currentCharacterId);
-            displayActiveSystemPrompt(char?.character_name, state.effectiveSystemPrompt);
-        });
+        // This fetch is for display purposes only, so we handle errors gracefully
+        fetchCharacters()
+            .then(characters => {
+                const char = characters.find(c => c.character_id === state.currentCharacterId);
+                characterNameToDisplay = char?.character_name || null;
+                updateDisplay(characterNameToDisplay);
+            })
+            .catch(error => {
+                console.error("Failed to fetch character name for display, proceeding without it.", error);
+                updateDisplay(null); // Update display even if fetch fails
+            });
     } else {
-        displayActiveSystemPrompt(state.toolsEnabled ? "Tools Enabled" : null, state.effectiveSystemPrompt);
+        updateDisplay(null);
     }
     console.log("Effective system prompt updated:", state.effectiveSystemPrompt ? state.effectiveSystemPrompt.substring(0, 100) + "..." : "None");
 }
@@ -398,8 +826,9 @@ async function init() {
     await fetchProviderConfig();
     await fetchToolsSystemPrompt();
     await loadGenArgs();
-    await fetchChats();
+    await fetchChats(); // Fetches the list of available chats
 
+    // Setup all UI events and components
     await populateCharacterSelect();
     setupCharacterEvents();
     setupEventListeners();
@@ -411,7 +840,16 @@ async function init() {
     setupGenerationSettings();
     setupToolToggle();
     setupCodeblockToggle();
-    startNewChat();
+    
+    // **FIXED LOGIC**: Load the last chat OR start a new one
+    const lastChatId = localStorage.getItem('lastChatId');
+    if (lastChatId) {
+        console.log(`Found lastChatId: ${lastChatId}. Attempting to load.`);
+        await loadChat(lastChatId);
+    } else {
+        console.log("No lastChatId found. Starting a new chat.");
+        startNewChat();
+    }
 }
 
 async function fetchProviderConfig() {
@@ -677,9 +1115,6 @@ function renderActiveMessages() {
 
     if (!state.messages || state.messages.length === 0) {
         console.log("No messages to render.");
-        messagesWrapper.querySelectorAll('.assistant-row .message').forEach(messageDiv => {
-            messageDiv.style.minHeight = ''; // Target .message
-        });
         return;
     }
 
@@ -696,6 +1131,7 @@ function renderActiveMessages() {
             rootMessages.push(msgNode);
         }
     });
+
     messageMap.forEach(node => {
         if (node.children && node.children.length > 0) {
             node.children.sort((a, b) => a.timestamp - b.timestamp);
@@ -709,65 +1145,30 @@ function renderActiveMessages() {
     });
     rootMessages.sort((a, b) => a.timestamp - b.timestamp);
 
+    // This function recursively calls addMessage for the active branch
     function renderBranch(messageNode) {
         if (!messageNode || messageNode.role === 'system') return;
+        
+        // Directly add the message. No complex merging.
         addMessage(messageNode);
+        
         const children = messageNode.children;
         if (children && children.length > 0) {
             const activeIndex = messageNode.active_child_index ?? 0;
             const safeActiveIndex = Math.min(Math.max(0, activeIndex), children.length - 1);
             const activeChildNode = children[safeActiveIndex];
-            if (activeChildNode) { renderBranch(activeChildNode); }
-            else { console.warn(`Could not find active child at index ${safeActiveIndex}.`); }
+            if (activeChildNode) {
+                renderBranch(activeChildNode);
+            } else {
+                console.warn(`Could not find active child at index ${safeActiveIndex}.`);
+            }
         }
     }
+
+    // Render the tree starting from the roots
     rootMessages.forEach(rootNode => renderBranch(rootNode));
 
-    const allRows = Array.from(messagesWrapper.querySelectorAll('.message-row'));
-    const rowsToRemove = new Set();
-    let currentMergeTargetRow = null;
-    let accumulatedContentHTML = '';
-
-    for (let i = 0; i < allRows.length; i++) {
-        const currentRow = allRows[i];
-        const isAssistant = currentRow.classList.contains('assistant-row');
-        const isTool = currentRow.classList.contains('tool-row');
-        const isUser = currentRow.classList.contains('user-row');
-
-        if (isAssistant || isTool) {
-            if (!currentMergeTargetRow) {
-                if (isAssistant) {
-                   currentMergeTargetRow = currentRow;
-                   accumulatedContentHTML = '';
-                }
-            } else {
-                const contentDiv = currentRow.querySelector('.message-content');
-                if (contentDiv) {
-                     accumulatedContentHTML += contentDiv.innerHTML;
-                }
-                rowsToRemove.add(currentRow);
-            }
-        }
-
-        if ((isUser || i === allRows.length - 1) && currentMergeTargetRow) {
-            if (accumulatedContentHTML) {
-                const targetContentDiv = currentMergeTargetRow.querySelector('.message-content');
-                if (targetContentDiv) {
-                    targetContentDiv.insertAdjacentHTML('beforeend', accumulatedContentHTML);
-                }
-            }
-            currentMergeTargetRow = null;
-            accumulatedContentHTML = '';
-        }
-
-        if (isUser) {
-            currentMergeTargetRow = null;
-            accumulatedContentHTML = '';
-        }
-    }
-
-    rowsToRemove.forEach(row => row.remove());
-
+    // Post-rendering tasks
     requestAnimationFrame(() => {
          messagesWrapper.querySelectorAll('.message-content pre code').forEach(block => {
             highlightRenderedCode(block.closest('pre'));
@@ -775,18 +1176,14 @@ function renderActiveMessages() {
     });
 
     messagesWrapper.querySelectorAll('.assistant-row .message').forEach(messageDiv => {
-        messageDiv.style.minHeight = ''; // Target .message and reset
+        messageDiv.style.minHeight = '';
     });
 
     const lastMessageRow = messagesWrapper.lastElementChild;
     if (lastMessageRow && lastMessageRow.classList.contains('assistant-row') && !lastMessageRow.classList.contains('placeholder')) {
-        const lastAssistantMessageDiv = lastMessageRow.querySelector('.message'); // Target .message
-        if (lastAssistantMessageDiv) {
-            // The pulsing cursor is inside .message-content, which is a child of .message.
-            // So checking for it in lastMessageRow (which contains .message) is still valid.
-            if (!lastMessageRow.querySelector('.pulsing-cursor')) {
-                 lastAssistantMessageDiv.style.minHeight = 'calc(-384px + 100dvh)';
-            }
+        const lastAssistantMessageDiv = lastMessageRow.querySelector('.message');
+        if (lastAssistantMessageDiv && !lastMessageRow.querySelector('.pulsing-cursor')) {
+            lastAssistantMessageDiv.style.minHeight = 'calc(-384px + 100dvh)';
         }
     }
 }
@@ -1262,18 +1659,19 @@ function addMessage(message) {
 
     orderedButtons.forEach(btn => actionsDiv.appendChild(btn));
 
-    if (role === 'user') {
-        contentDiv.innerHTML = renderMarkdown(message.message || '');
-    } else if (role === 'assistant') {
-        buildContentHtml(contentDiv, message.message);
-    } else if (role === 'tool') {
+    // --- START OF FIX ---
+    // Unified and simplified rendering logic for all message types.
+    // renderMarkdown handles all necessary conversions, including code block enhancement.
+    if (role === 'tool') {
+        // Tool results are special and don't use markdown.
         renderToolResult(contentDiv, message.message || '[Empty Tool Result]');
+    } else {
+        // For both 'user' and 'assistant', the process is the same.
+        contentDiv.innerHTML = renderMarkdown(message.message || '');
     }
+    // --- END OF FIX ---
 
     messageDiv.appendChild(contentDiv);
-    contentDiv.querySelectorAll('pre code').forEach(block => {
-       highlightRenderedCode(block.closest('pre'));
-    });
 
     if (role !== 'tool' && message.attachments && message.attachments.length > 0) {
         const attachmentsContainer = document.createElement('div');
@@ -1474,55 +1872,38 @@ async function saveEdit(messageId, newText, role, reloadChat = true) {
 }
 
 function copyMessageContent(contentDiv, buttonElement) {
-    let textToCopy = '';
-    let accumulatedText = '';
+    // Get the full raw message content from the data attribute.
+    const rawText = contentDiv.dataset.raw || '';
 
-    contentDiv.childNodes.forEach(node => {
-        if (node.nodeType === Node.TEXT_NODE) {
-            accumulatedText += node.textContent;
-        } else if (node.nodeType === Node.ELEMENT_NODE) {
-            if (accumulatedText.trim()) {
-                textToCopy += accumulatedText + '\n';
-                accumulatedText = '';
-            }
-            if (node.classList.contains('tool-call-block')) {
-                const toolName = node.dataset.toolName || 'unknown_tool';
-                const argsElement = node.querySelector('.tool-arguments');
-                const argsText = argsElement ? argsElement.textContent.trim() : '{}';
-                textToCopy += `\n[Tool Call: ${toolName}]\nArguments:\n${argsText}\n\n`;
-            } else if (node.classList.contains('tool-result-block')) {
-                const resultElement = node.querySelector('.tool-result-content');
-                const resultText = resultElement ? resultElement.innerText.trim() : '[No Result Content]';
-                 textToCopy += `[Tool Result]\n${resultText}\n\n`;
-            } else if (!node.classList.contains('attachments-container') && !node.classList.contains('message-avatar-actions') && !node.closest('.tool-header')) {
-                accumulatedText += node.innerText || node.textContent;
-            }
-        }
-    });
-
-    if (accumulatedText.trim()) {
-        textToCopy += accumulatedText;
-    }
-    textToCopy = textToCopy.trim().replace(/\n{3,}/g, '\n\n');
-
-    if (!textToCopy) {
-        console.warn("Structured copy resulted in empty string, falling back to dataset.raw or textContent");
-        textToCopy = contentDiv.dataset.raw || contentDiv.textContent || '';
-        textToCopy = textToCopy.trim();
-    }
-
-    if (!textToCopy) {
+    // If there's no raw text, there's nothing to process or copy.
+    if (!rawText.trim()) {
         addSystemMessage("Nothing to copy.", "info");
         return;
     }
 
+    // Use a regular expression to find and remove the <think>...</think> block.
+    // The [\s\S]*? part matches any character (including newlines) in a non-greedy way.
+    const thinkBlockRegex = /<think>[\s\S]*?<\/think>/g;
+    const textWithoutThink = rawText.replace(thinkBlockRegex, '');
+
+    // Trim the result to remove any leading/trailing whitespace that might result
+    // from removing the think block (e.g., if there was a newline after </think>).
+    const textToCopy = textWithoutThink.trim();
+
+    // If after removing the think block, the message is empty, inform the user.
+    if (!textToCopy) {
+        addSystemMessage("Nothing to copy (content was only in thought block).", "info");
+        return;
+    }
+
+    // Proceed with the clipboard operation.
     navigator.clipboard.writeText(textToCopy).then(() => {
-         const originalHTML = buttonElement.innerHTML;
-         buttonElement.innerHTML = '<i class="bi bi-check-lg"></i>';
-         buttonElement.disabled = true;
+        const originalHTML = buttonElement.innerHTML;
+        buttonElement.innerHTML = '<i class="bi bi-check-lg"></i>';
+        buttonElement.disabled = true;
         setTimeout(() => {
-             buttonElement.innerHTML = originalHTML;
-             buttonElement.disabled = false;
+            buttonElement.innerHTML = originalHTML;
+            buttonElement.disabled = false;
         }, 1500);
     }).catch(err => {
         console.error('Failed to copy processed message content:', err);
@@ -2066,6 +2447,13 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
          return;
     }
 
+    // Reset timer state at the beginning of a new generation
+    if (state.streamingThinkTimer.intervalId) {
+        clearInterval(state.streamingThinkTimer.intervalId);
+    }
+    state.streamingThinkTimer = { intervalId: null, startTime: null };
+
+
     setGenerationInProgressUI(true);
     state.currentAssistantMessageDiv = targetContentDiv; // Keep track of the div we are streaming into
     targetContentDiv.classList.add('streaming');
@@ -2111,7 +2499,40 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             (textChunk) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
                 fullRenderedContent += textChunk;
-                // ... (rest of onChunk rendering logic as before, it updates targetContentDiv live)
+                
+                // --- Timer Logic ---
+                const hasThinkStart = fullRenderedContent.trim().startsWith('<think>');
+                const hasThinkEnd = fullRenderedContent.includes('</think>');
+
+                // Case 1: Start the timer
+                if (hasThinkStart && !hasThinkEnd && state.streamingThinkTimer.intervalId === null) {
+                    state.streamingThinkTimer.startTime = Date.now();
+                    state.streamingThinkTimer.intervalId = setInterval(() => {
+                        if (state.streamingThinkTimer.intervalId && state.currentAssistantMessageDiv) {
+                            const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
+                            if (timerEl) {
+                                const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
+                                timerEl.textContent = `${elapsed}s`;
+                            }
+                        } else if (state.streamingThinkTimer.intervalId) {
+                            clearInterval(state.streamingThinkTimer.intervalId);
+                        }
+                    }, 100);
+                } 
+                // Case 2: Stop the timer because </think> appeared
+                else if (hasThinkStart && hasThinkEnd && state.streamingThinkTimer.intervalId !== null) {
+                    clearInterval(state.streamingThinkTimer.intervalId);
+                    if (state.currentAssistantMessageDiv) {
+                        const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
+                        if (timerEl && state.streamingThinkTimer.startTime) {
+                            const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
+                            timerEl.textContent = `${elapsed}s`;
+                        }
+                    }
+                    state.streamingThinkTimer = { intervalId: null, startTime: null };
+                }
+                // --- End Timer Logic ---
+
                 const thinkBlockTempId = 'streaming-think-block';
                 const remainingContentTempId = 'streaming-remaining-content';
                 let existingThinkBlockInTarget = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
@@ -2354,6 +2775,21 @@ function setGenerationInProgressUI(inProgress) {
         sendButton.disabled = true;
         sendButton.innerHTML = '<div class="spinner"></div>';
     } else {
+        // Stop and clear any active think timer as a failsafe
+        if (state.streamingThinkTimer.intervalId) {
+            clearInterval(state.streamingThinkTimer.intervalId);
+            // Perform one final update to show the total duration
+            if (state.currentAssistantMessageDiv) {
+                const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
+                if (timerEl && state.streamingThinkTimer.startTime) {
+                    const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
+                    timerEl.textContent = `${elapsed}s`;
+                }
+            }
+            state.streamingThinkTimer = { intervalId: null, startTime: null };
+            console.log(">>> Cleared think timer in setGenerationInProgressUI");
+        }
+
         stopButton.style.display = 'none';
         sendButton.disabled = false;
         sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';
@@ -3034,34 +3470,33 @@ async function populateCharacterSelect() {
 }
 
 function displayActiveSystemPrompt(characterName, promptText) {
-    const promptContainer = document.getElementById('active-prompt-container');
-    if (!promptContainer) return;
+    const displayBtn = document.getElementById('character-btn');
+    if (!displayBtn) return;
 
-    const nameToDisplay = characterName || (state.toolsEnabled ? 'Tools Enabled' : '');
-    if (!nameToDisplay && !promptText) {
-        promptContainer.innerHTML = '';
-        promptContainer.onclick = null;
-        promptContainer.style.cursor = 'default';
-        promptContainer.style.visibility = 'hidden';
-        return;
-    }
+    const nameToDisplay = characterName || "No Character";
+    const iconClass = characterName ? 'bi-person-check-fill' : 'bi-person';
 
-    promptContainer.style.visibility = 'visible';
-    promptContainer.innerHTML = `
-        <i class="bi ${characterName ? 'bi-person-check-fill' : (state.toolsEnabled ? 'bi-tools' : '')}"></i>
-        ${nameToDisplay ? `<span class="active-prompt-name">${nameToDisplay}</span>` : ''}
+    // Update the button's content
+    displayBtn.innerHTML = `
+        <i class="bi ${iconClass}"></i>
+        <span class="character-display-name">${nameToDisplay}</span>
     `;
 
+    // Remove any existing contextmenu listener to avoid duplicates
+    displayBtn.oncontextmenu = null;
+
     if (promptText) {
-        promptContainer.onclick = () => viewSystemPromptPopup(promptText, characterName || "Effective System Prompt");
-        promptContainer.style.cursor = 'pointer';
-        promptContainer.title = 'View effective system prompt';
+        displayBtn.title = 'Left-click to change character.\nRight-click to view system prompt.';
+        // Add right-click listener to view prompt
+        displayBtn.oncontextmenu = (e) => {
+            e.preventDefault();
+            viewSystemPromptPopup(promptText, characterName || "Effective System Prompt");
+        };
     } else {
-        promptContainer.onclick = null;
-        promptContainer.style.cursor = 'default';
-        promptContainer.title = '';
+        displayBtn.title = 'Select Character';
     }
 }
+
 
 function viewSystemPromptPopup(promptText, characterName = "System Prompt") {
     const popup = document.createElement('div');

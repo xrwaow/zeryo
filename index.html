@@ -122,8 +122,6 @@
                 <button class="header-btn mobile-menu-btn" id="mobile-menu-btn" title="Toggle Menu">
                     <i class="bi bi-list"></i>
                 </button>
-                 <div id="active-prompt-container" class="active-prompt-container">
-                 </div>
                 <div class="header-actions">
                     <button class="header-btn" id="delete-chat-btn" title="Delete chat">
                         <i class="bi bi-trash"></i>
@@ -157,7 +155,9 @@
                         </button>
                         <div class="character-select-container">
                              <button class="input-control-btn" id="character-btn" title="Select Character">
-                                 <i class="bi bi-person-lines-fill"></i>
+                                 <!-- Content is dynamically set by JS -->
+                                 <i class="bi bi-person"></i>
+                                 <span class="character-display-name">No Character</span>
                              </button>
                             <div class="character-popup" id="character-popup" style="display: none;">
                                 <select class="character-select" id="character-select">
