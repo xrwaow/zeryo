@@ -1,3 +1,4 @@
+// (Removed duplicate block from earlier patch)
 // API Configuration (Backend Data API)
 const API_BASE = 'http://localhost:8000';
 
@@ -15,7 +16,7 @@ const messagesWrapper = document.getElementById('messages-wrapper');
 const welcomeContainer = document.getElementById('welcome-container');
 const messageInput = document.getElementById('message-input');
 const sendButton = document.getElementById('send-button');
-const modelSelect = document.getElementById('model-select');
+// (modelSelect removed)
 const imageButton = document.getElementById('image-button');
 const fileButton = document.getElementById('file-button');
 const stopButton = document.getElementById('stop-button');
@@ -29,18 +30,280 @@ const toggleToolsBtn = document.getElementById('toggle-tools-btn');
 const toggleAutoscrollBtn = document.getElementById('toggle-autoscroll-btn');
 
 const settingsBtn = document.getElementById('settings-btn'); // Main gear icon
+// Legacy popup elements may be removed; keep refs optional
 const mainSettingsPopup = document.getElementById('main-settings-popup');
 const closeSettingsPopupBtn = document.getElementById('close-settings-popup-btn');
-const appearanceSettingsBtn = document.getElementById('appearance-settings-btn'); // Button in new popup
-const themeModal = document.getElementById('theme-modal');
-const closeThemeModalBtn = document.getElementById('close-theme-modal-btn');
+// New centered modal (expected id)
+const settingsModal = document.getElementById('settings-modal');
+const settingsModalClose = document.getElementById('settings-modal-close');
+
+// Settings modal dynamic elements NOTE:
+// The HTML uses:
+//  - Tab buttons: .settings-tab-btn  with data-tab="<name>"
+//  - Panels: .settings-tab-panel with data-panel="<name>"
+//  - Main checkboxes: #main-toggle-tools, #main-toggle-autoscroll, #main-toggle-codeblocks
+//  - CoT tag inputs: #cot-start-tag, #cot-end-tag and save button #cot-save-btn
+// We'll resolve/query these lazily each time the modal opens to avoid stale NodeLists.
+function querySettingsModalElements() {
+    if (!settingsModal) return {};
+    return {
+        tabButtons: Array.from(settingsModal.querySelectorAll('.settings-tab-btn')), // buttons
+        tabPanels: Array.from(settingsModal.querySelectorAll('.settings-tab-panel')), // panels
+        cbTools: document.getElementById('main-toggle-tools'),
+        cbAutoscroll: document.getElementById('main-toggle-autoscroll'),
+        cbCodeblocks: document.getElementById('main-toggle-codeblocks'),
+        cotStartInput: document.getElementById('cot-start-tag'),
+        cotEndInput: document.getElementById('cot-end-tag'),
+        cotSaveBtn: document.getElementById('cot-save-btn'),
+        toolsPromptPreview: document.getElementById('tools-prompt-preview')
+    };
+}
+
+// Models Management UI (deprecated - model data now embedded per character)
+function setupModelsTab() {
+    const listEl = document.getElementById('models-list');
+    if (listEl) {
+        listEl.classList.add('empty-state');
+        listEl.textContent = 'Models tab deprecated: edit model fields directly on each character.';
+    }
+    const createBtn = document.getElementById('models-create-btn'); if (createBtn) createBtn.style.display='none';
+    const refreshBtn = document.getElementById('models-refresh-btn'); if (refreshBtn) refreshBtn.style.display='none';
+}
+
+// --- Characters Tab Implementation ---
+async function fetchCharacters(force=false) {
+    if (!force && state.charactersCache.length) return state.charactersCache;
+    try {
+        const resp = await fetch(`${API_BASE}/characters`);
+        if (!resp.ok) throw new Error(await resp.text());
+        const chars = await resp.json();
+        state.charactersCache = chars;
+        return chars;
+    } catch (e) {
+        console.error('Fetch characters failed:', e);
+        return [];
+    }
+}
+
+function setupCharactersTab() {
+    const listEl = document.getElementById('characters-list');
+    const createBtn = document.getElementById('characters-create-btn');
+    const refreshBtn = document.getElementById('characters-refresh-btn');
+    if (!listEl || !createBtn || !refreshBtn) {
+        console.warn('Characters tab elements not found');
+        return;
+    }
+    createBtn.addEventListener('click', () => openCharacterEditor());
+    refreshBtn.addEventListener('click', () => refreshCharactersUI());
+    refreshCharactersUI();
+}
+
+function refreshCharactersUI(preserveScroll=true) {
+    const listEl = document.getElementById('characters-list');
+    if (!listEl) return;
+    const prevScroll = listEl.scrollTop;
+    listEl.classList.remove('empty-state');
+    listEl.textContent = 'Loading...';
+    fetchCharacters(true).then(chars => {
+        if (!chars.length) {
+            listEl.classList.add('empty-state');
+            listEl.textContent = 'No characters yet.';
+            return;
+        }
+        listEl.innerHTML = '';
+        chars.forEach(char => {
+            const row = document.createElement('div');
+            row.className = 'character-row';
+            row.dataset.characterId = char.character_id;
+            const active = (state.currentCharacterId === char.character_id);
+            row.innerHTML = `
+                <div class="character-main">
+                    <div class="character-name ${active ? 'active' : ''}">${escapeHtml(char.character_name)}</div>
+                    <div class="character-model" title="Preferred Model">${escapeHtml(char.preferred_model || '—')}</div>
+                    <div class="character-cot" title="CoT Tags">${char.cot_start_tag || ''}${char.cot_end_tag ? '…' : ''}</div>
+                </div>
+                <div class="character-actions">
+                    <button class="character-activate-btn" title="Activate">${active ? '<i class="bi bi-check2-circle"></i>' : '<i class="bi bi-play-circle"></i>'}</button>
+                    <button class="character-edit-btn" title="Edit"><i class="bi bi-pencil"></i></button>
+                    <button class="character-delete-btn" title="Delete"><i class="bi bi-trash"></i></button>
+                </div>`;
+            row.querySelector('.character-activate-btn').addEventListener('click', () => activateCharacter(char.character_id));
+            row.querySelector('.character-edit-btn').addEventListener('click', () => openCharacterEditor(char));
+            row.querySelector('.character-delete-btn').addEventListener('click', () => deleteCharacter(char.character_id));
+            listEl.appendChild(row);
+        });
+        if (preserveScroll) listEl.scrollTop = prevScroll;
+    });
+}
+
+async function activateCharacter(characterId) {
+    if (!state.currentChatId) {
+        // If no chat yet, just set locally and start new chat bound to that character
+        state.currentCharacterId = characterId;
+        const cachedChar = state.charactersCache.find(c => c.character_id === characterId);
+        if (cachedChar) state.lastActivatedCharacterPreferredModel = cachedChar.preferred_model || null;
+        updateActiveCharacterUI();
+        return;
+    }
+    try {
+        const resp = await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
+            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({character_id: characterId})
+        });
+        if (!resp.ok) throw new Error(await resp.text());
+        state.currentCharacterId = characterId;
+        const cachedChar2 = state.charactersCache.find(c => c.character_id === characterId);
+        if (cachedChar2) state.lastActivatedCharacterPreferredModel = cachedChar2.preferred_model || null;
+        updateActiveCharacterUI();
+        refreshCharactersUI(false);
+        updateEffectiveSystemPrompt();
+    } catch (e) {
+        console.error('Activate character failed:', e);
+        addSystemMessage('Failed to activate character: '+ e.message, 'error');
+    }
+}
+
+function openCharacterEditor(existing=null) {
+    const overlay = document.createElement('div'); overlay.className='attachment-popup-overlay';
+    overlay.addEventListener('click', e=>{ if (e.target===overlay) overlay.remove(); });
+    const container = document.createElement('div'); container.className='attachment-popup-container character-editor';
+    const title = document.createElement('h3'); title.textContent = existing ? 'Edit Character' : 'Add Character';
+    const nameInput = document.createElement('input'); nameInput.placeholder='Character Name'; nameInput.value=existing?.character_name||''; if (existing) nameInput.disabled = true;
+    const promptArea = document.createElement('textarea'); promptArea.placeholder='System Prompt'; promptArea.value=existing?.sysprompt||'';
+    // Embedded model freeform fields
+    const modelNameInput = document.createElement('input'); modelNameInput.placeholder='Model Name (stable key)'; modelNameInput.value = existing?.model_name || existing?.preferred_model || '';
+    const modelProviderInput = document.createElement('input'); modelProviderInput.placeholder='Provider (openrouter/local/etc)'; modelProviderInput.value = existing?.model_provider || '';
+    const modelIdentifierInput = document.createElement('input'); modelIdentifierInput.placeholder='Model Identifier (API)'; modelIdentifierInput.value = existing?.model_identifier || '';
+    const supportsImagesLabel = document.createElement('label'); supportsImagesLabel.className='checkbox-inline'; supportsImagesLabel.innerHTML=`<input type="checkbox" ${ (existing?.model_supports_images || existing?.preferred_model_supports_images)?'checked':''}> Supports Images`;
+    const cotStart = document.createElement('input'); cotStart.placeholder='CoT Start Tag e.g. <think>'; cotStart.value = existing?.cot_start_tag || '';
+    const cotEnd = document.createElement('input'); cotEnd.placeholder='CoT End Tag e.g. </think>'; cotEnd.value = existing?.cot_end_tag || '';
+    const actions = document.createElement('div'); actions.className='form-actions';
+    const saveBtn = document.createElement('button'); saveBtn.className='btn-primary'; saveBtn.textContent='Save';
+    const cancelBtn = document.createElement('button'); cancelBtn.className='btn-secondary'; cancelBtn.textContent='Cancel'; cancelBtn.addEventListener('click', ()=>overlay.remove());
+    saveBtn.addEventListener('click', async () => {
+        const body = {
+            character_name: nameInput.value.trim(),
+            sysprompt: promptArea.value,
+            preferred_model: modelNameInput.value.trim() || null, // legacy field retained for compat
+            preferred_model_supports_images: supportsImagesLabel.querySelector('input').checked,
+            model_name: modelNameInput.value.trim() || null,
+            model_provider: modelProviderInput.value.trim() || null,
+            model_identifier: modelIdentifierInput.value.trim() || null,
+            model_supports_images: supportsImagesLabel.querySelector('input').checked,
+            cot_start_tag: cotStart.value.trim() || null,
+            cot_end_tag: cotEnd.value.trim() || null,
+            settings: {}
+        };
+        try {
+            let resp;
+            if (existing) {
+                resp = await fetch(`${API_BASE}/character/${existing.character_id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                if (!resp.ok) throw new Error(await resp.text());
+                // Update local cache entry immediately to avoid race where activeSystemPrompt becomes null
+                const idx = state.charactersCache.findIndex(c => c.character_id === existing.character_id);
+                if (idx !== -1) {
+                    state.charactersCache[idx] = {
+                        ...state.charactersCache[idx],
+                        character_name: body.character_name,
+                        sysprompt: body.sysprompt,
+                        preferred_model: body.preferred_model,
+                        preferred_model_supports_images: body.preferred_model_supports_images,
+                        model_name: body.model_name,
+                        model_provider: body.model_provider,
+                        model_identifier: body.model_identifier,
+                        model_supports_images: body.model_supports_images,
+                        cot_start_tag: body.cot_start_tag,
+                        cot_end_tag: body.cot_end_tag,
+                        settings: body.settings
+                    };
+                }
+                // If this character is active, refresh prompt + preferred model fallback now
+                if (state.currentCharacterId === existing.character_id) {
+                    state.lastActivatedCharacterPreferredModel = body.model_name || body.preferred_model || null;
+                    state.activeSystemPrompt = body.sysprompt || null;
+                    updateEffectiveSystemPrompt();
+                    updateAttachmentButtonsForModel();
+                }
+                refreshCharactersUI(false);
+                overlay.remove();
+            } else {
+                resp = await fetch(`${API_BASE}/character`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+                if (!resp.ok) throw new Error(await resp.text());
+                const data = await resp.json();
+                const newId = data.character_id;
+                // Construct new character object locally (mirrors /characters shape)
+                const newChar = {
+                    character_id: newId,
+                    character_name: body.character_name,
+                    sysprompt: body.sysprompt,
+                    preferred_model: body.preferred_model,
+                    preferred_model_supports_images: body.preferred_model_supports_images,
+                    model_name: body.model_name,
+                    model_provider: body.model_provider,
+                    model_identifier: body.model_identifier,
+                    model_supports_images: body.model_supports_images,
+                    cot_start_tag: body.cot_start_tag,
+                    cot_end_tag: body.cot_end_tag,
+                    settings: body.settings
+                };
+                // Insert into cache immediately to avoid needing a refetch before activation
+                state.charactersCache.push(newChar);
+                refreshCharactersUI(false);
+                overlay.remove();
+                // Activate immediately (will handle chat binding if chat exists)
+                await activateCharacter(newId);
+                // Ensure system prompt + fallback model set (activateCharacter may have raced before cache list UI re-render)
+                state.lastActivatedCharacterPreferredModel = newChar.model_name || newChar.preferred_model || null;
+                state.activeSystemPrompt = newChar.sysprompt || null;
+                updateEffectiveSystemPrompt();
+            }
+        } catch(e) {
+            console.error('Save character failed', e);
+            alert('Character save failed: '+ e.message);
+        }
+    });
+    actions.appendChild(saveBtn); actions.appendChild(cancelBtn);
+    container.appendChild(title);
+    container.appendChild(nameInput);
+    container.appendChild(promptArea);
+    container.appendChild(modelNameInput);
+    container.appendChild(modelProviderInput);
+    container.appendChild(modelIdentifierInput);
+    container.appendChild(supportsImagesLabel);
+    container.appendChild(cotStart);
+    container.appendChild(cotEnd);
+    container.appendChild(actions);
+    overlay.appendChild(container); document.body.appendChild(overlay);
+}
+
+async function deleteCharacter(characterId) {
+    if (!confirm('Delete character?')) return;
+    try {
+        const resp = await fetch(`${API_BASE}/character/${characterId}`, { method:'DELETE' });
+        if (!resp.ok) throw new Error(await resp.text());
+        if (state.currentCharacterId === characterId) {
+            state.currentCharacterId = null;
+            updateActiveCharacterUI();
+            updateEffectiveSystemPrompt();
+        }
+        state.charactersCache = []; // Force refetch
+        refreshCharactersUI(false);
+    } catch (e) {
+        console.error('Delete character failed:', e);
+        addSystemMessage('Failed to delete character: '+ e.message, 'error');
+    }
+}
+
+
+// openModelEditor & deleteModel removed (deprecated)
 
 // State Management
 const state = {
     currentChatId: null,
     chats: [], // List of {chat_id, preview, timestamp_updated}
     messages: [], // All messages for the current chat { message_id, ..., children_ids: [] }
-    models: [],
+    models: [], // deprecated after embedding model fields directly in characters
+    modelsCache: {}, // deprecated
+    charactersCache: [],
     currentImages: [], // { base64, dataUrl, type, name }
     currentTextFiles: [], // { name, content (formatted), type, rawContent }
     streamController: null, // AbortController for fetch
@@ -66,7 +329,58 @@ const state = {
     scrollDebounceTimer: null,
     codeBlocksDefaultCollapsed: false,
     autoscrollEnabled: false, // Default to false
+    lastActivatedCharacterPreferredModel: null, // Fallback if characters cache not yet loaded
 };
+
+// --- Helper: Escape HTML for safe insertion into attribute/text contexts ---
+function escapeHtml(str) {
+    if (str === null || str === undefined) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+// Display system prompt + character name (fallback if dedicated UI element not present)
+function displayActiveSystemPrompt(characterName, effectivePrompt) {
+    const el = document.getElementById('active-system-prompt');
+    if (!el) return; // Optional UI region
+    if (!effectivePrompt) {
+        el.innerHTML = '<em>No active system prompt</em>';
+        return;
+    }
+    const safeName = characterName ? `<strong>${escapeHtml(characterName)}</strong>` : '<strong>Default</strong>';
+    el.innerHTML = `${safeName}: <pre class="sys-prompt">${escapeHtml(effectivePrompt)}</pre>`;
+}
+
+// Update character-related UI indicators (active highlight & attachment gating)
+function updateActiveCharacterUI() {
+    // Highlight active character row if list rendered
+    const listEl = document.getElementById('characters-list');
+    if (listEl) {
+        listEl.querySelectorAll('.character-row').forEach(row => {
+            const id = row.dataset.characterId;
+            const nameDiv = row.querySelector('.character-name');
+            if (nameDiv) nameDiv.classList.toggle('active', id === state.currentCharacterId);
+            const activateBtn = row.querySelector('.character-activate-btn');
+            if (activateBtn) activateBtn.innerHTML = id === state.currentCharacterId ? '<i class="bi bi-check2-circle"></i>' : '<i class="bi bi-play-circle"></i>';
+        });
+    }
+
+    // Refresh active system prompt text (fetch only if we lack character cache entry sysprompt) - we already keep sysprompt locally when listing
+    if (state.currentCharacterId) {
+        const char = state.charactersCache.find(c => c.character_id === state.currentCharacterId);
+        state.activeSystemPrompt = char ? (char.sysprompt || null) : null;
+    } else {
+        state.activeSystemPrompt = null;
+    }
+    updateEffectiveSystemPrompt();
+
+    // Update attachment buttons based on model image support
+    updateAttachmentButtonsForModel();
+}
 
 // Default generation arguments
 const defaultGenArgs = {
@@ -782,7 +1096,15 @@ function updateEffectiveSystemPrompt() {
     } else {
         updateDisplay(null);
     }
-    console.log("Effective system prompt updated:", state.effectiveSystemPrompt ? state.effectiveSystemPrompt.substring(0, 100) + "..." : "None");
+    // Throttle identical prompt logs to reduce console noise
+    try {
+        const newLogSnippet = state.effectiveSystemPrompt ? state.effectiveSystemPrompt.substring(0, 120) : "None";
+        const now = Date.now();
+        if (!state._lastPromptLog || state._lastPromptLog.snippet !== newLogSnippet || (now - state._lastPromptLog.time) > 4000) {
+            console.log("Effective system prompt updated:", newLogSnippet + (state.effectiveSystemPrompt && state.effectiveSystemPrompt.length > 120 ? "..." : ""));
+            state._lastPromptLog = { snippet: newLogSnippet, time: now };
+        }
+    } catch(e) { /* swallow logging throttle errors */ }
 }
 
 function debounce(func, wait) {
@@ -828,9 +1150,15 @@ async function init() {
     await loadGenArgs();
     await fetchChats(); // Fetches the list of available chats
 
+    // Hydrate persisted preferences early
+    state.toolsEnabled = localStorage.getItem('toolsEnabled') === 'true';
+    state.autoscrollEnabled = localStorage.getItem('autoscrollEnabled') === 'true';
+    const savedCollapsed = localStorage.getItem('codeBlocksDefaultCollapsed');
+    if (savedCollapsed !== null) state.codeBlocksDefaultCollapsed = savedCollapsed === 'true';
+
     // Setup all UI events and components
-    await populateCharacterSelect();
-    setupCharacterEvents();
+    setupCharactersTab();
+    setupModelsTab();
     setupEventListeners();
     setupScrollListener();
     setupAutoscrollToggle();
@@ -841,15 +1169,8 @@ async function init() {
     setupToolToggle();
     setupCodeblockToggle();
     
-    // **FIXED LOGIC**: Load the last chat OR start a new one
-    const lastChatId = localStorage.getItem('lastChatId');
-    if (lastChatId) {
-        console.log(`Found lastChatId: ${lastChatId}. Attempting to load.`);
-        await loadChat(lastChatId);
-    } else {
-        console.log("No lastChatId found. Starting a new chat.");
-        startNewChat();
-    }
+    // Always start a brand new chat (user request) ignoring any stored lastChatId
+    startNewChat();
 }
 
 async function fetchProviderConfig() {
@@ -864,13 +1185,12 @@ async function fetchProviderConfig() {
         state.apiKeys.google = backendConfig.google || null;
         state.apiKeys.local = backendConfig.local_api_key || null;
 
-        console.log("Fetched provider config and populated API keys.");
-        await fetchModels();
+    console.log("Fetched provider config and populated API keys (models now embedded per character).");
 
     } catch (error) {
         console.error('Error fetching provider config:', error);
         addSystemMessage("Failed to fetch API configuration from backend. Models requiring keys may be disabled.", "error");
-        populateModelSelect();
+    // populateModelSelect removed
     }
 }
 
@@ -901,53 +1221,9 @@ async function loadGenArgs() {
     defaultGenArgs.top_p = defaultGenArgs.top_p ?? null;
 }
 
-async function fetchModels() {
-    try {
-        const response = await fetch(`${API_BASE}/models`);
-        if (!response.ok) throw new Error(`Failed to fetch models: ${response.statusText}`);
-        state.models = await response.json();
-        state.models.sort((a, b) => a.displayName.localeCompare(b.displayName));
-    } catch (error) {
-        console.error('Error fetching models:', error);
-        state.models = [];
-    }
-    populateModelSelect();
-}
+// fetchModels removed (legacy models endpoint deprecated)
 
-function populateModelSelect() {
-    modelSelect.innerHTML = '';
-    if (state.models.length === 0) {
-        modelSelect.innerHTML = '<option value="" disabled>No models available</option>';
-    } else {
-        state.models.forEach(model => {
-            const option = document.createElement('option');
-            option.value = model.name;
-            option.dataset.modelIdentifier = model.model_identifier;
-            option.dataset.supportsImages = model.supportsImages;
-            option.dataset.provider = model.provider;
-
-            const apiKeyAvailable = !!getApiKey(model.provider);
-            option.textContent = `${model.displayName}${apiKeyAvailable ? '' : ' (Key Missing)'}`;
-            option.disabled = !apiKeyAvailable;
-            modelSelect.appendChild(option);
-        });
-
-        const lastModel = localStorage.getItem('lastModelName');
-        const lastModelOption = Array.from(modelSelect.options).find(opt => opt.value === lastModel && !opt.disabled);
-        if (lastModelOption) {
-            modelSelect.value = lastModel;
-        } else {
-            const firstEnabledOption = modelSelect.querySelector('option:not([disabled])');
-            if (firstEnabledOption) {
-                modelSelect.value = firstEnabledOption.value;
-                localStorage.setItem('lastModelName', modelSelect.value);
-            } else {
-                 modelSelect.value = '';
-            }
-        }
-    }
-    updateAttachButtons();
-}
+// Removed global populateModelSelect (model now bound per character)
 
 async function fetchChats() {
     try {
@@ -1054,27 +1330,24 @@ async function loadChat(chatId) {
         state.currentCharacterId = chat.character_id;
         state.activeSystemPrompt = null;
 
-        localStorage.setItem('lastChatId', chatId);
-        document.getElementById('character-select').value = state.currentCharacterId || '';
-        updateCharacterActionButtons();
+    localStorage.setItem('lastChatId', chatId);
+    updateActiveCharacterUI();
 
         if (state.currentCharacterId) {
              try {
-                  const charResponse = await fetch(`${API_BASE}/chat/get_character/${state.currentCharacterId}`);
+                  const charResponse = await fetch(`${API_BASE}/character/${state.currentCharacterId}`);
                   if (charResponse.ok) {
                        const activeChar = await charResponse.json();
                        state.activeSystemPrompt = activeChar?.sysprompt || null;
                   } else {
                         console.warn(`Failed to fetch character ${state.currentCharacterId} details. Character might be deleted.`);
                         state.currentCharacterId = null;
-                        document.getElementById('character-select').value = '';
-                        updateCharacterActionButtons();
+                        updateActiveCharacterUI();
                   }
              } catch (charError) {
                 console.error("Error fetching character details:", charError);
                 state.currentCharacterId = null;
-                document.getElementById('character-select').value = '';
-                updateCharacterActionButtons();
+                updateActiveCharacterUI();
              }
         }
         updateEffectiveSystemPrompt();
@@ -1101,8 +1374,7 @@ async function loadChat(chatId) {
         welcomeContainer.style.display = 'none';
         document.body.classList.remove('welcome-active');
         state.currentChatId = null;
-        document.getElementById('character-select').value = '';
-        updateCharacterActionButtons();
+    updateActiveCharacterUI();
         highlightCurrentChatInSidebar();
     } finally {
         requestAnimationFrame(updateScrollButtonVisibility);
@@ -1239,14 +1511,21 @@ function updateCodeblockToggleButton() {
 }
 
 function setupCodeblockToggle() {
+    // Load persisted preference (if any) before wiring UI so initial renders respect it.
+    const saved = localStorage.getItem('codeBlocksDefaultCollapsed');
+    if (saved !== null) {
+        state.codeBlocksDefaultCollapsed = saved === 'true';
+    }
+
     const button = document.getElementById('toggle-codeblocks-btn');
     if (!button) {
-        console.error("Global code block toggle button not found!");
-        return;
+        console.warn("Global code block toggle button not found; using stored default only.");
+        return; // Nothing else to do – feature optional.
     }
 
     button.addEventListener('click', () => {
         state.codeBlocksDefaultCollapsed = !state.codeBlocksDefaultCollapsed;
+        localStorage.setItem('codeBlocksDefaultCollapsed', state.codeBlocksDefaultCollapsed);
         console.log("Code block default collapsed state toggled to:", state.codeBlocksDefaultCollapsed);
         updateCodeblockToggleButton();
         const allCodeBlocks = messagesWrapper.querySelectorAll('.code-block-wrapper');
@@ -1418,10 +1697,18 @@ async function handleGenerateOrRegenerateFromUser(userMessageId) {
         return;
     }
 
-    const modelNameToUse = modelSelect.value;
+    if (!state.charactersCache.length) {
+        try { await fetchCharacters(true); } catch(e) { /* ignore */ }
+    }
+    const modelNameToUse = getActiveCharacterModel();
     if (!modelNameToUse) {
-        addSystemMessage("Please select a model before generating.", "error");
-        return;
+        // Attempt one lazy refresh in case characters cache populated after activation.
+        try { await fetchCharacters(true); } catch(e) { /* ignore */ }
+        const retryModel = getActiveCharacterModel();
+        if (!retryModel) {
+            addSystemMessage('Active character has no preferred model (yet). Edit the character to assign one.', 'error');
+            return;
+        }
     }
 
     const isLastMessage = findLastActiveMessageId(state.messages) === userMessageId;
@@ -1922,7 +2209,7 @@ function setupEventListeners() {
     imageButton.addEventListener('click', () => openFileSelector('image/*'));
     fileButton.addEventListener('click', () => openFileSelector('.txt,.py,.js,.ts,.html,.css,.json,.md,.yaml,.sql,.java,.c,.cpp,.cs,.go,.php,.rb,.swift,.kt,.rs,.toml'));
     sidebarToggle.addEventListener('click', toggleSidebar);
-    modelSelect.addEventListener('change', handleModelChange);
+    // removed global modelSelect listener
     document.addEventListener('paste', handlePaste);
 
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
@@ -1983,58 +2270,168 @@ function setupEventListeners() {
         });
     }
 
-    if (appearanceSettingsBtn && themeModal && mainSettingsPopup) {
-        appearanceSettingsBtn.addEventListener('click', () => {
-            themeModal.style.display = 'flex';
-            mainSettingsPopup.style.display = 'none';
-        });
-    }
-    if (closeThemeModalBtn && themeModal) {
-        closeThemeModalBtn.addEventListener('click', () => {
-            themeModal.style.display = 'none';
-        });
-    }
-    if (themeModal) {
-        themeModal.addEventListener('click', (e) => {
-            if (e.target === themeModal) {
-                themeModal.style.display = 'none';
-            }
-        });
-    }
+    // Removed obsolete appearance/theme modal handlers (appearanceSettingsBtn not defined in current markup)
+    // If a future theme modal is reintroduced, rewire it here.
     document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
         button.addEventListener('click', () => {
             applyTheme(button.dataset.theme);
         });
     });
 
+    // Legacy popup outside-click close (retain only if element still exists)
     document.addEventListener('click', (e) => {
-        if (mainSettingsPopup && mainSettingsPopup.style.display === 'block' &&
-            !mainSettingsPopup.contains(e.target) && !settingsBtn.contains(e.target)) {
-            mainSettingsPopup.style.display = 'none';
+        if (mainSettingsPopup && mainSettingsPopup.style.display === 'block') {
+            if (!mainSettingsPopup.contains(e.target) && !settingsBtn.contains(e.target)) {
+                mainSettingsPopup.style.display = 'none';
+            }
         }
     });
+
+    // Settings modal open/close
+    if (settingsBtn) {
+        settingsBtn.addEventListener('click', () => {
+            if (settingsModal) {
+                settingsModal.style.display = 'flex';
+                refreshSettingsModalState();
+            } else if (mainSettingsPopup) {
+                // Fallback to legacy popup if new modal absent
+                mainSettingsPopup.style.display = 'block';
+            } else {
+                console.warn('No settings modal or popup found.');
+            }
+        });
+    }
+    if (settingsModal) {
+        settingsModal.addEventListener('click', (e) => {
+            if (e.target === settingsModal) settingsModal.style.display = 'none';
+        });
+    }
+    if (settingsModalClose) {
+        settingsModalClose.addEventListener('click', () => {
+            settingsModal.style.display = 'none';
+        });
+    }
+
+    // (Tab + settings element wiring happens on modal open in refreshSettingsModalState for reliability)
+}
+
+function activateSettingsTab(tabName) {
+    if (!settingsModal) return;
+    const { tabButtons, tabPanels } = querySettingsModalElements();
+    tabButtons.forEach(btn => btn.classList.toggle('active', btn.dataset.tab === tabName));
+    tabPanels.forEach(panel => {
+        const isActive = panel.dataset.panel === tabName;
+        panel.classList.toggle('active', isActive);
+        panel.style.display = isActive ? 'block' : 'none';
+    });
+    localStorage.setItem('settingsActiveTab', tabName);
+}
+
+function refreshSettingsModalState() {
+    if (!settingsModal) return;
+    const {
+        tabButtons,
+        tabPanels,
+        cbTools,
+        cbAutoscroll,
+        cbCodeblocks,
+        cotStartInput,
+        cotEndInput,
+        cotSaveBtn,
+        toolsPromptPreview
+    } = querySettingsModalElements();
+
+    // Wire tab button clicks (idempotent by reassigning onclick)
+    tabButtons.forEach(btn => {
+        btn.onclick = () => activateSettingsTab(btn.dataset.tab);
+    });
+
+    // Populate checkboxes
+    if (cbTools) {
+        cbTools.checked = !!state.toolsEnabled;
+        cbTools.onchange = () => {
+            state.toolsEnabled = cbTools.checked;
+            localStorage.setItem('toolsEnabled', state.toolsEnabled);
+            updateEffectiveSystemPrompt();
+            addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
+        };
+    }
+    if (cbAutoscroll) {
+        cbAutoscroll.checked = !!state.autoscrollEnabled;
+        cbAutoscroll.onchange = () => {
+            state.autoscrollEnabled = cbAutoscroll.checked;
+            localStorage.setItem('autoscrollEnabled', state.autoscrollEnabled);
+            updateAutoscrollButton();
+            addSystemMessage(`Autoscroll ${state.autoscrollEnabled ? 'Enabled' : 'Disabled'}`, 'info', 1500);
+            if (state.autoscrollEnabled) scrollToBottom('auto');
+        };
+    }
+    if (cbCodeblocks) {
+        cbCodeblocks.checked = !!state.codeBlocksDefaultCollapsed;
+        cbCodeblocks.onchange = () => {
+            state.codeBlocksDefaultCollapsed = cbCodeblocks.checked;
+            localStorage.setItem('codeBlocksDefaultCollapsed', state.codeBlocksDefaultCollapsed);
+            updateCodeblockToggleButton();
+            document.querySelectorAll('.code-block-wrapper').forEach(block => setCodeBlockCollapsedState(block, state.codeBlocksDefaultCollapsed));
+        };
+    }
+
+    // Tools prompt preview (read-only)
+    if (toolsPromptPreview) {
+        toolsPromptPreview.textContent = TOOLS_SYSTEM_PROMPT ? TOOLS_SYSTEM_PROMPT : 'No tools prompt loaded.';
+    }
+
+    // Load and display saved CoT tags
+    let savedCot = null;
+    try { savedCot = JSON.parse(localStorage.getItem('cotTags') || 'null'); } catch {}
+    if (savedCot) {
+        if (cotStartInput) cotStartInput.value = savedCot.start;
+        if (cotEndInput) cotEndInput.value = savedCot.end;
+    } else {
+        if (cotStartInput && !cotStartInput.value) cotStartInput.value = '<think>';
+        if (cotEndInput && !cotEndInput.value) cotEndInput.value = '</think>';
+    }
+
+    if (cotSaveBtn) {
+        cotSaveBtn.onclick = () => {
+            const start = (cotStartInput?.value || '').trim();
+            const end = (cotEndInput?.value || '').trim();
+            if (!start || !end) { addSystemMessage('Both CoT tags are required.', 'warning'); return; }
+            if (start === end) { addSystemMessage('CoT start/end tags must differ.', 'error'); return; }
+            localStorage.setItem('cotTags', JSON.stringify({ start, end }));
+            addSystemMessage('Updated CoT tags.', 'info');
+        };
+    }
+
+    // Restore last active tab (fallback to first button)
+    const lastTab = localStorage.getItem('settingsActiveTab');
+    const defaultTab = tabButtons[0]?.dataset.tab;
+    activateSettingsTab(lastTab || defaultTab || 'main');
 }
 
 function setupToolToggle() {
+    // Load persisted state first
     const savedToolState = localStorage.getItem('toolsEnabled') === 'true';
     state.toolsEnabled = savedToolState;
-    toggleToolsBtn.classList.toggle('active', state.toolsEnabled);
-    updateEffectiveSystemPrompt();
 
-    toggleToolsBtn.addEventListener('click', () => {
-        state.toolsEnabled = !state.toolsEnabled;
+    if (toggleToolsBtn) {
         toggleToolsBtn.classList.toggle('active', state.toolsEnabled);
-        localStorage.setItem('toolsEnabled', state.toolsEnabled);
-        console.log("Tools enabled:", state.toolsEnabled);
-        updateEffectiveSystemPrompt();
-        addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
-    });
+        toggleToolsBtn.addEventListener('click', () => {
+            state.toolsEnabled = !state.toolsEnabled;
+            toggleToolsBtn.classList.toggle('active', state.toolsEnabled);
+            localStorage.setItem('toolsEnabled', state.toolsEnabled);
+            console.log("Tools enabled:", state.toolsEnabled);
+            updateEffectiveSystemPrompt();
+            addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
+        });
+    } else {
+        console.warn("Tools toggle button not found; using saved toolsEnabled state only.");
+    }
+
+    updateEffectiveSystemPrompt();
 }
 
-function handleModelChange() {
-     updateAttachButtons();
-     localStorage.setItem('lastModelName', modelSelect.value);
-}
+// handleModelChange removed (no global model select)
 
 function handleInputKeydown(e) {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
@@ -2077,9 +2474,41 @@ function toggleSidebar() {
     localStorage.setItem('sidebarCollapsed', isCollapsed);
 }
 
+function getActiveCharacterModel() {
+    if (!state.currentCharacterId) return null;
+    if (!state.charactersCache || !state.charactersCache.length) return state.lastActivatedCharacterPreferredModel;
+    const char = state.charactersCache.find(c => c.character_id === state.currentCharacterId);
+    let model = char?.model_name || char?.preferred_model || state.lastActivatedCharacterPreferredModel || null;
+    if (model) state.lastActivatedCharacterPreferredModel = model;
+    return model;
+}
+
+function getActiveCharacterCotTags() {
+    if (!state.currentCharacterId || !state.charactersCache) return { start: null, end: null };
+    const char = state.charactersCache.find(c => c.character_id === state.currentCharacterId);
+    return { start: char?.cot_start_tag || null, end: char?.cot_end_tag || null };
+}
+
+function activeCharacterSupportsImages() {
+    if (!state.currentCharacterId || !state.charactersCache) return false;
+    const char = state.charactersCache.find(c => c.character_id === state.currentCharacterId);
+    if (!char) return false;
+    if (char.model_supports_images !== undefined) return !!char.model_supports_images;
+    if (char.preferred_model_supports_images) return true; // legacy
+    return false;
+}
+
+function updateAttachmentButtonsForModel() {
+    const supports = activeCharacterSupportsImages();
+    if (imageButton) {
+        imageButton.disabled = !supports;
+        imageButton.title = supports ? 'Attach image' : 'Model does not support images';
+    }
+    if (fileButton) fileButton.disabled = false; // Always allow text file attachments
+}
+
 function updateAttachButtons() {
-    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-    const supportsImages = selectedOption ? selectedOption.dataset.supportsImages === 'true' : false;
+    const supportsImages = activeCharacterSupportsImages();
     imageButton.style.display = supportsImages ? 'flex' : 'none';
     fileButton.style.display = 'flex';
 }
@@ -2098,8 +2527,7 @@ function openFileSelector(accept) {
 }
 
 function handleFiles(files) {
-    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-    const supportsImages = selectedOption ? selectedOption.dataset.supportsImages === 'true' : false;
+    const supportsImages = activeCharacterSupportsImages();
 
     Array.from(files).forEach(file => {
         if (file.type.startsWith('image/') && supportsImages) {
@@ -2251,9 +2679,7 @@ function viewAttachmentPopup(attachment) {
 }
 
 function handlePaste(e) {
-    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-    const supportsImages = selectedOption ? selectedOption.dataset.supportsImages === 'true' : false;
-    if (!supportsImages) return;
+    if (!activeCharacterSupportsImages()) return;
 
     const items = e.clipboardData.items;
     if (!items) return;
@@ -2319,11 +2745,16 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
     state.streamController = new AbortController();
 
     const url = `${API_BASE}/chat/${chatId}/generate`;
+    const cotTags = getActiveCharacterCotTags ? getActiveCharacterCotTags() : { start: null, end: null };
     const body = {
         parent_message_id: parentMessageId,
         model_name: modelName,
         generation_args: generationArgs || {},
-        tools_enabled: toolsEnabled
+        tools_enabled: toolsEnabled,
+        character_id: state.currentCharacterId || null,
+        cot_start_tag: cotTags.start,
+        cot_end_tag: cotTags.end,
+        resolve_local_runtime_model: true // hint backend to fetch runtime local model name now
     };
 
     try {
@@ -2447,6 +2878,14 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
          return;
     }
 
+    // Resolve effective model name (explicit param overrides active character embedded value)
+    let effectiveModelName = modelName || getActiveCharacterModel();
+    if (!effectiveModelName) {
+        addSystemMessage('No model set for active character (model_name empty). Edit the character to set one.', 'error');
+        cleanupAfterGeneration();
+        return;
+    }
+
     // Reset timer state at the beginning of a new generation
     if (state.streamingThinkTimer.intervalId) {
         clearInterval(state.streamingThinkTimer.intervalId);
@@ -2463,6 +2902,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     }
 
     buildContentHtml(targetContentDiv, initialText); // Initial render (e.g. for "continue")
+    updateAttachmentButtonsForModel();
     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
@@ -2492,7 +2932,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         await streamFromBackend(
             state.currentChatId,
             parentId,
-            modelName,
+            effectiveModelName,
             generationArgs,
             toolsEnabled,
             // --- onChunk Callback ---
@@ -2575,7 +3015,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
                 }
                 updateStreamingMinHeight();
-                if (state.autoscrollEnabled) scrollToBottom('smooth');
+                if (state.autoscrollEnabled) requestAutoScroll();
             },
             // --- onToolStart Callback ---
             (name, args) => {
@@ -2588,7 +3028,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                  }
                 finalizeStreamingCodeBlocks(targetContentDiv);
                 updateStreamingMinHeight();
-                if (state.autoscrollEnabled) scrollToBottom('smooth');
+                if (state.autoscrollEnabled) requestAutoScroll();
             },
             // --- onToolEnd Callback ---
             (name, result, error) => {
@@ -2601,7 +3041,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                  }
                  finalizeStreamingCodeBlocks(targetContentDiv);
                  updateStreamingMinHeight();
-                if (state.autoscrollEnabled) scrollToBottom('smooth');
+                if (state.autoscrollEnabled) requestAutoScroll();
             },
             // --- onComplete Callback ---
             async () => {
@@ -2621,7 +3061,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     finalizeStreamingCodeBlocks(targetContentDiv);
                 }
 
-                if (state.autoscrollEnabled) scrollToBottom('smooth');
+                if (state.autoscrollEnabled) requestAutoScroll();
                 else requestAnimationFrame(updateScrollButtonVisibility);
 
                 try {
@@ -2854,11 +3294,15 @@ async function sendMessage() {
         return;
     }
 
-    const selectedOption = modelSelect.options[modelSelect.selectedIndex];
-    if (!selectedOption) {
-         addSystemMessage("Please select a model.", "error"); return;
+    const modelName = getActiveCharacterModel();
+    if (!modelName) {
+        try { await fetchCharacters(true); } catch(e) { /* ignore */ }
+        const retryModel = getActiveCharacterModel();
+        if (!retryModel) {
+            addSystemMessage('Active character has no preferred model (assign one in the Characters tab).', 'error');
+            return;
+        }
     }
-    const modelName = selectedOption.value;
 
     const currentInputText = messageInput.value;
     clearInputArea();
@@ -3232,10 +3676,14 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         return;
     }
     const parentMessageId = parentMessage.message_id;
-    const modelNameToUse = modelSelect.value;
+    const modelNameToUse = getActiveCharacterModel();
     if (!modelNameToUse) {
-        addSystemMessage("Please select a model before regenerating.", "error");
-        return;
+        try { await fetchCharacters(true); } catch(e) { /* ignore */ }
+        const retryModel = getActiveCharacterModel();
+        if (!retryModel) {
+            addSystemMessage('Active character has no preferred model (assign one before regenerating).', 'error');
+            return;
+        }
     }
 
     console.log(`Regenerating from parent ${parentMessageId} (targeting llm message ${messageIdToRegen}, new branch: ${newBranch}) using model ${modelNameToUse}`);
@@ -3354,10 +3802,14 @@ async function continueMessage(messageIdToContinue) {
         addSystemMessage("Can only continue assistant messages.", "error"); return;
     }
 
-    const modelNameToUse = modelSelect.value;
+    const modelNameToUse = getActiveCharacterModel();
     if (!modelNameToUse) {
-        addSystemMessage("Please select a model before continuing.", "error");
-        return;
+        try { await fetchCharacters(true); } catch(e) { /* ignore */ }
+        const retryModel = getActiveCharacterModel();
+        if (!retryModel) {
+            addSystemMessage('Active character has no preferred model (assign one before continuing).', 'error');
+            return;
+        }
     }
     const parentId = messageToContinue.parent_message_id;
     const rawMessage = messageToContinue.message || '';
@@ -3436,9 +3888,11 @@ async function stopStreaming() {
 }
 
 
+// Legacy character popup/select logic removed. New character management handled in Settings > Characters tab.
+// Placeholder fetchCharacters (will be replaced by Characters tab CRUD implementation)
 async function fetchCharacters() {
     try {
-        const response = await fetch(`${API_BASE}/chat/list_characters`);
+        const response = await fetch(`${API_BASE}/characters`);
         if (!response.ok) throw new Error(`Failed to fetch characters: ${response.statusText}`);
         return await response.json();
     } catch (error) {
@@ -3447,27 +3901,7 @@ async function fetchCharacters() {
     }
 }
 
-async function populateCharacterSelect() {
-    const characters = await fetchCharacters();
-    const select = document.getElementById('character-select');
-    const currentVal = select.value;
-    select.innerHTML = '<option value="">No Character</option>';
-
-    if (characters.length > 0) {
-        characters.forEach(char => {
-            const option = document.createElement('option');
-            option.value = char.character_id;
-            option.textContent = char.character_name;
-            select.appendChild(option);
-        });
-        if (characters.some(c => c.character_id === currentVal)) {
-             select.value = currentVal;
-        } else if (state.currentCharacterId && characters.some(c => c.character_id === state.currentCharacterId)) {
-             select.value = state.currentCharacterId;
-        }
-    }
-    updateCharacterActionButtons();
-}
+async function populateCharacterSelect() { /* Deprecated */ }
 
 function displayActiveSystemPrompt(characterName, promptText) {
     const displayBtn = document.getElementById('character-btn');
@@ -3531,210 +3965,11 @@ function viewSystemPromptPopup(promptText, characterName = "System Prompt") {
     document.body.appendChild(popup);
 }
 
-function openCharacterModal(mode, character = null) {
-    const modal = document.getElementById('character-modal');
-    const form = document.getElementById('character-form');
-    const titleSpan = document.getElementById('modal-title');
-    const submitBtn = document.getElementById('submit-btn');
-    const characterIdInput = document.getElementById('character-id');
-    const nameInput = document.getElementById('character-name');
-    const syspromptInput = document.getElementById('character-sysprompt');
+// Removed openCharacterModal (legacy)
 
-    form.reset();
-    form.dataset.mode = mode;
+function setupCharacterEvents() { /* Legacy popup events removed. Characters handled in settings modal. */ }
 
-    if (mode === 'create') {
-        titleSpan.textContent = 'Create New Character';
-        submitBtn.textContent = 'Create';
-        characterIdInput.value = '';
-    } else if (mode === 'edit' && character) {
-        titleSpan.textContent = 'Edit Character';
-        submitBtn.textContent = 'Save Changes';
-        characterIdInput.value = character.character_id;
-        nameInput.value = character.character_name;
-        syspromptInput.value = character.sysprompt;
-    } else {
-         console.error("Invalid call to openCharacterModal");
-         return;
-    }
-    modal.style.display = 'flex';
-    nameInput.focus();
-}
-
-function setupCharacterEvents() {
-    const characterBtn = document.getElementById('character-btn');
-    const characterPopup = document.getElementById('character-popup');
-    const characterSelect = document.getElementById('character-select');
-    const characterCreateBtn = document.getElementById('character-create-btn');
-    const characterEditBtn = document.getElementById('character-edit-btn');
-    const characterDeleteBtn = document.getElementById('character-delete-btn');
-    const characterModal = document.getElementById('character-modal');
-    const characterForm = document.getElementById('character-form');
-    const cancelCreateBtn = document.getElementById('cancel-create-btn');
-
-    characterBtn.addEventListener('click', (e) => {
-        characterPopup.style.display = characterPopup.style.display === 'none' ? 'block' : 'none';
-        e.stopPropagation();
-    });
-
-    characterSelect.addEventListener('change', async () => {
-        const selectedCharacterId = characterSelect.value || null;
-        localStorage.setItem('lastCharacterId', selectedCharacterId || '');
-        updateCharacterActionButtons();
-
-         let selectedChar = null;
-         if (selectedCharacterId) {
-              try {
-                  const characters = await fetchCharacters();
-                  selectedChar = characters.find(c => c.character_id === selectedCharacterId);
-              } catch (e) { console.error("Failed to fetch selected character details", e); }
-         }
-         state.currentCharacterId = selectedCharacterId;
-         state.activeSystemPrompt = selectedChar?.sysprompt || null;
-         updateEffectiveSystemPrompt();
-
-        if (state.currentChatId) {
-            try {
-                const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ character_id: selectedCharacterId })
-                });
-                if (!response.ok) throw new Error(`Failed to set character: ${await response.text()}`);
-                console.log(`Chat ${state.currentChatId} character set to ${selectedCharacterId}`);
-            } catch (error) {
-                console.error('Error setting character for chat:', error);
-                addSystemMessage(`Failed to set active character: ${error.message}`, "error");
-            }
-        }
-        characterPopup.style.display = 'none';
-    });
-
-    characterCreateBtn.addEventListener('click', () => {
-        openCharacterModal('create');
-        characterPopup.style.display = 'none';
-    });
-
-    characterEditBtn.addEventListener('click', async () => {
-        const characterId = characterSelect.value;
-        if (!characterId) return;
-        try {
-             const response = await fetch(`${API_BASE}/chat/get_character/${characterId}`);
-             if (!response.ok) throw new Error(`Failed to fetch character details: ${await response.text()}`);
-             const character = await response.json();
-             openCharacterModal('edit', character);
-        } catch (error) {
-             console.error('Error fetching character for edit:', error);
-             addSystemMessage(`Failed to load character details: ${error.message}`, "error");
-        }
-        characterPopup.style.display = 'none';
-    });
-
-    characterDeleteBtn.addEventListener('click', async () => {
-        const characterId = characterSelect.value;
-        if (!characterId) return;
-        // Confirmation removed
-        try {
-            const response = await fetch(`${API_BASE}/chat/delete_character/${characterId}`, {
-                method: 'DELETE'
-            });
-            if (!response.ok) throw new Error(`Failed to delete character: ${await response.text()}`);
-            console.log(`Character ${characterId} deleted.`);
-
-             if (state.currentCharacterId === characterId) {
-                 state.currentCharacterId = null;
-                 state.activeSystemPrompt = null;
-                 localStorage.removeItem('lastCharacterId');
-                  updateEffectiveSystemPrompt();
-                  if (state.currentChatId) {
-                      await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
-                           method: 'POST', headers: { 'Content-Type': 'application/json' },
-                           body: JSON.stringify({ character_id: null })
-                      });
-                  }
-             }
-             await populateCharacterSelect();
-        } catch (error) {
-            console.error('Error deleting character:', error);
-            addSystemMessage(`Failed to delete character: ${error.message}`, "error");
-        }
-        characterPopup.style.display = 'none';
-    });
-
-    document.addEventListener('click', (e) => {
-        if (characterPopup.style.display === 'block' && !characterBtn.contains(e.target) && !characterPopup.contains(e.target)) {
-            characterPopup.style.display = 'none';
-        }
-    });
-
-    characterForm.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        const mode = e.target.dataset.mode;
-        const name = document.getElementById('character-name').value.trim();
-        const sysprompt = document.getElementById('character-sysprompt').value.trim();
-        const characterId = document.getElementById('character-id').value;
-
-        if (!name || !sysprompt) {
-            addSystemMessage('Character Name and System Prompt are required.', "warning");
-            return;
-        }
-        const characterData = { character_name: name, sysprompt, settings: {} };
-
-        try {
-             let response;
-             let outcomeCharacterId = null;
-             if (mode === 'create') {
-                 console.log("Creating character:", characterData);
-                 response = await fetch(`${API_BASE}/chat/create_character`, {
-                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                     body: JSON.stringify(characterData)
-                 });
-                 if (response.ok) outcomeCharacterId = (await response.json()).character_id;
-             } else if (mode === 'edit' && characterId) {
-                 console.log(`Updating character ${characterId}:`, characterData);
-                 response = await fetch(`${API_BASE}/chat/update_character/${characterId}`, {
-                     method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                     body: JSON.stringify(characterData)
-                 });
-                 if (response.ok) outcomeCharacterId = characterId;
-             } else { throw new Error("Invalid form mode or missing character ID for edit."); }
-
-             if (!response.ok) {
-                 const errorData = await response.json().catch(() => ({ detail: response.statusText }));
-                 throw new Error(`Failed to ${mode} character: ${errorData.detail || response.statusText}`);
-             }
-
-             console.log(`Character ${mode === 'create' ? 'created' : 'updated'} successfully.`);
-             characterModal.style.display = 'none';
-             await populateCharacterSelect();
-
-             if (outcomeCharacterId) {
-                 characterSelect.value = outcomeCharacterId;
-                 characterSelect.dispatchEvent(new Event('change', { bubbles: true }));
-             }
-        } catch (error) {
-             console.error(`Error saving character (mode: ${mode}):`, error);
-             addSystemMessage(`Failed to save character: ${error.message}`, "error");
-        }
-    });
-
-    cancelCreateBtn.addEventListener('click', () => {
-        characterModal.style.display = 'none';
-    });
-    characterModal.addEventListener('click', (e) => {
-        if (e.target === characterModal) {
-            characterModal.style.display = 'none';
-        }
-    });
-}
-
-function updateCharacterActionButtons() {
-    const select = document.getElementById('character-select');
-    const selectedId = select.value;
-    const hasSelection = !!selectedId;
-
-    document.getElementById('character-edit-btn').disabled = !hasSelection;
-    document.getElementById('character-delete-btn').disabled = !hasSelection;
-}
+function updateCharacterActionButtons() { /* Deprecated */ }
 
 function startNewChat() {
     console.log("Starting new chat...");
@@ -3748,18 +3983,9 @@ function startNewChat() {
     localStorage.removeItem('lastChatId');
     highlightCurrentChatInSidebar();
 
-    const selectedCharacterId = document.getElementById('character-select').value || null;
-    state.currentCharacterId = selectedCharacterId;
-    if (selectedCharacterId) {
-         fetchCharacters().then(characters => {
-             const selectedChar = characters.find(c => c.character_id === selectedCharacterId);
-             state.activeSystemPrompt = selectedChar?.sysprompt || null;
-             updateEffectiveSystemPrompt();
-         });
-     } else {
-         state.activeSystemPrompt = null;
-         updateEffectiveSystemPrompt();
-     }
+    state.currentCharacterId = null;
+    state.activeSystemPrompt = null;
+    updateEffectiveSystemPrompt();
     state.currentImages = []; state.currentTextFiles = [];
     imagePreviewContainer.innerHTML = '';
     adjustTextareaHeight();
@@ -3992,28 +4218,26 @@ function addSystemMessage(text, type = "info", timeout = null) {
 }
 
 function setupAutoscrollToggle() {
-    if (!toggleAutoscrollBtn) {
-        console.error("Autoscroll toggle button not found!");
-        return;
-    }
     const savedAutoscrollState = localStorage.getItem('autoscrollEnabled');
-    // Default to false if not found in localStorage or if state is freshly initialized
     state.autoscrollEnabled = savedAutoscrollState !== null ? savedAutoscrollState === 'true' : false;
-    updateAutoscrollButton();
 
-    toggleAutoscrollBtn.addEventListener('click', () => {
-        state.autoscrollEnabled = !state.autoscrollEnabled;
-        localStorage.setItem('autoscrollEnabled', state.autoscrollEnabled);
+    if (toggleAutoscrollBtn) {
         updateAutoscrollButton();
-        console.log("Autoscroll enabled:", state.autoscrollEnabled);
-
-        if (state.autoscrollEnabled) {
-            scrollToBottom('smooth');
-        } else {
-             requestAnimationFrame(updateScrollButtonVisibility);
-        }
-        addSystemMessage(`Autoscroll ${state.autoscrollEnabled ? 'Enabled' : 'Disabled'}`, 'info', 1500);
-    });
+        toggleAutoscrollBtn.addEventListener('click', () => {
+            state.autoscrollEnabled = !state.autoscrollEnabled;
+            localStorage.setItem('autoscrollEnabled', state.autoscrollEnabled);
+            updateAutoscrollButton();
+            console.log("Autoscroll enabled:", state.autoscrollEnabled);
+            if (state.autoscrollEnabled) {
+                scrollToBottom('smooth');
+            } else {
+                requestAnimationFrame(updateScrollButtonVisibility);
+            }
+            addSystemMessage(`Autoscroll ${state.autoscrollEnabled ? 'Enabled' : 'Disabled'}`, 'info', 1500);
+        });
+    } else {
+        console.warn("Autoscroll toggle button not found; using saved autoscrollEnabled state only.");
+    }
 }
 
 function updateAutoscrollButton() {

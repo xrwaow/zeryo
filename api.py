@@ -40,8 +40,9 @@ def load_config(file_path):
 api_keys_config = load_config('api_keys.yaml') # Raw keys NOT sent to frontend
 model_configs = load_config('model_config.yaml')
 
-# Database setup (Same as before)
-DB_PATH = "chat_db_branching.sqlite"
+# Database setup (Schema v2: adds preferred_model, cot_start_tag, cot_end_tag to characters)
+# Use a new filename to avoid clobbering old schema; no automatic migration performed here.
+DB_PATH = "chat_db_branching_v2.sqlite"
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -99,14 +100,63 @@ def init_db():
         FOREIGN KEY (message_id) REFERENCES messages (message_id) ON DELETE CASCADE
     )
     ''')
+    # Models table (dynamic instead of YAML-only)
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS models (
+        model_name TEXT PRIMARY KEY,
+        provider TEXT,
+        model_identifier TEXT,
+        supports_images INTEGER DEFAULT 0
+    )
+    ''')
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS characters (
         character_id TEXT PRIMARY KEY,
         character_name TEXT UNIQUE,
         sysprompt TEXT,
-        settings TEXT -- JSON string for future use
+        preferred_model TEXT,
+        preferred_model_supports_images INTEGER DEFAULT 0,
+        -- Embedded model fields (new unified schema)
+        model_name TEXT,
+        model_provider TEXT,
+        model_identifier TEXT,
+        model_supports_images INTEGER,
+        cot_start_tag TEXT,
+        cot_end_tag TEXT,
+        settings TEXT -- JSON string for future use / extra metadata
     )
     ''')
+    # --- Simple migration guards for characters table (in case existing DB predates new columns) ---
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN preferred_model_supports_images INTEGER DEFAULT 0")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN cot_start_tag TEXT")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN cot_end_tag TEXT")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN settings TEXT")
+    except sqlite3.OperationalError: pass
+    # New embedded model columns (idempotent)
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN model_name TEXT")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN model_provider TEXT")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN model_identifier TEXT")
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN model_supports_images INTEGER")
+    except sqlite3.OperationalError: pass
+    # One-time migration: if model fields empty but preferred_model set and models table has entry, copy data
+    try:
+        cursor.execute("SELECT character_id, preferred_model FROM characters WHERE preferred_model IS NOT NULL")
+        chars = cursor.fetchall()
+        for ch in chars:
+            pm = ch['preferred_model']
+            cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE model_name = ?", (pm,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute("UPDATE characters SET model_name = ?, model_provider = ?, model_identifier = ?, model_supports_images = ? WHERE character_id = ? AND (model_name IS NULL OR model_name = '')",
+                               (row['model_name'], row['provider'], row['model_identifier'], row['supports_images'], ch['character_id']))
+    except Exception as e:
+        print(f"Embedded model migration warning: {e}")
     # --- Indexes ---
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages (parent_message_id)")
@@ -190,10 +240,42 @@ class SetActiveCharacterRequest(BaseModel):
 class Character(BaseModel):
     character_name: str
     sysprompt: str
+    # Legacy fields (kept for backward compatibility)
+    preferred_model: Optional[str] = None
+    preferred_model_supports_images: Optional[bool] = False
+    # New embedded model fields (unify model + character)
+    model_name: Optional[str] = None
+    model_provider: Optional[str] = None
+    model_identifier: Optional[str] = None
+    model_supports_images: Optional[bool] = None
+    # CoT tags
+    cot_start_tag: Optional[str] = None
+    cot_end_tag: Optional[str] = None
     settings: Optional[Dict[str, Any]] = {}
 
 class UpdateCharacterRequest(Character):
-    pass
+    character_name: Optional[str] = None  # Allow partial updates (overrides base requirement)
+    sysprompt: Optional[str] = None
+    preferred_model: Optional[str] = None
+    preferred_model_supports_images: Optional[bool] = None
+    model_name: Optional[str] = None
+    model_provider: Optional[str] = None
+    model_identifier: Optional[str] = None
+    model_supports_images: Optional[bool] = None
+    cot_start_tag: Optional[str] = None
+    cot_end_tag: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = None
+
+class ModelDefinition(BaseModel):
+    model_name: str
+    provider: str
+    model_identifier: Optional[str] = None
+    supports_images: bool = False
+
+class UpdateModelDefinition(BaseModel):
+    provider: Optional[str] = None
+    model_identifier: Optional[str] = None
+    supports_images: Optional[bool] = None
 
 class SetActiveBranchRequest(BaseModel):
     child_index: int
@@ -212,6 +294,11 @@ class GenerateRequest(BaseModel):
     model_name: str
     generation_args: Optional[Dict[str, Any]] = {} # e.g., temperature, max_tokens
     tools_enabled: bool = False # <-- NEW field with default
+    # Extended fields from new frontend contract
+    character_id: Optional[str] = None
+    cot_start_tag: Optional[str] = None
+    cot_end_tag: Optional[str] = None
+    resolve_local_runtime_model: bool = False
 
 # --- Tool Implementation ---
 import tools
@@ -669,7 +756,9 @@ async def _perform_generation_stream(
     model_name: str,
     gen_args: Dict[str, Any],
     tools_enabled: bool,
-    abort_event: asyncio.Event
+    abort_event: asyncio.Event,
+    cot_start_tag: Optional[str] = None,
+    cot_end_tag: Optional[str] = None
 ) -> AsyncGenerator[str, None]:
     """
     Performs LLM generation, handles streaming, tool calls, saving distinct messages, and abortion.
@@ -683,8 +772,11 @@ async def _perform_generation_stream(
     generation_completed_normally = False
     last_saved_message_id = parent_message_id
     provider = None
-    backend_is_streaming_reasoning = False # Specific to OpenRouter/OpenAI <think> tags
+    backend_is_streaming_reasoning = False # Specific to OpenRouter/OpenAI <think> tags (customizable)
     current_turn_content_accumulated = "" # Accumulates all text from current LLM turn (segment)
+    # Custom CoT tag handling
+    think_open_tag = cot_start_tag if cot_start_tag else "<think>"
+    think_close_tag = (cot_end_tag if cot_end_tag else "</think>") + "\n"
 
     try:
         conn_check = get_db_connection()
@@ -692,13 +784,16 @@ async def _perform_generation_stream(
         print(f"[Gen Start] Chat: {chat_id}, Parent: {parent_message_id}, Model: {model_name}, Tools: {tools_enabled}")
         cursor_check.execute("SELECT character_id FROM chats WHERE chat_id = ?", (chat_id,))
         chat_info = cursor_check.fetchone()
-        if not chat_info: raise HTTPException(status_code=404, detail="Chat not found")
-        
+        if not chat_info:
+            raise HTTPException(status_code=404, detail="Chat not found")
+
         system_prompt_text = ""
+        char_info = None
         if chat_info["character_id"]:
-             cursor_check.execute("SELECT sysprompt FROM characters WHERE character_id = ?", (chat_info["character_id"],))
-             char_info = cursor_check.fetchone(); system_prompt_text = char_info["sysprompt"] if char_info else ""
-        
+            cursor_check.execute("SELECT sysprompt, model_name, model_provider, model_identifier, model_supports_images, preferred_model FROM characters WHERE character_id = ?", (chat_info["character_id"],))
+            char_info = cursor_check.fetchone()
+            system_prompt_text = char_info["sysprompt"] if char_info else ""
+
         tool_system_prompt_text = ""
         if tools_enabled:
             tool_system_prompt_text = format_tools_for_prompt(TOOLS_AVAILABLE)
@@ -706,6 +801,19 @@ async def _perform_generation_stream(
         effective_system_prompt = (system_prompt_text + ("\n\n" + tool_system_prompt_text if tool_system_prompt_text else "")).strip()
         
         model_config = get_model_config(model_name)
+        if not model_config and char_info:
+            # Fast path fallback using already-fetched character row
+            possible_names = []
+            if char_info.get('model_name'): possible_names.append(char_info['model_name'])
+            if char_info.get('preferred_model'): possible_names.append(char_info['preferred_model'])
+            if any(model_name.lower() == p.lower() for p in possible_names if p):
+                model_config = {
+                    'name': model_name,
+                    'provider': char_info.get('model_provider') or 'openrouter',
+                    'model_identifier': char_info.get('model_identifier') or model_name,
+                    'supports_images': bool(char_info.get('model_supports_images'))
+                }
+                print(f"[Gen Fallback] Using embedded character model config for '{model_name}' (provider={model_config['provider']}).")
         if not model_config: raise ValueError(f"Configuration for model '{model_name}' not found.")
         provider = model_config.get('provider', 'openrouter').lower()
         model_identifier = model_config.get('model_identifier', model_name)
@@ -880,7 +988,7 @@ async def _perform_generation_stream(
                                     processed_yield_openai = ""; processed_save_openai = ""
                                     if reasoning_chunk:
                                         if not backend_is_streaming_reasoning:
-                                            processed_yield_openai = "<think>" + reasoning_chunk; processed_save_openai = "<think>" + reasoning_chunk
+                                            processed_yield_openai = think_open_tag + reasoning_chunk; processed_save_openai = think_open_tag + reasoning_chunk
                                             backend_is_streaming_reasoning = True
                                         else:
                                             processed_yield_openai = reasoning_chunk; processed_save_openai = reasoning_chunk
@@ -890,7 +998,7 @@ async def _perform_generation_stream(
 
                                     if content_chunk:
                                         if backend_is_streaming_reasoning:
-                                            processed_yield_openai = "</think>\n" + content_chunk; processed_save_openai = "</think>\n" + content_chunk
+                                            processed_yield_openai = think_close_tag + content_chunk; processed_save_openai = think_close_tag + content_chunk
                                             backend_is_streaming_reasoning = False
                                         else:
                                             processed_yield_openai = content_chunk; processed_save_openai = content_chunk
@@ -928,9 +1036,9 @@ async def _perform_generation_stream(
                             # After OpenAI/OpenRouter/Local aiter_lines loop
                             if stream_error: pass # Handled below
                             elif backend_is_streaming_reasoning and not is_done_signal_from_llm : # Stream ended naturally (not [DONE]) but think tag open
-                                yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-                                full_response_content_for_frontend += "</think>\n"
-                                current_turn_content_accumulated += "</think>\n"
+                                yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
+                                full_response_content_for_frontend += think_close_tag
+                                current_turn_content_accumulated += think_close_tag
                                 backend_is_streaming_reasoning = False
                         
                         # Common error check after specific provider stream handling
@@ -938,24 +1046,31 @@ async def _perform_generation_stream(
 
             except (httpx.RequestError, HTTPException, asyncio.CancelledError, Exception) as e:
                 # This catches errors from client.stream setup, or propagated stream_error
-                stream_error = e # Ensure it's set for the finally block logic
-                if backend_is_streaming_reasoning: # Close think tag on any error during stream
-                     try: yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-                     except Exception: pass
-                     current_turn_content_accumulated += "</think>\n" # Ensure saved part includes closing tag
-                     backend_is_streaming_reasoning = False
-                
+                stream_error = e  # Ensure it's set for the finally block logic
+                if backend_is_streaming_reasoning:  # Close think tag on any error during stream
+                    try:
+                        yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
+                    except Exception:
+                        pass
+                    current_turn_content_accumulated += think_close_tag  # Ensure saved part includes closing tag
+                    backend_is_streaming_reasoning = False
+
                 error_message_for_frontend = f"Streaming Error: {getattr(e, 'detail', str(e))}"
-                if isinstance(e, asyncio.CancelledError): error_message_for_frontend = "Generation stopped by user."
+                if isinstance(e, asyncio.CancelledError):
+                    error_message_for_frontend = "Generation stopped by user."
                 # Avoid re-yielding error if it was an HTTPException from LLM already (it might be detailed)
                 if not isinstance(e, (asyncio.CancelledError, HTTPException)):
-                     try: yield f"data: {json.dumps({'type': 'error', 'message': error_message_for_frontend})}\n\n"
-                     except Exception: pass
-                elif isinstance(e, HTTPException) and response and response.status_code != 200 : # Yield explicit LLM API error if not already handled
-                     try: yield f"data: {json.dumps({'type': 'error', 'message': f'LLM API Error: {e.detail}'})}\n\n"
-                     except Exception: pass
+                    try:
+                        yield f"data: {json.dumps({'type': 'error', 'message': error_message_for_frontend})}\n\n"
+                    except Exception:
+                        pass
+                elif isinstance(e, HTTPException) and response and response.status_code != 200:  # Yield explicit LLM API error if not already handled
+                    try:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'LLM API Error: {e.detail}'})}\n\n"
+                    except Exception:
+                        pass
 
-                break # Break outer while tool_call_count loop on any stream error
+                break  # Break outer while tool_call_count loop on any stream error
 
             # --- Process after stream (either completed or tool detected) ---
             if not detected_tool_call_info: # No tool call, this is the final segment from LLM for this turn
@@ -1047,10 +1162,12 @@ async def _perform_generation_stream(
         print(f"[Gen Finally] Chat {chat_id}. Abort: {abort_event.is_set()}, StreamError: {type(stream_error).__name__ if stream_error else 'None'}, Completed Loop: {generation_completed_normally}")
 
         if backend_is_streaming_reasoning: # Final safety net for OpenAI <think> tags
-             try: yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-             except Exception: pass
-             if not stream_error or isinstance(stream_error, asyncio.CancelledError): # Only add to save if not a hard error mid-think
-                current_turn_content_accumulated += "</think>\n"
+            try:
+                yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
+            except Exception:
+                pass
+            if not stream_error or isinstance(stream_error, asyncio.CancelledError): # Only add to save if not a hard error mid-think
+                current_turn_content_accumulated += think_close_tag
 
         if isinstance(stream_error, asyncio.CancelledError) and current_turn_content_accumulated:
             print(f"[Gen Finally - Abort Save] Saving partial: {len(current_turn_content_accumulated)} chars.")
@@ -1191,12 +1308,55 @@ def get_chat_messages(chat_id):
     return [msg.dict() for msg in messages]
 
 
-# --- NEW: Helper to get model config ---
+# --- NEW: Helper to get model config (enhanced with embedded character fallback) ---
 def get_model_config(model_name: str) -> Optional[Dict[str, Any]]:
-    """Finds the configuration for a given model name."""
+    """Resolve model configuration.
+
+    Resolution order:
+      1. In-memory legacy model_configs (model_config.yaml)
+      2. Characters table embedded model_name fields
+      3. Characters table preferred_model fallback
+    Returns synthesized config dict when using embedded data.
+    """
+    # 1. Legacy config list
     for config in model_configs.get('models', []):
         if config.get('name') == model_name:
             return config
+
+    # 2 & 3. Search characters for embedded definitions
+    try:
+        conn = get_db_connection(); cursor = conn.cursor()
+        # Direct model_name match
+        cursor.execute("""
+            SELECT model_name, model_provider, model_identifier, model_supports_images
+            FROM characters
+            WHERE lower(model_name) = lower(?) AND model_name IS NOT NULL AND model_name != ''
+            LIMIT 1
+        """, (model_name,))
+        row = cursor.fetchone()
+        if not row:
+            # Preferred model fallback
+            cursor.execute("""
+                SELECT preferred_model as model_name, model_provider, model_identifier, model_supports_images
+                FROM characters
+                WHERE lower(preferred_model) = lower(?) AND preferred_model IS NOT NULL AND preferred_model != ''
+                LIMIT 1
+            """, (model_name,))
+            row = cursor.fetchone()
+        conn.close()
+        if row:
+            synthesized = {
+                'name': model_name,
+                'provider': row['model_provider'] or 'openrouter',
+                'model_identifier': row['model_identifier'] or model_name,
+                'supports_images': bool(row['model_supports_images'])
+            }
+            print(f"[ModelConfig] Synthesized from character embedding for '{model_name}' (provider={synthesized['provider']}).")
+            return synthesized
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        print(f"[ModelConfig] Embedded model lookup failed for '{model_name}': {e}")
     return None
 
 # --- NEW: Helper to get LLM API details ---
@@ -1264,19 +1424,104 @@ async def get_config():
 
 @app.get("/models")
 async def get_available_models():
+    """Return models from DB plus dynamic local model name if provider 'local' present."""
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models ORDER BY model_name")
+    rows = cursor.fetchall()
+    conn.close()
     available_models = []
-    for model_config in model_configs.get('models', []):
-        model_name = model_config.get('name');
-        if not model_name: continue
-        provider = model_config.get('provider', 'openrouter')
-        supports_images = model_config.get('supports_images', False)
-        display_name = model_name.split('/')[-1].replace('-', ' ').replace('_', ' ').title()
-        model_identifier = model_config.get('model_identifier', model_name)
+    # Dynamic local model discovery
+    local_model_runtime_name = None
+    try:
+        # Only probe if any DB model has provider local OR fallback
+        if any(r["provider"].lower() == 'local' for r in rows):
+            import requests
+            resp = requests.get(f"{api_keys_config.get('local_base_url', 'http://127.0.0.1:8080')}/v1/models", timeout=2)
+            if resp.ok:
+                data = resp.json()
+                # Prefer first entry in data.models if present
+                if isinstance(data, dict):
+                    if 'models' in data and isinstance(data['models'], list) and data['models']:
+                        first = data['models'][0]
+                        local_model_runtime_name = first.get('name') or first.get('model')
+                    elif 'data' in data and isinstance(data['data'], list) and data['data']:
+                        first = data['data'][0]
+                        local_model_runtime_name = first.get('id')
+            else:
+                print(f"Local model probe non-OK status: {resp.status_code}")
+    except Exception as e:
+        print(f"Local model probe failed: {e}")
+
+    for row in rows:
+        model_name = row['model_name']
+        provider = row['provider']
+        model_identifier = row['model_identifier'] or model_name
+        supports_images = bool(row['supports_images'])
+        display_name = model_name.split('/')[-1]
+        if provider.lower() == 'local' and local_model_runtime_name:
+            # Preserve stable DB model_name as key; use runtime name only for display so character preferred_model continues matching
+            display_name = local_model_runtime_name
         available_models.append({
-            "name": model_name, "model_identifier": model_identifier, "displayName": display_name,
-            "supportsImages": supports_images, "provider": provider
+            "name": model_name,
+            "model_identifier": model_identifier,
+            "displayName": display_name,
+            "supportsImages": supports_images,
+            "provider": provider
         })
     return available_models
+
+@app.post("/model", response_model=Dict[str, str])
+async def create_model(model: ModelDefinition):
+    conn = get_db_connection(); cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "INSERT INTO models (model_name, provider, model_identifier, supports_images) VALUES (?, ?, ?, ?)",
+            (model.model_name, model.provider, model.model_identifier or model.model_name, 1 if model.supports_images else 0)
+        ); conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback(); raise HTTPException(status_code=409, detail="Model name already exists")
+    finally: conn.close()
+    return {"status": "ok"}
+
+@app.get('/model/{model_name}')
+async def get_model(model_name: str):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE model_name = ?", (model_name,))
+    row = cursor.fetchone(); conn.close()
+    if not row: raise HTTPException(status_code=404, detail="Model not found")
+    return {"model_name": row['model_name'], "provider": row['provider'], "model_identifier": row['model_identifier'], "supports_images": bool(row['supports_images'])}
+
+@app.put('/model/{model_name}')
+async def update_model(model_name: str, update: UpdateModelDefinition):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE model_name = ?", (model_name,))
+    existing = cursor.fetchone()
+    if not existing:
+        conn.close(); raise HTTPException(status_code=404, detail="Model not found")
+    new_provider = update.provider if update.provider is not None else existing['provider']
+    new_identifier = update.model_identifier if update.model_identifier is not None else existing['model_identifier']
+    new_supports = existing['supports_images'] if update.supports_images is None else (1 if update.supports_images else 0)
+    try:
+        cursor.execute("UPDATE models SET provider = ?, model_identifier = ?, supports_images = ? WHERE model_name = ?",
+                       (new_provider, new_identifier, new_supports, model_name))
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally: conn.close()
+    return {"status": "ok"}
+
+@app.delete('/model/{model_name}')
+async def delete_model(model_name: str):
+    conn = get_db_connection(); cursor = conn.cursor()
+    cursor.execute("SELECT model_name FROM models WHERE model_name = ?", (model_name,))
+    if not cursor.fetchone():
+        conn.close(); raise HTTPException(status_code=404, detail="Model not found")
+    try:
+        cursor.execute("DELETE FROM models WHERE model_name = ?", (model_name,)); conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally: conn.close()
+    return {"status": "ok"}
 
 # (NEW) API Endpoint
 @app.post("/chat/{chat_id}/generate")
@@ -1295,13 +1540,69 @@ async def generate_response(chat_id: str, request: GenerateRequest):
     # For now, pass them directly, assuming frontend sends reasonable values
     filtered_gen_args = request.generation_args or {}
 
+    # If character_id provided, prefer embedded model fields
+    embedded_model_override = None
+    if request.character_id:
+        try:
+            conn_char = get_db_connection(); cur_char = conn_char.cursor()
+            cur_char.execute("SELECT model_name, model_provider, model_identifier, model_supports_images, preferred_model FROM characters WHERE character_id = ?", (request.character_id,))
+            char_row = cur_char.fetchone(); conn_char.close()
+            if char_row:
+                if char_row['model_name']:
+                    embedded_model_override = char_row['model_name']
+                elif char_row['preferred_model']:
+                    embedded_model_override = char_row['preferred_model']
+        except Exception as e:
+            print(f"[Gen] Embedded model lookup failed: {e}")
+
+    if embedded_model_override:
+        request.model_name = embedded_model_override
+    else:
+        # Canonicalize provided model_name case-insensitively to stored key (legacy path)
+        try:
+            conn_norm = get_db_connection(); cur_norm = conn_norm.cursor()
+            cur_norm.execute("SELECT model_name FROM models WHERE lower(model_name) = lower(?)", (request.model_name,))
+            row_norm = cur_norm.fetchone(); conn_norm.close()
+            if row_norm:
+                request.model_name = row_norm['model_name']
+            else:
+                print(f"[Gen] Warning: model '{request.model_name}' not found in DB (case-insensitive lookup).")
+        except Exception as e:
+            print(f"[Gen] Model normalization lookup failed: {e}")
+
+    # Resolve runtime local model name if requested
+    resolved_model_name = request.model_name
+    if request.resolve_local_runtime_model:
+        try:
+            # Query DB for provider of current model_name (fallback to request.model_name if not found)
+            conn = get_db_connection(); cursor = conn.cursor()
+            cursor.execute("SELECT provider FROM models WHERE model_name = ?", (request.model_name,))
+            row = cursor.fetchone(); conn.close()
+            provider_val = row['provider'] if row else None
+            if provider_val and provider_val.lower() == 'local':
+                import requests
+                resp = requests.get(f"{api_keys_config.get('local_base_url', 'http://127.0.0.1:8080')}/v1/models", timeout=2)
+                if resp.ok:
+                    data = resp.json()
+                    runtime_name = None
+                    if isinstance(data, dict):
+                        if 'models' in data and isinstance(data['models'], list) and data['models']:
+                            first = data['models'][0]; runtime_name = first.get('name') or first.get('model')
+                        elif 'data' in data and isinstance(data['data'], list) and data['data']:
+                            first = data['data'][0]; runtime_name = first.get('id')
+                    if runtime_name: resolved_model_name = runtime_name
+        except Exception as e:
+            print(f"[Gen] Runtime local model resolution failed: {e}")
+
     stream_generator = _perform_generation_stream(
         chat_id=chat_id,
         parent_message_id=request.parent_message_id,
-        model_name=request.model_name,
+        model_name=resolved_model_name,
         gen_args=filtered_gen_args,
         tools_enabled=request.tools_enabled, # <-- Pass the flag
-        abort_event=abort_event
+        abort_event=abort_event,
+        cot_start_tag=request.cot_start_tag,
+        cot_end_tag=request.cot_end_tag
     )
 
     return StreamingResponse(stream_generator, media_type="text/event-stream")
@@ -1324,62 +1625,172 @@ async def abort_generation(chat_id: str):
 
     return {"status": "ok", "message": "Abort signal sent."}
 
-@app.post("/chat/create_character", response_model=Dict[str, str])
-async def create_character(character: Character):
+@app.post("/character", response_model=Dict[str, str])
+async def create_character_v2(character: Character):
+    """Create a new character with embedded model fields (legacy preferred_model kept for compat)."""
     character_id = str(uuid.uuid4())
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection(); cursor = conn.cursor()
     try:
-        cursor.execute("INSERT INTO characters (character_id, character_name, sysprompt, settings) VALUES (?, ?, ?, ?)",
-                       (character_id, character.character_name, character.sysprompt, json.dumps(character.settings or {})))
+        # Normalize casing for model_name if provided
+        model_name_norm = character.model_name or character.preferred_model
+        if model_name_norm:
+            cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE lower(model_name) = lower(?)", (model_name_norm,))
+            found = cursor.fetchone()
+            if found and not character.model_provider:
+                # Use DB values to enrich if provider unspecified
+                character.model_name = found['model_name']
+                character.model_provider = found['provider']
+                character.model_identifier = found['model_identifier']
+                if character.model_supports_images is None:
+                    character.model_supports_images = bool(found['supports_images'])
+        cursor.execute(
+            """INSERT INTO characters (character_id, character_name, sysprompt, preferred_model, preferred_model_supports_images,
+                model_name, model_provider, model_identifier, model_supports_images, cot_start_tag, cot_end_tag, settings)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                character_id,
+                character.character_name,
+                character.sysprompt,
+                character.preferred_model or character.model_name,
+                1 if (character.preferred_model_supports_images or character.model_supports_images) else 0,
+                character.model_name,
+                character.model_provider,
+                character.model_identifier,
+                1 if (character.model_supports_images) else 0 if character.model_supports_images is not None else None,
+                character.cot_start_tag,
+                character.cot_end_tag,
+                json.dumps(character.settings or {})
+            )
+        )
         conn.commit()
     except sqlite3.IntegrityError as e:
         conn.rollback()
-        if "UNIQUE constraint failed: characters.character_name" in str(e): raise HTTPException(status_code=409, detail=f"Character name '{character.character_name}' already exists.")
+        if "UNIQUE constraint failed: characters.character_name" in str(e):
+            raise HTTPException(status_code=409, detail=f"Character name '{character.character_name}' already exists.")
         raise HTTPException(status_code=400, detail=f"Failed to create character: {e}")
-    finally: conn.close()
+    finally:
+        conn.close()
     return {"character_id": character_id}
 
-@app.get("/chat/list_characters")
-async def list_characters():
+@app.get("/characters")
+async def list_characters_v2():
+    """List all characters including embedded model data and CoT tags."""
     conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT character_id, character_name, sysprompt, settings FROM characters ORDER BY character_name")
-    characters = [{"character_id": row["character_id"], "character_name": row["character_name"], "sysprompt": row["sysprompt"], "settings": json.loads(row["settings"]) if row["settings"] else {}} for row in cursor.fetchall()]
+    cursor.execute("""
+        SELECT character_id, character_name, sysprompt,
+               preferred_model, preferred_model_supports_images,
+               model_name, model_provider, model_identifier, model_supports_images,
+               cot_start_tag, cot_end_tag, settings
+        FROM characters ORDER BY character_name
+    """)
+    characters = []
+    for row in cursor.fetchall():
+        settings_obj = json.loads(row["settings"]) if row["settings"] else {}
+        characters.append({
+            "character_id": row["character_id"],
+            "character_name": row["character_name"],
+            "sysprompt": row["sysprompt"],
+            "preferred_model": row["preferred_model"],
+            "preferred_model_supports_images": bool(row["preferred_model_supports_images"]),
+            "model_name": row["model_name"],
+            "model_provider": row["model_provider"],
+            "model_identifier": row["model_identifier"],
+            "model_supports_images": bool(row["model_supports_images"]) if row["model_supports_images"] is not None else None,
+            "cot_start_tag": row["cot_start_tag"],
+            "cot_end_tag": row["cot_end_tag"],
+            "settings": settings_obj
+        })
     conn.close(); return characters
 
-@app.get("/chat/get_character/{character_id}")
-async def get_character(character_id: str):
+@app.get("/character/{character_id}")
+async def get_character_v2(character_id: str):
+    """Retrieve a single character with embedded model data."""
     conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT character_id, character_name, sysprompt, settings FROM characters WHERE character_id = ?", (character_id,))
-    char_data = cursor.fetchone(); conn.close()
-    if not char_data: raise HTTPException(status_code=404, detail="Character not found")
-    return {"character_id": char_data["character_id"], "character_name": char_data["character_name"], "sysprompt": char_data["sysprompt"], "settings": json.loads(char_data["settings"]) if char_data["settings"] else {}}
+    cursor.execute("""
+        SELECT character_id, character_name, sysprompt,
+               preferred_model, preferred_model_supports_images,
+               model_name, model_provider, model_identifier, model_supports_images,
+               cot_start_tag, cot_end_tag, settings
+        FROM characters WHERE character_id = ?
+    """, (character_id,))
+    row = cursor.fetchone(); conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Character not found")
+    return {
+        "character_id": row["character_id"],
+        "character_name": row["character_name"],
+        "sysprompt": row["sysprompt"],
+        "preferred_model": row["preferred_model"],
+        "preferred_model_supports_images": bool(row["preferred_model_supports_images"]),
+        "model_name": row["model_name"],
+        "model_provider": row["model_provider"],
+        "model_identifier": row["model_identifier"],
+        "model_supports_images": bool(row["model_supports_images"]) if row["model_supports_images"] is not None else None,
+        "cot_start_tag": row["cot_start_tag"],
+        "cot_end_tag": row["cot_end_tag"],
+        "settings": json.loads(row["settings"]) if row["settings"] else {}
+    }
 
-@app.put("/chat/update_character/{character_id}")
-async def update_character(character_id: str, character: UpdateCharacterRequest):
+@app.put("/character/{character_id}")
+async def update_character_v2(character_id: str, update: UpdateCharacterRequest):
+    """Update a character. Fields not provided are left unchanged."""
     conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT character_id FROM characters WHERE character_id = ?", (character_id,))
-    if not cursor.fetchone(): conn.close(); raise HTTPException(status_code=404, detail="Character not found")
+    cursor.execute("SELECT character_id, character_name, sysprompt, preferred_model, preferred_model_supports_images, model_name, model_provider, model_identifier, model_supports_images, cot_start_tag, cot_end_tag, settings FROM characters WHERE character_id = ?", (character_id,))
+    existing = cursor.fetchone()
+    if not existing:
+        conn.close(); raise HTTPException(status_code=404, detail="Character not found")
+
+    # Build updated values
+    new_name = update.character_name if update.character_name is not None else existing["character_name"]
+    new_sysprompt = update.sysprompt if update.sysprompt is not None else existing["sysprompt"]
+    new_pref_model = update.preferred_model if update.preferred_model is not None else existing["preferred_model"]
+    new_pref_model_supports = existing["preferred_model_supports_images"] if update.preferred_model_supports_images is None else (1 if update.preferred_model_supports_images else 0)
+    # Embedded model updates (fallback to preferred if provided only there)
+    new_model_name = update.model_name if update.model_name is not None else existing['model_name'] or new_pref_model
+    new_model_provider = update.model_provider if update.model_provider is not None else existing['model_provider']
+    new_model_identifier = update.model_identifier if update.model_identifier is not None else existing['model_identifier']
+    new_model_supports_images = existing['model_supports_images'] if update.model_supports_images is None else (1 if update.model_supports_images else 0)
+    new_cot_start = update.cot_start_tag if update.cot_start_tag is not None else existing["cot_start_tag"]
+    new_cot_end = update.cot_end_tag if update.cot_end_tag is not None else existing["cot_end_tag"]
+    existing_settings = json.loads(existing["settings"]) if existing["settings"] else {}
+    if update.settings is not None:
+        # Replace entirely; or could merge if desired
+        new_settings = update.settings
+    else:
+        new_settings = existing_settings
     try:
-        cursor.execute("UPDATE characters SET character_name = ?, sysprompt = ?, settings = ? WHERE character_id = ?",
-                       (character.character_name, character.sysprompt, json.dumps(character.settings or {}), character_id))
+        cursor.execute(
+            """UPDATE characters SET character_name = ?, sysprompt = ?, preferred_model = ?, preferred_model_supports_images = ?,
+                       model_name = ?, model_provider = ?, model_identifier = ?, model_supports_images = ?,
+                       cot_start_tag = ?, cot_end_tag = ?, settings = ? WHERE character_id = ?""",
+            (new_name, new_sysprompt, new_pref_model, new_pref_model_supports,
+             new_model_name, new_model_provider, new_model_identifier, new_model_supports_images,
+             new_cot_start, new_cot_end, json.dumps(new_settings or {}), character_id)
+        )
         conn.commit()
     except sqlite3.IntegrityError as e:
         conn.rollback()
-        if "UNIQUE constraint failed: characters.character_name" in str(e): raise HTTPException(status_code=409, detail=f"Character name '{character.character_name}' already exists.")
+        if "UNIQUE constraint failed: characters.character_name" in str(e):
+            raise HTTPException(status_code=409, detail=f"Character name '{new_name}' already exists.")
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
-    except sqlite3.Error as e: conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
-    finally: conn.close()
+    finally:
+        conn.close()
     return {"status": "ok"}
 
-@app.delete("/chat/delete_character/{character_id}")
-async def delete_character(character_id: str):
+@app.delete("/character/{character_id}")
+async def delete_character_v2(character_id: str):
+    """Delete a character (v2)."""
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT character_id FROM characters WHERE character_id = ?", (character_id,))
-    if not cursor.fetchone(): conn.close(); raise HTTPException(status_code=404, detail="Character not found")
-    try: cursor.execute("DELETE FROM characters WHERE character_id = ?", (character_id,)); conn.commit()
-    except sqlite3.Error as e: conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
-    finally: conn.close()
+    if not cursor.fetchone():
+        conn.close(); raise HTTPException(status_code=404, detail="Character not found")
+    try:
+        cursor.execute("DELETE FROM characters WHERE character_id = ?", (character_id,))
+        conn.commit()
+    except sqlite3.Error as e:
+        conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
+    finally:
+        conn.close()
     return {"status": "ok"}
 
 @app.post("/chat/new_chat", response_model=Dict[str, str])

@@ -45,6 +45,8 @@
     *   **Characters:** Define custom characters with unique system prompts.
     *   **Themes:** Switch between different UI themes (Dark, White, Solarized, Claude White).
     *   **Generation Settings:** Adjust parameters like temperature, max tokens, min_p via a modal.
+    *   **Settings Modal:** Central modal with tabs (Main, Appearance, Generation, Tools, CoT Formatting).
+    *   **Configurable CoT Tags:** Change start/end tags for chain-of-thought blocks (default `<think>` / `</think>`).
 *   **Tool Usage (Beta):**
     *   Enable/disable tool usage for the LLM.
     *   Includes basic `search` (DuckDuckGo) and `add` tools.
@@ -65,3 +67,17 @@ before:
     *   It doesn't work well with thinking models and it doesn't continue after tool call with Anthropic ones.
 *   **Google Models:** hasn't been tested. The formatting logic is included, but functionality is not guaranteed.
 *   **Local Models:** Tested primarily with `llama.cpp`'s server.
+
+## New Settings & CoT Tag Customization
+
+The settings gear now opens a centered modal with tabs:
+
+* Main: toggle tools, autoscroll, default codeblock collapse.
+* Appearance: pick a theme (also duplicates prior theme modal functionality for convenience).
+* Generation: sliders for temperature, min_p, max_tokens, top_p.
+* Tools: read-only preview of the current tools system prompt fetched from backend.
+* CoT Formatting: customize the start/end tags that delimit the model's thought process.
+
+CoT tags are stored in `localStorage` under `cotTags` as `{start, end}`. They must differ; if identical, the end tag reverts to `</think>`. Existing stored messages remain unchanged; only new generations are parsed with updated tags.
+
+Autoscroll now uses a throttled animation-frame strategy to reduce jank with very fast streaming models.

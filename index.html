@@ -51,26 +51,6 @@
         </div>
     </div>
     
-    <div class="character-modal" id="character-modal">
-        <div class="character-modal-content">
-            <h3><span id="modal-title">Create New Character</span></h3>
-            <form id="character-form">
-                <input type="hidden" id="character-id" name="character_id">
-                <div class="form-group">
-                    <label for="character-name">Character Name</label>
-                    <input type="text" id="character-name" required>
-                </div>
-                <div class="form-group">
-                    <label for="character-sysprompt">System Prompt</label>
-                    <textarea id="character-sysprompt" rows="4" required></textarea>
-                </div>
-                <div class="form-actions">
-                    <button type="submit" id="submit-btn" class="btn-primary">Create</button>
-                    <button type="button" id="cancel-create-btn" class="btn-secondary">Cancel</button>
-                </div>
-            </form>
-        </div>
-    </div>
 
     <div class="gen-settings-modal" id="gen-settings-modal">
         <div class="gen-settings-modal-content">
@@ -153,26 +133,9 @@
                         <button class="input-button" id="file-button" title="Attach file">
                              <i class="bi bi-file-earmark-text"></i>
                         </button>
-                        <div class="character-select-container">
-                             <button class="input-control-btn" id="character-btn" title="Select Character">
-                                 <!-- Content is dynamically set by JS -->
-                                 <i class="bi bi-person"></i>
-                                 <span class="character-display-name">No Character</span>
-                             </button>
-                            <div class="character-popup" id="character-popup" style="display: none;">
-                                <select class="character-select" id="character-select">
-                                    <option value="">No Character</option>
-                                </select>
-                                <button class="character-create-btn btn-primary" id="character-create-btn">Create New</button>
-                                <button class="character-edit-btn btn-secondary" id="character-edit-btn" disabled>Edit Selected</button>
-                                <button class="character-delete-btn btn-danger" id="character-delete-btn" disabled>Delete Selected</button>
-                            </div>
-                        </div>
+                        <!-- Legacy character popup removed. Character selection now managed via Settings > Characters. -->
                     </div>
                     <div class="input-controls-right">
-                         <div class="model-select-container">
-                             <select class="model-select" id="model-select"></select>
-                         </div>
                         <button class="input-button" id="stop-button" style="display:none;" title="Stop generating">
                             <i class="bi bi-stop-fill"></i>
                         </button>
@@ -189,29 +152,126 @@
             <i class="bi bi-arrow-down"></i>
         </button>
 
-        <!-- Main Settings Popup (New) -->
-        <div class="settings-popup" id="main-settings-popup" style="display: none;">
-            <div class="settings-popup-header">
-                <h4>Settings</h4>
-                <button id="close-settings-popup-btn" class="popup-close-btn"><i class="bi bi-x"></i></button>
-            </div>
-            <div class="settings-popup-content">
-                <button class="settings-popup-item" id="gen-settings-btn" title="Generation Settings">
-                    <i class="bi bi-sliders"></i> <span>Generation Params</span>
-                </button>
-                <button class="settings-popup-item" id="appearance-settings-btn" title="Appearance Settings">
-                    <i class="bi bi-palette-fill"></i> <span>Appearance</span>
-                </button>
-                <hr>
-                <button class="settings-popup-item" id="toggle-tools-btn" title="Enable/Disable Tool Calls">
-                    <i class="bi bi-tools"></i> <span>Toggle Tools</span>
-                </button>
-                <button class="settings-popup-item" id="toggle-autoscroll-btn" title="Toggle Autoscroll">
-                    <i class="bi bi-unlock-fill"></i> <span>Autoscroll</span> <!-- Icon updated by JS -->
-                </button>
-                <button class="settings-popup-item" id="toggle-codeblocks-btn" title="Toggle Default Codeblock State">
-                    <i class="bi bi-arrows-collapse"></i> <span>Codeblocks Default</span> <!-- Icon updated by JS -->
-                </button>
+        <!-- Centered Settings Modal with Tabs -->
+        <div id="settings-modal" class="center-modal" style="display:none;">
+            <div class="center-modal-dialog">
+                <div class="center-modal-header">
+                    <h3>Settings</h3>
+                    <button id="close-settings-modal" class="popup-close-btn" title="Close"><i class="bi bi-x"></i></button>
+                </div>
+                <div class="settings-modal-tabs">
+                    <button class="settings-tab-btn active" data-tab="main">Main</button>
+                    <button class="settings-tab-btn" data-tab="appearance">Appearance</button>
+                    <button class="settings-tab-btn" data-tab="generation">Generation</button>
+                    <button class="settings-tab-btn" data-tab="tools">Tools</button>
+                    <button class="settings-tab-btn" data-tab="characters">Characters</button>
+                    <button class="settings-tab-btn" data-tab="models">Models</button>
+                    <button class="settings-tab-btn" data-tab="cot">CoT Formatting</button>
+                </div>
+                <div class="settings-modal-panels">
+                    <div class="settings-tab-panel active" data-panel="main">
+                        <div class="settings-row">
+                            <label for="main-toggle-tools">Enable Tool Calls</label>
+                            <input type="checkbox" id="main-toggle-tools" />
+                        </div>
+                        <div class="settings-row">
+                            <label for="main-toggle-autoscroll">Autoscroll During Generation</label>
+                            <input type="checkbox" id="main-toggle-autoscroll" />
+                        </div>
+                        <div class="settings-row">
+                            <label for="main-toggle-codeblocks">Collapse Codeblocks by Default</label>
+                            <input type="checkbox" id="main-toggle-codeblocks" />
+                        </div>
+                        <small class="settings-hint">These preferences are saved locally.</small>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="appearance">
+                        <p class="settings-section-title">Theme</p>
+                        <div class="theme-options inline-theme-options">
+                            <button class="theme-option" data-theme="white">White</button>
+                            <button class="theme-option" data-theme="solarized">Solarized</button>
+                            <button class="theme-option" data-theme="dark">Dark</button>
+                            <button class="theme-option" data-theme="claude_white">Claude White</button>
+                            <button class="theme-option" data-theme="gpt_dark">GPT Dark</button>
+                        </div>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="generation">
+                        <div class="gen-setting">
+                            <label>Temperature (0 to 2)</label>
+                            <div class="slider-container">
+                                <input type="range" id="temp-slider" min="0" max="2" step="0.01" value="0.7">
+                                <span id="temp-value">0.7</span>
+                                <label><input type="checkbox" id="temp-none"> None</label>
+                            </div>
+                        </div>
+                        <div class="gen-setting">
+                            <label>Min P (0 to 0.5)</label>
+                            <div class="slider-container">
+                                <input type="range" id="minp-slider" min="0" max="0.5" step="0.01" value="0.05">
+                                <span id="minp-value">0.05</span>
+                                <label><input type="checkbox" id="minp-none"> None</label>
+                            </div>
+                        </div>
+                        <div class="gen-setting">
+                            <label>Max Tokens (1 to 8192)</label>
+                            <div class="slider-container">
+                                <input type="range" id="maxt-slider" min="1" max="8192" step="1" value="1024">
+                                <span id="maxt-value">1024</span>
+                                <label><input type="checkbox" id="maxt-none"> None</label>
+                            </div>
+                        </div>
+                        <div class="gen-setting">
+                            <label>Top P (0 to 1.0)</label>
+                            <div class="slider-container">
+                                <input type="range" id="topp-slider" min="0" max="1.0" step="0.01" value="1.0">
+                                <span id="topp-value">1.0</span>
+                                <label><input type="checkbox" id="topp-none"> None</label>
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button id="apply-gen-settings" class="btn-primary">Apply</button>
+                        </div>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="tools">
+                        <p class="settings-section-title">Tools Prompt (read-only)</p>
+                        <pre id="tools-prompt-preview" class="tools-prompt-preview">Loading...</pre>
+                        <small class="settings-hint">Tool enabling is in Main tab. Prompt fetched from backend.</small>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="characters">
+                        <div class="characters-manager">
+                            <div class="characters-toolbar">
+                                <button id="characters-create-btn" class="btn-primary">Create Character</button>
+                                <button id="characters-refresh-btn" class="btn-secondary">Refresh</button>
+                            </div>
+                            <div id="characters-list" class="characters-list empty-state">Loading characters...</div>
+                            <small class="settings-hint">Characters bundle system prompt, preferred model, and optional CoT tags.</small>
+                        </div>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="models">
+                        <div class="models-manager">
+                            <div class="models-toolbar">
+                                <button id="models-create-btn" class="btn-primary">Add Model</button>
+                                <button id="models-refresh-btn" class="btn-secondary">Refresh</button>
+                            </div>
+                            <div id="models-list" class="models-list empty-state">Loading models...</div>
+                            <small class="settings-hint">Models are stored in the database. Local provider runtime name is probed dynamically.</small>
+                        </div>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="cot">
+                        <p class="settings-section-title">Chain-of-Thought Formatting</p>
+                        <div class="settings-row">
+                            <label for="cot-start-tag">Start Tag</label>
+                            <input type="text" id="cot-start-tag" placeholder="<think>" />
+                        </div>
+                        <div class="settings-row">
+                            <label for="cot-end-tag">End Tag</label>
+                            <input type="text" id="cot-end-tag" placeholder="</think>" />
+                        </div>
+                        <div class="form-actions">
+                            <button id="cot-save-btn" class="btn-primary">Save CoT Tags</button>
+                        </div>
+                        <small class="settings-hint">Existing messages keep original tags. New generations use updated tags. Tags are literal (no regex).</small>
+                    </div>
+                </div>
             </div>
         </div>
 
