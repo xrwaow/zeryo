@@ -8,10 +8,11 @@ import yaml
 import sqlite3
 import httpx # <-- NEW: For async requests to LLM providers
 import asyncio # <-- NEW: For cancellation
+import html
 from enum import Enum
 from contextlib import asynccontextmanager
-from typing import List, Dict, Any, Optional, Union, AsyncGenerator
-from fastapi import FastAPI, HTTPException, Request
+from typing import List, Dict, Any, Optional, AsyncGenerator, Callable, Tuple
+from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse # <-- NEW: For SSE
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ValidationError
@@ -165,7 +166,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-TOOL_CALL_REGEX = re.compile(r'<tool\s+name="(\w+)"((?:\s+\w+="[^"]*")+)\s*\/>')
+TOOL_CALL_REGEX = re.compile(r'<tool_call\s+name="([\w\-.]+)"(?:\s+id="([\w\-]+)")?\s*>(.*?)</tool_call>', re.DOTALL)
 
 ACTIVE_GENERATIONS: Dict[str, asyncio.Event] = {}
 
@@ -298,76 +299,67 @@ class GenerateRequest(BaseModel):
     character_id: Optional[str] = None
     cot_start_tag: Optional[str] = None
     cot_end_tag: Optional[str] = None
+    enabled_tool_names: Optional[List[str]] = None
     resolve_local_runtime_model: bool = False
 
-# --- Tool Implementation ---
-import tools
-
-def tool_add(a: Union[float, str], b: Union[float, str]) -> str:
-    """
-    Calculates the sum of two numbers, a and b.
-    Use this tool whenever you need to perform addition.
-    Arguments:
-        a (int): The first number.
-        b (int): The second number.
-    """
-    try:
-        num_a = float(a)
-        num_b = float(b)
-        result = num_a + num_b
-        return f"The sum of {num_a} and {num_b} is {result}."
-    except ValueError:
-        return f"Error: Could not add '{a}' and '{b}'. Both arguments must be valid numbers."
-    except Exception as e:
-        return f"Error performing addition: {e}"
-
-
+from tools import TOOL_REGISTRY, TOOL_DEFINITIONS
 # --- Tool Registry and Descriptions ---
-from tools import search
-
-TOOL_REGISTRY = {
-    "add": tool_add,
-    "search": search,
-}
 
 TOOLS_AVAILABLE: List[ToolDefinition] = [
-    ToolDefinition(
-        name="add",
-        description=tool_add.__doc__.strip().split('\n')[0], # First line
-        parameters={
-            "a": {"type": "int", "description": "The first number"},
-            "b": {"type": "int", "description": "The second number"}
-        }
-    ),
-    ToolDefinition(
-        name="search",
-        description=search.__doc__.strip().split('\n')[0],
-        parameters={
-            "query": {"type": "str", "description": "The search query string."}
-        }
-    ),
+    ToolDefinition(**tool_def) for tool_def in TOOL_DEFINITIONS
 ]
 
+
+def resolve_tools_subset(tool_names: Optional[List[str]]) -> Tuple[List[ToolDefinition], Dict[str, Callable[..., Any]]]:
+    if tool_names is None:
+        subset = TOOLS_AVAILABLE
+    else:
+        names_lower = {name.lower() for name in tool_names}
+        subset = [tool for tool in TOOLS_AVAILABLE if tool.name.lower() in names_lower]
+
+    registry = {tool.name: TOOL_REGISTRY[tool.name] for tool in subset if tool.name in TOOL_REGISTRY}
+    return subset, registry
+
 def format_tools_for_prompt(tools: List[ToolDefinition]) -> str:
-    """ Formats tool definitions into a string for the system prompt. """
+    """ Formats tool definitions into a MCP-compatible string for the system prompt. """
     if not tools:
         return ""
 
-    prompt = "You have access to the following tools. Use them when appropriate by emitting XML-like tags:\n"
-    prompt += "<tools>\n"
+    lines = [
+        "Model Context Protocol Tool Instructions:",
+        #"- To invoke a tool, respond with a message that contains only a single <tool_call> block.",
+        "- To invoke a tool, respond with a single <tool_call> block.",
+        "- The block must wrap a JSON object with the arguments you intend to send.",
+        #"- Do not include natural language before or after the block.",
+        "Example format:",
+        "<tool_call name=\"tool_name\">",
+        "{",
+        "  \"arguments\": { ... }",
+        "}",
+        "</tool_call>",
+    "",
+    "Available tools:"
+    ]
+
     for tool in tools:
-        prompt += f'  <tool name="{tool.name}" description="{tool.description}">\n'
-        prompt += "    <parameters>\n"
-        for param_name, param_info in tool.parameters.items():
-             prompt += f'      <parameter name="{param_name}" type="{param_info.get("type", "any")}" description="{param_info.get("description", "")}" />\n'
-        prompt += "    </parameters>\n"
-        # *** FIXED: Simplified and corrected example usage string generation ***
-        param_examples = " ".join([f'{p}="[value]"' for p in tool.parameters])
-        prompt += f'    Example Usage: <tool name="{tool.name}" {param_examples} />\n'
-        prompt += "  </tool>\n"
-    prompt += "</tools>\n"
-    prompt += "Only use the tools listed above. Format your tool usage exactly as shown in the example usage."
-    return prompt
+        lines.append(f"- {tool.name}: {tool.description}")
+        if tool.parameters:
+            lines.append("  Arguments:")
+            for param_name, param_info in tool.parameters.items():
+                arg_type = param_info.get("type", "any")
+                arg_desc = param_info.get("description", "")
+                lines.append(f"    - {param_name} ({arg_type}): {arg_desc}")
+        example_args = {param: f"<{param}>" for param in tool.parameters.keys()}
+        example_payload = json.dumps({"arguments": example_args}, indent=4)
+        lines.append(f"  Example call:")
+        lines.append(f"    <tool_call name=\"{tool.name}\">")
+        for example_line in example_payload.splitlines():
+            lines.append(f"      {example_line}")
+        lines.append("    </tool_call>")
+        lines.append("")
+
+    lines.append("Always provide valid JSON inside the tool_call block and include every required argument.")
+    return "\n".join(lines).strip()
 
 
 # Database Helper Functions
@@ -758,7 +750,8 @@ async def _perform_generation_stream(
     tools_enabled: bool,
     abort_event: asyncio.Event,
     cot_start_tag: Optional[str] = None,
-    cot_end_tag: Optional[str] = None
+    cot_end_tag: Optional[str] = None,
+    enabled_tool_names: Optional[List[str]] = None
 ) -> AsyncGenerator[str, None]:
     """
     Performs LLM generation, handles streaming, tool calls, saving distinct messages, and abortion.
@@ -778,6 +771,9 @@ async def _perform_generation_stream(
     think_open_tag = cot_start_tag if cot_start_tag else "<think>"
     think_close_tag = (cot_end_tag if cot_end_tag else "</think>") + "\n"
 
+    active_tool_defs: List[ToolDefinition] = []
+    active_tool_registry: Dict[str, Callable[..., Any]] = {}
+
     try:
         conn_check = get_db_connection()
         cursor_check = conn_check.cursor()
@@ -796,7 +792,14 @@ async def _perform_generation_stream(
 
         tool_system_prompt_text = ""
         if tools_enabled:
-            tool_system_prompt_text = format_tools_for_prompt(TOOLS_AVAILABLE)
+            active_tool_defs, active_tool_registry = resolve_tools_subset(enabled_tool_names)
+            if enabled_tool_names and not active_tool_defs:
+                print(f"[Gen Tools] Warning: No registered tools match requested names: {enabled_tool_names}")
+            if not active_tool_registry:
+                print("[Gen Tools] No active tools after filtering; disabling tool usage for this generation.")
+                tools_enabled = False
+            else:
+                tool_system_prompt_text = format_tools_for_prompt(active_tool_defs)
 
         effective_system_prompt = (system_prompt_text + ("\n\n" + tool_system_prompt_text if tool_system_prompt_text else "")).strip()
         
@@ -861,6 +864,9 @@ async def _perform_generation_stream(
             # Reset per LLM call, tool calls might append to current_turn_content_accumulated from previous segment
             # current_turn_content_accumulated = "" # This was reset outside, should be fine.
             detected_tool_call_info = None 
+            native_tool_call_accumulators: Dict[str, Dict[str, Any]] = {}
+            native_tool_call_order: List[str] = []
+            native_tool_call_chunk_emitted = False
             # is_done_signal_from_llm: Indicates the current LLM call has finished sending content.
             # For Google, it's when ']' of the array is processed or stream ends.
             # For OpenAI, it's when "data: [DONE]" is received.
@@ -980,10 +986,34 @@ async def _perform_generation_stream(
 
                                 try:
                                     data = json.loads(data_str)
-                                    delta = data.get("choices", [{}])[0].get("delta", {})
-                                    content_chunk = delta.get("content")
-                                    reasoning_chunk = delta.get("reasoning") # OpenRouter specific
-                                    potential_tool_calls = delta.get("tool_calls") # OpenAI native
+                                    choice = data.get("choices", [{}])[0]
+                                    delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                                    finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+                                    content_chunk = delta.get("content") if isinstance(delta, dict) else None
+                                    reasoning_chunk = delta.get("reasoning") if isinstance(delta, dict) else None # OpenRouter specific
+                                    potential_tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else None # OpenAI native
+                                    if potential_tool_calls and isinstance(potential_tool_calls, list):
+                                        for idx_tc, tool_delta in enumerate(potential_tool_calls):
+                                            if not isinstance(tool_delta, dict):
+                                                continue
+                                            call_id = tool_delta.get("id") or f"tool_native_{len(native_tool_call_order) + idx_tc}"
+                                            function_info = tool_delta.get("function") or {}
+                                            if tool_delta.get("type") and tool_delta.get("type") != "function":
+                                                continue
+                                            accumulator = native_tool_call_accumulators.setdefault(call_id, {
+                                                "name": None,
+                                                "arguments_chunks": []
+                                            })
+                                            call_name = function_info.get("name")
+                                            if call_name:
+                                                accumulator["name"] = call_name
+                                            arguments_fragment = function_info.get("arguments")
+                                            if arguments_fragment:
+                                                accumulator["arguments_chunks"].append(arguments_fragment)
+                                            if call_id not in native_tool_call_order:
+                                                native_tool_call_order.append(call_id)
+                                    elif potential_tool_calls is not None and not isinstance(potential_tool_calls, list):
+                                        print(f"[Gen Tool] Warning: Unexpected tool_calls payload type: {type(potential_tool_calls)}")
 
                                     processed_yield_openai = ""; processed_save_openai = ""
                                     if reasoning_chunk:
@@ -997,7 +1027,9 @@ async def _perform_generation_stream(
                                         current_turn_content_accumulated += processed_save_openai
 
                                     if content_chunk:
-                                        if backend_is_streaming_reasoning:
+                                        content_chunk_stripped = content_chunk.lstrip() if isinstance(content_chunk, str) else ""
+                                        chunk_is_tool_markup = content_chunk_stripped.startswith("<tool_call") or content_chunk_stripped.startswith("<tool_result")
+                                        if backend_is_streaming_reasoning and not chunk_is_tool_markup:
                                             processed_yield_openai = think_close_tag + content_chunk; processed_save_openai = think_close_tag + content_chunk
                                             backend_is_streaming_reasoning = False
                                         else:
@@ -1007,21 +1039,75 @@ async def _perform_generation_stream(
                                         current_turn_content_accumulated += processed_save_openai
                                     
                                     # --- Manual Tool Call Detection (for non-Google, if tools_enabled and no native calls) ---
-                                    if not potential_tool_calls and tools_enabled:
-                                        match = TOOL_CALL_REGEX.search(current_turn_content_accumulated) # Search in *accumulated* content
-                                        if match:
-                                            tool_name = match.group(1); args_str = match.group(2); raw_tag = match.group(0)
-                                            args = {k: v for k, v in re.findall(r'(\w+)="([^"]*)"', args_str)}
-                                            tool_call_id_manual = f"tool_{uuid.uuid4().hex[:8]}"
-                                            detected_tool_call_info = {"name": tool_name, "arguments": args, "raw_tag": raw_tag, "id": tool_call_id_manual, "type": "manual"}
-                                            
-                                            # Remove tag from content to be saved for assistant's text part
-                                            current_turn_content_accumulated = current_turn_content_accumulated[:match.start()]
-                                            if backend_is_streaming_reasoning: # Close think block if open
-                                                yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-                                                full_response_content_for_frontend += "</think>\n"
-                                                current_turn_content_accumulated += "</think>\n"
-                                                backend_is_streaming_reasoning = False
+                                    if not potential_tool_calls and tools_enabled and '</tool_call>' in current_turn_content_accumulated:
+                                        last_match = None
+                                        for potential_match in TOOL_CALL_REGEX.finditer(current_turn_content_accumulated):
+                                            last_match = potential_match
+                                        if last_match:
+                                            raw_tag = last_match.group(0)
+                                            tool_name = last_match.group(1)
+                                            tag_supplied_id = last_match.group(2)
+                                            payload_str = (last_match.group(3) or "").strip()
+
+                                            parsed_payload: Optional[Dict[str, Any]] = None
+                                            tool_args: Dict[str, Any] = {}
+                                            parse_error: Optional[Exception] = None
+                                            if payload_str:
+                                                try:
+                                                    parsed_payload = json.loads(payload_str)
+                                                    if not isinstance(parsed_payload, dict):
+                                                        raise ValueError("Tool call payload must be a JSON object")
+                                                    candidate_args = parsed_payload.get("arguments")
+                                                    if candidate_args is None:
+                                                        candidate_args = parsed_payload.get("input", parsed_payload)
+                                                    if isinstance(candidate_args, dict):
+                                                        tool_args = candidate_args
+                                                    else:
+                                                        raise ValueError("Tool call payload must contain an 'arguments' object")
+                                                except Exception as parse_err:
+                                                    parse_error = parse_err
+                                                    tool_args = {}
+                                                    print(f"[Gen Tool] Warning: failed to parse tool call payload for '{tool_name}': {parse_err}")
+                                            else:
+                                                tool_args = {}
+
+                                            tool_call_id_manual = tag_supplied_id
+                                            if not tool_call_id_manual and parsed_payload and isinstance(parsed_payload.get("id"), str):
+                                                tool_call_id_manual = parsed_payload.get("id")
+                                            if not tool_call_id_manual:
+                                                tool_call_id_manual = f"tool_{uuid.uuid4().hex[:8]}"
+
+                                            pre_tool_text = current_turn_content_accumulated[:last_match.start()]
+                                            trailing_text = current_turn_content_accumulated[last_match.end():]
+                                            if trailing_text.strip():
+                                                print(f"[Gen Tool] Warning: trailing text detected after tool call for '{tool_name}'. It will be deferred.")
+
+                                            current_turn_content_accumulated = pre_tool_text
+                                            detected_tool_call_info = {
+                                                "name": tool_name,
+                                                "arguments": tool_args,
+                                                "raw_tag": raw_tag,
+                                                "id": tool_call_id_manual,
+                                                "type": "manual",
+                                                "payload": parsed_payload,
+                                                "payload_raw": payload_str,
+                                                "parse_error": parse_error,
+                                                "trailing_text": trailing_text,
+                                                "enabled": tool_name in active_tool_registry,
+                                                "pre_text": pre_tool_text,
+                                                "calls": [
+                                                    {
+                                                        "name": tool_name,
+                                                        "id": tool_call_id_manual,
+                                                        "arguments": tool_args,
+                                                        "raw_payload": payload_str,
+                                                        "raw_tag": raw_tag,
+                                                        "parse_error": parse_error,
+                                                        "enabled": tool_name in active_tool_registry
+                                                    }
+                                                ]
+                                            }
+
                                             break # Break from aiter_lines to process this tool call
                                     
                                     # --- TODO: Handle Native OpenAI Tool Calls (potential_tool_calls) ---
@@ -1029,6 +1115,65 @@ async def _perform_generation_stream(
                                     #   ... populate detected_tool_call_info ...
                                     #   ... possibly yield tool_call events to frontend ...
                                     #   ... break to process tool call ...
+
+                                    if finish_reason == "tool_calls" and detected_tool_call_info is None and native_tool_call_order:
+                                        native_calls_info = []
+                                        raw_tag_fragments: List[str] = []
+                                        for queued_call_id in native_tool_call_order:
+                                            accumulator = native_tool_call_accumulators.get(queued_call_id)
+                                            if not accumulator:
+                                                continue
+                                            name = accumulator.get("name") or "unknown_tool"
+                                            arguments_text = "".join(accumulator.get("arguments_chunks", []))
+                                            parsed_args: Dict[str, Any] = {}
+                                            payload_for_raw = arguments_text
+                                            parse_error: Optional[Exception] = None
+                                            if arguments_text:
+                                                try:
+                                                    parsed_payload_obj = json.loads(arguments_text)
+                                                    if isinstance(parsed_payload_obj, dict):
+                                                        candidate_args = parsed_payload_obj.get("arguments", parsed_payload_obj)
+                                                        parsed_args = candidate_args if isinstance(candidate_args, dict) else {"value": candidate_args}
+                                                    else:
+                                                        parsed_args = {"value": parsed_payload_obj}
+                                                except Exception as parse_err_native:
+                                                    parse_error = parse_err_native
+                                                    parsed_args = {}
+                                            raw_tag_native = f'<tool_call name="{name}" id="{queued_call_id}">{payload_for_raw}</tool_call>'
+                                            raw_tag_fragments.append(raw_tag_native)
+                                            native_calls_info.append({
+                                                "name": name,
+                                                "id": queued_call_id,
+                                                "arguments": parsed_args,
+                                                "raw_payload": payload_for_raw,
+                                                "raw_tag": raw_tag_native,
+                                                "parse_error": parse_error,
+                                                "enabled": name in active_tool_registry
+                                            })
+
+                                        if native_calls_info:
+                                            combined_raw_tags = "".join(raw_tag_fragments)
+                                            if not native_tool_call_chunk_emitted:
+                                                try:
+                                                    yield f"data: {json.dumps({'type': 'chunk', 'data': combined_raw_tags})}\n\n"
+                                                    full_response_content_for_frontend += combined_raw_tags
+                                                except Exception as emit_err:
+                                                    print(f"[Gen Tool] Warning: Failed to stream native tool_call chunk: {emit_err}")
+                                                native_tool_call_chunk_emitted = True
+                                            detected_tool_call_info = {
+                                                "name": native_calls_info[0]["name"],
+                                                "arguments": native_calls_info[0]["arguments"],
+                                                "raw_tag": combined_raw_tags,
+                                                "id": native_calls_info[0]["id"],
+                                                "type": "native",
+                                                "payload_raw": native_calls_info[0]["raw_payload"],
+                                                "parse_error": native_calls_info[0].get("parse_error"),
+                                                "trailing_text": "",
+                                                "enabled": native_calls_info[0]["enabled"],
+                                                "pre_text": current_turn_content_accumulated,
+                                                "calls": native_calls_info
+                                            }
+                                            break
 
                                 except json.JSONDecodeError as json_err: print(f"Warning: JSON decode error for OpenAI stream: {json_err} - Data: '{data_str}'")
                                 except Exception as parse_err: stream_error = parse_err; break # from aiter_lines
@@ -1088,16 +1233,40 @@ async def _perform_generation_stream(
                     print("[Gen Info] Final LLM segment empty after full processing, not saving.")
                 generation_completed_normally = True
                 break # Exit the outer generation (tool call) loop
-            else: # Manual Tool Call Detected (currently only for non-Google providers)
-                tool_call_count += 1
-                tool_name = detected_tool_call_info["name"]; tool_args = detected_tool_call_info["arguments"]
-                tool_call_id = detected_tool_call_info["id"]; raw_tag = detected_tool_call_info.get("raw_tag", "")
-                print(f"[Gen Tool] Executing Tool {tool_call_count}: '{tool_name}' (ID: {tool_call_id})")
+            else: # Tool call(s) detected
+                tool_calls_info = detected_tool_call_info.get("calls") if isinstance(detected_tool_call_info, dict) else None
+                if not tool_calls_info:
+                    tool_calls_info = [{
+                        "name": detected_tool_call_info.get("name"),
+                        "id": detected_tool_call_info.get("id"),
+                        "arguments": detected_tool_call_info.get("arguments", {}),
+                        "raw_payload": detected_tool_call_info.get("payload_raw"),
+                        "raw_tag": detected_tool_call_info.get("raw_tag", ""),
+                        "parse_error": detected_tool_call_info.get("parse_error"),
+                        "enabled": detected_tool_call_info.get("enabled", True)
+                    }]
 
-                # Content *before* the tool tag + the tag itself for saving assistant's message part 1
-                # `current_turn_content_accumulated` already has content before the tag.
-                content_for_assistant_msg_with_call = current_turn_content_accumulated + raw_tag
-                db_tool_calls_data = [{"id": tool_call_id, "type": "function", "function": {"name": tool_name, "arguments": json.dumps(tool_args)}}]
+                combined_raw_tags = "".join(call.get("raw_tag", "") for call in tool_calls_info if call)
+                pre_text = detected_tool_call_info.get("pre_text", current_turn_content_accumulated)
+                content_for_assistant_msg_with_call = (pre_text or "") + combined_raw_tags
+
+                db_tool_calls_data = []
+                for call in tool_calls_info:
+                    call_args = call.get("arguments") or {}
+                    if not isinstance(call_args, dict):
+                        call_args = {"value": call_args}
+                    try:
+                        arguments_json_str = json.dumps(call_args)
+                    except TypeError:
+                        arguments_json_str = json.dumps({})
+                    db_tool_calls_data.append({
+                        "id": call.get("id") or f"tool_{uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": call.get("name"),
+                            "arguments": arguments_json_str
+                        }
+                    })
 
                 message_id_A = create_message(
                     chat_id=chat_id, role=MessageRole.LLM, content=content_for_assistant_msg_with_call,
@@ -1105,43 +1274,63 @@ async def _perform_generation_stream(
                     tool_calls=db_tool_calls_data, commit=True
                 )
                 last_saved_message_id = message_id_A
-                print(f"Saved Assistant Message (Part 1 - Manual Call): {message_id_A}")
+                print(f"Saved Assistant Message (Tool Call Detected): {message_id_A}")
 
-                # Add to history for next LLM turn: assistant message *without* raw tag, but with tool_calls object
-                assistant_msg_for_history = {"role": "assistant", "message": current_turn_content_accumulated if current_turn_content_accumulated else "", "tool_calls": db_tool_calls_data}
+                assistant_msg_for_history = {
+                    "role": "assistant",
+                    "message": pre_text if pre_text else "",
+                    "tool_calls": db_tool_calls_data
+                }
                 current_llm_history.append(assistant_msg_for_history)
 
-                yield f"data: {json.dumps({'type': 'tool_start', 'name': tool_name, 'args': tool_args})}\n\n"
+                for idx_call, call in enumerate(tool_calls_info):
+                    tool_name = call.get("name")
+                    tool_args = call.get("arguments") or {}
+                    tool_call_id = db_tool_calls_data[idx_call]["id"]
+                    tool_enabled = call.get("enabled", False)
 
-                tool_result_content_str = None; tool_error_str = None
-                try:
-                    tool_function = TOOL_REGISTRY[tool_name]
-                    if asyncio.iscoroutinefunction(tool_function): result = await tool_function(**tool_args)
-                    else: result = await asyncio.to_thread(tool_function, **tool_args)
-                    tool_result_content_str = str(result)
-                except KeyError: tool_error_str = f"Tool '{tool_name}' not found."
-                except Exception as e_tool: tool_error_str = f"Error executing tool '{tool_name}': {e_tool}"; traceback.print_exc()
-                
-                result_for_llm_context = tool_result_content_str if not tool_error_str else tool_error_str
+                    yield f"data: {json.dumps({'type': 'tool_start', 'name': tool_name, 'args': tool_args})}\n\n"
 
-                message_id_B = create_message(
-                    chat_id=chat_id, role=MessageRole.TOOL, content=result_for_llm_context,
-                    parent_message_id=message_id_A, model_name=None,
-                    tool_call_id=tool_call_id, commit=True
-                )
-                last_saved_message_id = message_id_B
-                print(f"Saved Tool Result Message (Part 2 - Manual): {message_id_B}")
+                    tool_result_content_str = None
+                    tool_error_str = None
+                    tool_function = active_tool_registry.get(tool_name) if tool_enabled else None
+                    if not tool_function:
+                        tool_error_str = f"Tool '{tool_name}' is not enabled or not available."
+                    else:
+                        try:
+                            if asyncio.iscoroutinefunction(tool_function):
+                                result = await tool_function(**tool_args)
+                            else:
+                                result = await asyncio.to_thread(tool_function, **tool_args)
+                            tool_result_content_str = str(result)
+                        except Exception as e_tool:
+                            tool_error_str = f"Error executing tool '{tool_name}': {e_tool}"
+                            traceback.print_exc()
+                    if tool_error_str:
+                        print(f"[Gen Tool] {tool_error_str}")
 
-                tool_msg_for_history = {"role": "tool", "message": result_for_llm_context, "tool_call_id": tool_call_id}
-                current_llm_history.append(tool_msg_for_history)
-                
-                # Send tool result tag for frontend display (not for LLM context here, that's handled by tool_msg_for_history)
-                result_tag_for_frontend = f'<tool_result tool_name="{tool_name}" result="{json.dumps(result_for_llm_context)[1:-1]}" />'
-                yield f"data: {json.dumps({'type': 'chunk', 'data': result_tag_for_frontend})}\n\n"
-                yield f"data: {json.dumps({'type': 'tool_end', 'name': tool_name, 'result': tool_result_content_str, 'error': tool_error_str})}\n\n"
-                
-                current_turn_content_accumulated = "" # Reset for next LLM segment after tool use
-                detected_tool_call_info = None # Reset for next iteration of the while loop
+                    result_for_llm_context = tool_result_content_str if not tool_error_str else tool_error_str
+
+                    message_id_B = create_message(
+                        chat_id=chat_id, role=MessageRole.TOOL, content=result_for_llm_context,
+                        parent_message_id=message_id_A, model_name=None,
+                        tool_call_id=tool_call_id, commit=True
+                    )
+                    last_saved_message_id = message_id_B
+                    print(f"Saved Tool Result Message: {message_id_B}")
+
+                    tool_msg_for_history = {"role": "tool", "message": result_for_llm_context, "tool_call_id": tool_call_id}
+                    current_llm_history.append(tool_msg_for_history)
+
+                    escaped_result_text = html.escape(result_for_llm_context or "")
+                    status_attr = ' status="error"' if tool_error_str else ''
+                    result_tag_for_frontend = f'<tool_result name="{tool_name}"{status_attr}>{escaped_result_text}</tool_result>'
+                    yield f"data: {json.dumps({'type': 'chunk', 'data': result_tag_for_frontend})}\n\n"
+                    yield f"data: {json.dumps({'type': 'tool_end', 'name': tool_name, 'result': tool_result_content_str, 'error': tool_error_str})}\n\n"
+
+                tool_call_count += len(tool_calls_info)
+                current_turn_content_accumulated = ""
+                detected_tool_call_info = None
         # --- End of Outer Generation (tool call) Loop ---
 
     except (HTTPException, ValueError, asyncio.CancelledError) as e_outer:
@@ -1602,7 +1791,8 @@ async def generate_response(chat_id: str, request: GenerateRequest):
         tools_enabled=request.tools_enabled, # <-- Pass the flag
         abort_event=abort_event,
         cot_start_tag=request.cot_start_tag,
-        cot_end_tag=request.cot_end_tag
+        cot_end_tag=request.cot_end_tag,
+        enabled_tool_names=request.enabled_tool_names
     )
 
     return StreamingResponse(stream_generator, media_type="text/event-stream")
@@ -1970,10 +2160,17 @@ async def set_active_branch(chat_id: str, parent_message_id: str, request: SetAc
 # --- NEW Tool Endpoints ---
 
 @app.get("/tools/system_prompt")
-async def get_tools_system_prompt():
+async def get_tools_system_prompt(names: Optional[List[str]] = Query(default=None)):
     """ Returns the formatted system prompt describing available tools. """
-    prompt = format_tools_for_prompt(TOOLS_AVAILABLE)
+    subset, _ = resolve_tools_subset(names)
+    prompt = format_tools_for_prompt(subset)
     return {"prompt": prompt}
+
+
+@app.get("/tools")
+async def list_tools():
+    """Returns metadata for all registered tools."""
+    return {"tools": [tool.dict() for tool in TOOLS_AVAILABLE]}
 
 @app.post("/tools/execute")
 async def execute_tool(request: ExecuteToolRequest):
@@ -1985,8 +2182,10 @@ async def execute_tool(request: ExecuteToolRequest):
         raise HTTPException(status_code=404, detail=f"Tool '{tool_name}' not found.")
     tool_function = TOOL_REGISTRY[tool_name]
     try:
-        # Basic attempt to execute by unpacking args
-        result = tool_function(**arguments)
+        if asyncio.iscoroutinefunction(tool_function):
+            result = await tool_function(**arguments)
+        else:
+            result = await asyncio.to_thread(tool_function, **arguments)
         print(f"Tool '{tool_name}' result: {result}")
         return {"result": str(result)}
     except TypeError as e:

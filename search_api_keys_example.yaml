@@ -1,0 +1,3 @@
+# Dedicated Google Custom Search credentials used by the search tool.
+SEARCH_API_KEY: "AIza-yourcustomsearchapikey"
+SEARCH_ENGINE_ID: "your-search-engine-id"

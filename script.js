@@ -20,6 +20,10 @@ const sendButton = document.getElementById('send-button');
 const imageButton = document.getElementById('image-button');
 const fileButton = document.getElementById('file-button');
 const stopButton = document.getElementById('stop-button');
+const characterSelectButton = document.getElementById('character-select-button');
+const characterDropdown = document.getElementById('character-dropdown');
+const characterDropdownClose = document.getElementById('character-dropdown-close');
+const characterDropdownList = document.getElementById('character-dropdown-list');
 const clearChatBtn = document.getElementById('delete-chat-btn');
 const newChatBtn = document.getElementById('new-chat-btn');
 const sidebarToggle = document.getElementById('sidebar-toggle');
@@ -55,7 +59,8 @@ function querySettingsModalElements() {
         cotStartInput: document.getElementById('cot-start-tag'),
         cotEndInput: document.getElementById('cot-end-tag'),
         cotSaveBtn: document.getElementById('cot-save-btn'),
-        toolsPromptPreview: document.getElementById('tools-prompt-preview')
+        toolsPromptPreview: document.getElementById('tools-prompt-preview'),
+        toolsListContainer: document.getElementById('tools-checkbox-list')
     };
 }
 
@@ -105,6 +110,7 @@ function refreshCharactersUI(preserveScroll=true) {
     listEl.classList.remove('empty-state');
     listEl.textContent = 'Loading...';
     fetchCharacters(true).then(chars => {
+        state.charactersCache = Array.isArray(chars) ? chars : [];
         if (!chars.length) {
             listEl.classList.add('empty-state');
             listEl.textContent = 'No characters yet.';
@@ -145,6 +151,7 @@ async function activateCharacter(characterId) {
         updateActiveCharacterUI();
         return;
     }
+
     try {
         const resp = await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
             method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({character_id: characterId})
@@ -160,6 +167,85 @@ async function activateCharacter(characterId) {
         console.error('Activate character failed:', e);
         addSystemMessage('Failed to activate character: '+ e.message, 'error');
     }
+}
+
+function hideCharacterDropdown() {
+    if (!characterDropdown) return;
+    characterDropdown.style.display = 'none';
+    characterDropdown.style.left = '';
+}
+
+function positionCharacterDropdown() {
+    if (!characterDropdown || !characterSelectButton) return;
+    if (characterDropdown.style.display === 'none') return;
+    const container = characterSelectButton.closest('.input-container');
+    if (!container) return;
+    const buttonRect = characterSelectButton.getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    const dropdownRect = characterDropdown.getBoundingClientRect();
+    if (!buttonRect || !containerRect || !dropdownRect) return;
+    const padding = 8;
+    let left = buttonRect.left - containerRect.left + (buttonRect.width - dropdownRect.width) / 2;
+    const maxLeft = containerRect.width - dropdownRect.width - padding;
+    left = Math.max(padding, Math.min(left, maxLeft < padding ? padding : maxLeft));
+    characterDropdown.style.left = `${left}px`;
+}
+
+// Populate the character dropdown in input area
+async function populateCharacterDropdown() {
+    if (!characterDropdownList) return;
+
+    characterDropdownList.innerHTML = '<div class="character-dropdown-loading">Loading characters…</div>';
+    await fetchCharacters(false);
+    const chars = Array.isArray(state.charactersCache) ? state.charactersCache : [];
+
+    characterDropdownList.innerHTML = '';
+
+    chars.forEach(char => {
+        const item = document.createElement('div');
+        item.className = 'character-dropdown-item';
+        if (state.currentCharacterId === char.character_id) {
+            item.classList.add('active');
+        }
+
+        item.innerHTML = `
+            <div class="character-dropdown-item-main">
+                <div class="character-dropdown-item-name">${escapeHtml(char.character_name)}</div>
+                <div class="character-dropdown-item-model">${escapeHtml(char.preferred_model || 'No model set')}</div>
+            </div>
+            ${state.currentCharacterId === char.character_id ? '<i class="bi bi-check-circle-fill character-dropdown-item-icon"></i>' : ''}
+        `;
+
+        item.addEventListener('click', () => {
+            activateCharacter(char.character_id);
+            hideCharacterDropdown();
+        });
+
+        characterDropdownList.appendChild(item);
+    });
+
+    if (!chars.length) {
+        const emptyNotice = document.createElement('div');
+        emptyNotice.className = 'character-dropdown-empty';
+        emptyNotice.textContent = 'No characters available. Create one in Settings.';
+        characterDropdownList.appendChild(emptyNotice);
+    }
+
+    const createItem = document.createElement('div');
+    createItem.className = 'character-dropdown-item character-dropdown-action';
+    createItem.innerHTML = `
+        <div class="character-dropdown-item-main">
+            <div class="character-dropdown-item-name"><i class="bi bi-plus-circle"></i> Create Character</div>
+            <div class="character-dropdown-item-model">Open character editor</div>
+        </div>
+    `;
+    createItem.addEventListener('click', () => {
+        hideCharacterDropdown();
+        openCharacterEditor();
+    });
+    characterDropdownList.appendChild(createItem);
+
+    requestAnimationFrame(positionCharacterDropdown);
 }
 
 function openCharacterEditor(existing=null) {
@@ -322,6 +408,8 @@ const state = {
         local: null,
     },
     toolsEnabled: false, // Flag to control tool usage
+    availableTools: [], // Catalog fetched from backend
+    enabledToolNames: new Set(), // Subset selected in UI
     toolCallPending: false,
     toolContinuationContext: null,
     currentToolCallId: null, // Track the ID of the current tool call being processed
@@ -367,6 +455,23 @@ function updateActiveCharacterUI() {
             const activateBtn = row.querySelector('.character-activate-btn');
             if (activateBtn) activateBtn.innerHTML = id === state.currentCharacterId ? '<i class="bi bi-check2-circle"></i>' : '<i class="bi bi-play-circle"></i>';
         });
+    }
+    
+    // Update character select button appearance
+    if (characterSelectButton) {
+        const nameSpan = characterSelectButton.querySelector('.character-select-name');
+        const activeChar = state.currentCharacterId ? state.charactersCache.find(c => c.character_id === state.currentCharacterId) : null;
+        if (activeChar) {
+            if (nameSpan) {
+                nameSpan.textContent = activeChar.character_name;
+            }
+            characterSelectButton.title = `Active: ${activeChar.character_name}`;
+        } else {
+            if (nameSpan) {
+                nameSpan.textContent = 'Character';
+            }
+            characterSelectButton.title = 'Select Character';
+        }
     }
 
     // Refresh active system prompt text (fetch only if we lack character cache entry sysprompt) - we already keep sysprompt locally when listing
@@ -478,23 +583,160 @@ marked.setOptions({
     }
 });
 
-// Regex for detecting simple tool calls
-const TOOL_CALL_REGEX = /<tool\s+name="(\w+)"((?:\s+\w+="[^"]*")+)\s*\/>/g;
+// Regex for detecting MCP-style tool call blocks
+const TOOL_CALL_REGEX = /<tool_call\s+name="([\w.-]+)"(?:\s+id="([\w-]+)")?\s*>([\s\S]*?)<\/tool_call>/g;
 // Regex for detecting tool result tags
-const TOOL_RESULT_TAG_REGEX = /<tool_result\s+tool_name="(\w+)"\s+result="((?:[^"]|&quot;)*)"\s*\/>/g;
+const TOOL_RESULT_TAG_REGEX = /<tool_result\s+name="([\w.-]+)"(?:\s+status="([\w-]+)")?\s*>([\s\S]*?)<\/tool_result>/g;
 // Combined Regex for parsing message content in buildContentHtml
-const TOOL_TAG_REGEX = /(<tool\s+name="(\w+)"([^>]*)\/>)|(<tool_result\s+tool_name="(\w+)"\s+result="((?:[^"]|&quot;)*)"\s*\/>)/g;
+const TOOL_TAG_REGEX = /(<tool_call\s+name="([\w.-]+)"(?:\s+id="([\w-]+)")?\s*>([\s\S]*?)<\/tool_call>)|(<tool_result\s+name="([\w.-]+)"(?:\s+status="([\w-]+)")?\s*>([\s\S]*?)<\/tool_result>)/g;
 
+function isAssistantToolOnlyMessage(message) {
+    if (!message) return false;
 
-// Helper to parse attributes string like ' a="1" b="2"' into an object
-function parseAttributes(attrsString) {
-    const attributes = {};
-    const attrRegex = /(\w+)="([^"]*)"/g;
-    let match;
-    while ((match = attrRegex.exec(attrsString)) !== null) {
-        attributes[match[1]] = match[2];
+    const text = String(message.message || '').trim();
+    const hasAttachments = Array.isArray(message.attachments) && message.attachments.length > 0;
+    const hasToolCalls = Array.isArray(message.tool_calls) && message.tool_calls.length > 0;
+
+    if (hasAttachments || hasToolCalls) {
+        return false;
     }
-    return attributes;
+
+    if (!text) {
+        return true;
+    }
+
+    const hasToolContent = /<tool_call\b|<tool_result\b/i.test(text);
+    if (hasToolContent) {
+        return false;
+    }
+
+    const hasThinkContent = /<think\b/i.test(text);
+    if (hasThinkContent) {
+        return false;
+    }
+
+    const stripped = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    return stripped.length === 0;
+}
+
+
+function parseToolCallPayload(payloadText) {
+    const trimmed = (payloadText || '').trim();
+    if (!trimmed) {
+        return { arguments: {}, raw: '', payload: null, error: null, inferredId: null };
+    }
+
+    try {
+        const parsed = JSON.parse(trimmed);
+        let argsCandidate = parsed?.arguments;
+        if (argsCandidate === undefined) {
+            argsCandidate = parsed?.input !== undefined ? parsed.input : parsed;
+        }
+        const args = (argsCandidate && typeof argsCandidate === 'object' && !Array.isArray(argsCandidate)) ? argsCandidate : {};
+        const inferredId = typeof parsed?.id === 'string' ? parsed.id : null;
+        return { arguments: args, raw: trimmed, payload: parsed, error: null, inferredId };
+    } catch (err) {
+        console.warn('Failed to parse tool call payload as JSON:', err, payloadText);
+        return { arguments: {}, raw: trimmed, payload: null, error: err instanceof Error ? err.message : String(err), inferredId: null };
+    }
+}
+
+const __toolEntityDecoder = document.createElement('textarea');
+function decodeHtmlEntities(text) {
+    if (!text) return '';
+    __toolEntityDecoder.innerHTML = text;
+    return __toolEntityDecoder.value;
+}
+
+function getEnabledToolNamesArray() {
+    return Array.from(state.enabledToolNames || []);
+}
+
+function persistEnabledToolNames() {
+    try {
+        localStorage.setItem('enabledToolNames', JSON.stringify(getEnabledToolNamesArray()));
+    } catch (error) {
+        console.warn('Failed to persist enabled tool names:', error);
+    }
+}
+
+function reconcileEnabledToolSelection() {
+    const availableNames = new Set((state.availableTools || []).map(tool => tool.name));
+    const currentNames = Array.from(state.enabledToolNames || []);
+    const filtered = currentNames.filter(name => availableNames.has(name));
+    if (filtered.length === 0 && availableNames.size > 0) {
+        state.enabledToolNames = new Set(Array.from(availableNames));
+    } else {
+        state.enabledToolNames = new Set(filtered);
+    }
+    persistEnabledToolNames();
+}
+
+function updateToolsPromptPreviewDisplay() {
+    const previewEl = document.getElementById('tools-prompt-preview');
+    if (previewEl) {
+        previewEl.textContent = TOOLS_SYSTEM_PROMPT ? TOOLS_SYSTEM_PROMPT : 'No tools prompt loaded.';
+    }
+}
+
+function updateToolsCheckboxDisableState() {
+    document.querySelectorAll('#tools-checkbox-list input[type="checkbox"]').forEach(cb => {
+        cb.disabled = !state.toolsEnabled;
+    });
+}
+
+function renderToolsCheckboxList(container) {
+    if (!container) return;
+
+    container.innerHTML = '';
+    if (!state.availableTools || state.availableTools.length === 0) {
+        container.innerHTML = '<div class="tools-list-empty">No tools available.</div>';
+        return;
+    }
+
+    const sortedTools = [...state.availableTools].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    sortedTools.forEach(tool => {
+        const row = document.createElement('label');
+        row.className = 'tool-item';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = tool.name;
+        checkbox.checked = state.enabledToolNames.has(tool.name);
+        checkbox.disabled = !state.toolsEnabled;
+        checkbox.addEventListener('change', async () => {
+            if (checkbox.checked) {
+                state.enabledToolNames.add(tool.name);
+            } else {
+                state.enabledToolNames.delete(tool.name);
+            }
+            persistEnabledToolNames();
+            try {
+                await fetchToolsSystemPrompt(getEnabledToolNamesArray());
+            } catch (err) {
+                console.error('Failed to refresh tools prompt after toggle:', err);
+                addSystemMessage('Failed to refresh tools prompt after toggling a tool.', 'warning');
+            } finally {
+                updateToolsPromptPreviewDisplay();
+                updateEffectiveSystemPrompt();
+            }
+        });
+
+        const infoWrapper = document.createElement('div');
+        infoWrapper.className = 'tool-item-content';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'tool-item-name';
+        nameSpan.textContent = tool.name;
+        const descSpan = document.createElement('span');
+        descSpan.className = 'tool-item-description';
+        descSpan.textContent = tool.description || '';
+        infoWrapper.appendChild(nameSpan);
+        infoWrapper.appendChild(descSpan);
+
+        row.appendChild(checkbox);
+        row.appendChild(infoWrapper);
+        container.appendChild(row);
+    });
 }
 
 /**
@@ -1145,8 +1387,18 @@ function setupScrollListener() {
 }
 
 async function init() {
+    // Hydrate stored tool selections before fetching metadata
+    try {
+        const storedEnabledTools = JSON.parse(localStorage.getItem('enabledToolNames') || '[]');
+        if (Array.isArray(storedEnabledTools) && storedEnabledTools.length) {
+            state.enabledToolNames = new Set(storedEnabledTools.filter(name => typeof name === 'string'));
+        }
+    } catch (error) {
+        console.warn('Failed to parse stored enabled tool names:', error);
+    }
+
     await fetchProviderConfig();
-    await fetchToolsSystemPrompt();
+    await initializeToolsCatalog();
     await loadGenArgs();
     await fetchChats(); // Fetches the list of available chats
 
@@ -1194,9 +1446,19 @@ async function fetchProviderConfig() {
     }
 }
 
-async function fetchToolsSystemPrompt() {
+async function fetchToolsSystemPrompt(enabledNames = null) {
     try {
-        const response = await fetch(`${API_BASE}/tools/system_prompt`);
+        const params = new URLSearchParams();
+        if (Array.isArray(enabledNames)) {
+            const sanitizedNames = enabledNames.filter(name => typeof name === 'string' && name.trim());
+            if (sanitizedNames.length) {
+                sanitizedNames.forEach(name => params.append('names', name));
+            } else {
+                params.append('names', ''); // Explicitly request an empty tool subset
+            }
+        }
+        const url = params.toString() ? `${API_BASE}/tools/system_prompt?${params.toString()}` : `${API_BASE}/tools/system_prompt`;
+        const response = await fetch(url);
         if (!response.ok) throw new Error(`Failed to fetch tools prompt: ${response.statusText}`);
         const data = await response.json();
         TOOLS_SYSTEM_PROMPT = data.prompt || "";
@@ -1206,7 +1468,32 @@ async function fetchToolsSystemPrompt() {
         TOOLS_SYSTEM_PROMPT = "";
         addSystemMessage("Failed to fetch tool descriptions from backend.", "warning");
     }
+    updateToolsPromptPreviewDisplay();
     updateEffectiveSystemPrompt();
+}
+
+async function fetchToolsMetadata() {
+    try {
+        const response = await fetch(`${API_BASE}/tools`);
+        if (!response.ok) throw new Error(`Failed to fetch tools metadata: ${response.statusText}`);
+        const data = await response.json();
+        const tools = Array.isArray(data.tools) ? data.tools : [];
+    state.availableTools = tools;
+    reconcileEnabledToolSelection();
+    renderToolsCheckboxList(document.getElementById('tools-checkbox-list'));
+    updateToolsCheckboxDisableState();
+    } catch (error) {
+        console.error('Error fetching tools metadata:', error);
+    state.availableTools = [];
+    addSystemMessage('Failed to load tools metadata from backend.', 'warning');
+    renderToolsCheckboxList(document.getElementById('tools-checkbox-list'));
+    updateToolsCheckboxDisableState();
+    }
+}
+
+async function initializeToolsCatalog() {
+    await fetchToolsMetadata();
+    await fetchToolsSystemPrompt(getEnabledToolNamesArray());
 }
 
 async function loadGenArgs() {
@@ -1437,15 +1724,17 @@ function renderActiveMessages() {
         }
     }
 
-    // Render the tree starting from the roots
-    rootMessages.forEach(rootNode => renderBranch(rootNode));
+     // Render the tree starting from the roots
+     rootMessages.forEach(rootNode => renderBranch(rootNode));
 
-    // Post-rendering tasks
-    requestAnimationFrame(() => {
-         messagesWrapper.querySelectorAll('.message-content pre code').forEach(block => {
-            highlightRenderedCode(block.closest('pre'));
-         });
-    });
+     consolidateAssistantMessageGroups();
+
+     // Post-rendering tasks
+     requestAnimationFrame(() => {
+            messagesWrapper.querySelectorAll('.message-content pre code').forEach(block => {
+                highlightRenderedCode(block.closest('pre'));
+            });
+     });
 
     messagesWrapper.querySelectorAll('.assistant-row .message').forEach(messageDiv => {
         messageDiv.style.minHeight = '';
@@ -1458,6 +1747,158 @@ function renderActiveMessages() {
             lastAssistantMessageDiv.style.minHeight = 'calc(-384px + 100dvh)';
         }
     }
+}
+
+function consolidateAssistantMessageGroups() {
+    if (!messagesWrapper) return;
+
+    const rows = Array.from(messagesWrapper.querySelectorAll('.message-row'));
+    const visited = new Set();
+
+    rows.forEach(startRow => {
+        const startId = startRow.dataset.messageId;
+        if (!startId || visited.has(startId)) return;
+        if (!startRow.classList.contains('assistant-row') || startRow.classList.contains('placeholder')) return;
+
+        const groupRows = [];
+        let currentRow = startRow;
+
+        while (currentRow) {
+            const currentId = currentRow.dataset.messageId;
+            if (!currentId) break;
+            if (groupRows.some(row => row.dataset.messageId === currentId)) break;
+
+            groupRows.push(currentRow);
+            visited.add(currentId);
+
+            const nextRow = currentRow.nextElementSibling;
+            if (!nextRow) break;
+
+            const nextId = nextRow.dataset.messageId;
+            if (nextId && visited.has(nextId)) break;
+
+            const isAssistant = nextRow.classList.contains('assistant-row') && !nextRow.classList.contains('placeholder');
+            const isTool = nextRow.classList.contains('tool-message');
+            const isLinked = nextRow.dataset.parentId === currentId;
+
+            if ((isAssistant || isTool) && isLinked) {
+                currentRow = nextRow;
+                continue;
+            }
+
+            break;
+        }
+
+        if (groupRows.length <= 1) {
+            return;
+        }
+
+        const baseRow = [...groupRows].reverse().find(row => row.classList.contains('assistant-row') && !row.classList.contains('placeholder'));
+        if (!baseRow) return;
+
+        const baseContent = baseRow.querySelector('.message-content');
+        if (!baseContent) return;
+
+        const originalRaw = baseContent.dataset.raw || '';
+        const baseParentId = groupRows[0].dataset.parentId || baseRow.dataset.parentId || '';
+
+        const segmentElements = groupRows.map(row => {
+            const segmentContent = row.querySelector('.message-content');
+            if (!segmentContent) return null;
+
+            const segmentWrapper = document.createElement('div');
+            segmentWrapper.className = 'assistant-group-segment';
+            segmentWrapper.dataset.segmentMessageId = row.dataset.messageId || '';
+            const isToolSegment = row.classList.contains('tool-message');
+            segmentWrapper.dataset.segmentRole = isToolSegment ? 'tool' : 'assistant';
+            if (isToolSegment) {
+                segmentWrapper.classList.add('assistant-group-segment--tool');
+            } else {
+                segmentWrapper.classList.add('assistant-group-segment--assistant');
+            }
+
+            while (segmentContent.firstChild) {
+                segmentWrapper.appendChild(segmentContent.firstChild);
+            }
+
+            return segmentWrapper;
+        }).filter(Boolean);
+
+        if (!segmentElements.length) return;
+
+        baseContent.innerHTML = '';
+        segmentElements.forEach(fragment => baseContent.appendChild(fragment));
+        baseContent.dataset.raw = originalRaw;
+
+        baseRow.dataset.parentId = baseParentId;
+        baseRow.dataset.groupMessageIds = groupRows.map(row => row.dataset.messageId || '').join(',');
+        baseRow.classList.add('assistant-group-row');
+        baseRow.classList.remove('has-tool-followup');
+
+        groupRows.forEach(row => {
+            if (row !== baseRow) {
+                row.remove();
+            }
+        });
+    });
+}
+
+function findRowForMessageId(messageId) {
+    if (!messageId || !messagesWrapper) return null;
+    const directRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageId}"]`);
+    if (directRow) return directRow;
+
+    const groupedRows = Array.from(messagesWrapper.querySelectorAll('.message-row[data-group-message-ids]'));
+    return groupedRows.find(row => row.dataset.groupMessageIds?.split(',').map(id => id.trim()).includes(messageId)) || null;
+}
+
+function resolveMessageGroupInfo(targetMessageId) {
+    const row = findRowForMessageId(targetMessageId);
+    if (!row) {
+        return {
+            row: null,
+            groupIds: [targetMessageId],
+            primaryMessageId: targetMessageId,
+            finalMessageId: targetMessageId
+        };
+    }
+
+    const groupAttr = row.dataset.groupMessageIds;
+    if (!groupAttr) {
+        return {
+            row,
+            groupIds: [targetMessageId],
+            primaryMessageId: targetMessageId,
+            finalMessageId: targetMessageId
+        };
+    }
+
+    const idList = groupAttr.split(',').map(id => id.trim()).filter(Boolean);
+    const primaryMessageId = idList[0] || targetMessageId;
+    const finalMessageId = idList[idList.length - 1] || targetMessageId;
+    return {
+        row,
+        groupIds: idList,
+        primaryMessageId,
+        finalMessageId
+    };
+}
+
+function findClosestMessageRow(messageId) {
+    if (!messageId || !messagesWrapper) return null;
+    const visited = new Set();
+    let currentId = messageId;
+
+    while (currentId && !visited.has(currentId)) {
+        visited.add(currentId);
+        const candidateRow = findRowForMessageId(currentId);
+        if (candidateRow) {
+            return candidateRow;
+        }
+        const msg = state.messages.find(m => m.message_id === currentId);
+        currentId = msg?.parent_message_id || null;
+    }
+    return null;
 }
 
 function setCodeBlockCollapsedState(wrapper, shouldBeCollapsed) {
@@ -1644,16 +2085,35 @@ function buildContentHtml(targetContentDiv, messageText) {
             }
 
             const toolCallTag = match[1];
-            const toolResultTag = match[4];
+            const toolResultTag = match[5];
 
             if (toolCallTag) {
                 const toolName = match[2];
-                const attrsString = match[3] || "";
-                segments.push({ type: 'tool', data: { name: toolName, args: parseAttributes(attrsString) } });
+                const toolIdAttr = match[3] || null;
+                const payloadRaw = match[4] || '';
+                const payloadInfo = parseToolCallPayload(payloadRaw);
+                const resolvedId = toolIdAttr || payloadInfo.inferredId || null;
+                segments.push({
+                    type: 'tool',
+                    data: {
+                        name: toolName,
+                        id: resolvedId,
+                        payloadInfo
+                    }
+                });
             } else if (toolResultTag) {
-                let resultString = match[6] || "";
-                resultString = resultString.replace(/&quot;/g, '"'); // Decode &quot; entities
-                segments.push({ type: 'result', data: resultString });
+                const resultName = match[6] || null;
+                const resultStatus = match[7] || null;
+                const resultBodyRaw = match[8] || '';
+                segments.push({
+                    type: 'result',
+                    data: {
+                        name: resultName,
+                        status: resultStatus,
+                        body: decodeHtmlEntities(resultBodyRaw),
+                        raw: resultBodyRaw
+                    }
+                });
             }
             lastIndex = TOOL_TAG_REGEX.lastIndex;
         }
@@ -1667,7 +2127,7 @@ function buildContentHtml(targetContentDiv, messageText) {
             if (segment.type === 'text') {
                 targetContentDiv.insertAdjacentHTML('beforeend', renderMarkdown(segment.data));
             } else if (segment.type === 'tool') {
-                renderToolCallPlaceholder(targetContentDiv, segment.data.name, segment.data.args);
+                renderToolCallPlaceholder(targetContentDiv, segment.data);
             } else if (segment.type === 'result') {
                 renderToolResult(targetContentDiv, segment.data);
             }
@@ -1773,7 +2233,10 @@ async function handleGenerateOrRegenerateFromUser(userMessageId) {
         }
         cleanupAfterGeneration();
          requestAnimationFrame(updateScrollButtonVisibility);
+
+        return;
     }
+
 }
 
 async function handleSaveAndSend(userMessageId, textareaElement) {
@@ -1845,13 +2308,20 @@ function addMessage(message) {
     contentDiv.className = 'message-content';
     contentDiv.dataset.raw = message.message || '';
 
-    const avatarActionsDiv = document.createElement('div');
-    avatarActionsDiv.className = 'message-avatar-actions';
-    const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'message-actions';
+    let avatarActionsDiv = null;
+    let actionsDiv = null;
+    const suppressAssistantActions = role === 'assistant' && isAssistantToolOnlyMessage(message);
+    const shouldCreateActions = role === 'user' || (role === 'assistant' && !suppressAssistantActions);
+
+    if (shouldCreateActions) {
+        avatarActionsDiv = document.createElement('div');
+        avatarActionsDiv.className = 'message-avatar-actions';
+        actionsDiv = document.createElement('div');
+        actionsDiv.className = 'message-actions';
+    }
 
     const branchInfo = state.activeBranchInfo[message.message_id];
-    if (branchInfo && branchInfo.totalBranches > 1) {
+    if (actionsDiv && branchInfo && branchInfo.totalBranches > 1) {
         const branchNav = document.createElement('div');
         branchNav.className = 'branch-nav';
         const prevBtn = document.createElement('button');
@@ -1905,7 +2375,7 @@ function addMessage(message) {
         }
         orderedButtons = [copyBtn, editBtn, genRegenBtn, deleteBtn];
 
-    } else if (role === 'assistant') {
+    } else if (role === 'assistant' && actionsDiv) {
         const genInfoBtn = document.createElement('button');
         genInfoBtn.className = 'message-action-btn gen-info-btn';
         genInfoBtn.innerHTML = '<i class="bi bi-info-circle"></i>';
@@ -1944,7 +2414,9 @@ function addMessage(message) {
         orderedButtons = [copyBtn, deleteBtn];
     }
 
-    orderedButtons.forEach(btn => actionsDiv.appendChild(btn));
+    if (actionsDiv) {
+        orderedButtons.forEach(btn => actionsDiv.appendChild(btn));
+    }
 
     // --- START OF FIX ---
     // Unified and simplified rendering logic for all message types.
@@ -1952,8 +2424,10 @@ function addMessage(message) {
     if (role === 'tool') {
         // Tool results are special and don't use markdown.
         renderToolResult(contentDiv, message.message || '[Empty Tool Result]');
+    } else if (role === 'assistant') {
+        buildContentHtml(contentDiv, message.message || '');
+        finalizeStreamingCodeBlocks(contentDiv);
     } else {
-        // For both 'user' and 'assistant', the process is the same.
         contentDiv.innerHTML = renderMarkdown(message.message || '');
     }
     // --- END OF FIX ---
@@ -1988,9 +2462,19 @@ function addMessage(message) {
         contentDiv.appendChild(attachmentsContainer);
     }
 
-    avatarActionsDiv.appendChild(actionsDiv);
-    messageDiv.appendChild(avatarActionsDiv);
+    if (avatarActionsDiv && actionsDiv) {
+        avatarActionsDiv.appendChild(actionsDiv);
+        messageDiv.appendChild(avatarActionsDiv);
+    }
     messageRow.appendChild(messageDiv);
+
+    if (role === 'tool') {
+        const previousRow = messagesWrapper.lastElementChild;
+        if (previousRow && previousRow.classList.contains('assistant-row')) {
+            previousRow.classList.add('has-tool-followup');
+        }
+    }
+
     messagesWrapper.appendChild(messageRow);
     return contentDiv;
 }
@@ -2208,6 +2692,56 @@ function setupEventListeners() {
     newChatBtn.addEventListener('click', startNewChat);
     imageButton.addEventListener('click', () => openFileSelector('image/*'));
     fileButton.addEventListener('click', () => openFileSelector('.txt,.py,.js,.ts,.html,.css,.json,.md,.yaml,.sql,.java,.c,.cpp,.cs,.go,.php,.rb,.swift,.kt,.rs,.toml'));
+    
+    // Character dropdown toggle
+    if (characterSelectButton && characterDropdown) {
+        characterSelectButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isVisible = characterDropdown.style.display === 'flex';
+            if (isVisible) {
+                hideCharacterDropdown();
+            } else {
+                characterDropdown.style.display = 'flex';
+                populateCharacterDropdown().catch(err => {
+                    console.error('Failed to populate character dropdown', err);
+                    if (characterDropdownList) {
+                        characterDropdownList.innerHTML = '<div class="character-dropdown-loading">Failed to load characters.</div>';
+                    }
+                });
+                positionCharacterDropdown();
+            }
+        });
+
+        if (characterDropdownClose) {
+            characterDropdownClose.addEventListener('click', (e) => {
+                e.stopPropagation();
+                hideCharacterDropdown();
+            });
+        }
+
+        // Close dropdown when clicking outside
+        document.addEventListener('click', (e) => {
+            if (characterDropdown && 
+                characterDropdown.style.display === 'flex' &&
+                !characterDropdown.contains(e.target) &&
+                !characterSelectButton.contains(e.target)) {
+                hideCharacterDropdown();
+            }
+        });
+
+        window.addEventListener('resize', () => {
+            if (characterDropdown.style.display === 'flex') {
+                positionCharacterDropdown();
+            }
+        });
+
+        window.addEventListener('scroll', () => {
+            if (characterDropdown.style.display === 'flex') {
+                positionCharacterDropdown();
+            }
+        }, true);
+    }
+    
     sidebarToggle.addEventListener('click', toggleSidebar);
     // removed global modelSelect listener
     document.addEventListener('paste', handlePaste);
@@ -2338,7 +2872,8 @@ function refreshSettingsModalState() {
         cotStartInput,
         cotEndInput,
         cotSaveBtn,
-        toolsPromptPreview
+        toolsPromptPreview,
+        toolsListContainer
     } = querySettingsModalElements();
 
     // Wire tab button clicks (idempotent by reassigning onclick)
@@ -2353,6 +2888,7 @@ function refreshSettingsModalState() {
             state.toolsEnabled = cbTools.checked;
             localStorage.setItem('toolsEnabled', state.toolsEnabled);
             updateEffectiveSystemPrompt();
+            updateToolsCheckboxDisableState();
             addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
         };
     }
@@ -2377,9 +2913,9 @@ function refreshSettingsModalState() {
     }
 
     // Tools prompt preview (read-only)
-    if (toolsPromptPreview) {
-        toolsPromptPreview.textContent = TOOLS_SYSTEM_PROMPT ? TOOLS_SYSTEM_PROMPT : 'No tools prompt loaded.';
-    }
+    renderToolsCheckboxList(toolsListContainer);
+    updateToolsCheckboxDisableState();
+    updateToolsPromptPreviewDisplay();
 
     // Load and display saved CoT tags
     let savedCot = null;
@@ -2422,12 +2958,18 @@ function setupToolToggle() {
             localStorage.setItem('toolsEnabled', state.toolsEnabled);
             console.log("Tools enabled:", state.toolsEnabled);
             updateEffectiveSystemPrompt();
+            const settingsCheckbox = document.getElementById('main-toggle-tools');
+            if (settingsCheckbox) settingsCheckbox.checked = state.toolsEnabled;
+            updateToolsCheckboxDisableState();
             addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
         });
     } else {
         console.warn("Tools toggle button not found; using saved toolsEnabled state only.");
     }
 
+    const settingsCheckbox = document.getElementById('main-toggle-tools');
+    if (settingsCheckbox) settingsCheckbox.checked = state.toolsEnabled;
+    updateToolsCheckboxDisableState();
     updateEffectiveSystemPrompt();
 }
 
@@ -2754,6 +3296,7 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
         character_id: state.currentCharacterId || null,
         cot_start_tag: cotTags.start,
         cot_end_tag: cotTags.end,
+        enabled_tool_names: toolsEnabled ? getEnabledToolNamesArray() : [],
         resolve_local_runtime_model: true // hint backend to fetch runtime local model name now
     };
 
@@ -3485,8 +4028,15 @@ function cleanupAfterGeneration() {
     console.log("Reset tool state flags in cleanupAfterGeneration.");
 }
 
-function renderToolCallPlaceholder(messageContentDiv, toolName, args) {
+function renderToolCallPlaceholder(messageContentDiv, toolData) {
     if (!messageContentDiv) return;
+
+    const toolName = toolData?.name || 'tool';
+    const callId = toolData?.id || toolData?.payloadInfo?.inferredId || null;
+    const payloadInfo = toolData?.payloadInfo || { arguments: {}, raw: '', error: null };
+    const args = payloadInfo.arguments || {};
+    const rawPayload = payloadInfo.raw || '';
+    const parseError = payloadInfo.error;
 
     const toolCallBlock = document.createElement('div');
     toolCallBlock.className = 'tool-call-block collapsed';
@@ -3498,7 +4048,8 @@ function renderToolCallPlaceholder(messageContentDiv, toolName, args) {
     const toolNameSpan = document.createElement('span');
     toolNameSpan.className = 'tool-header-name';
     const toolIcon = toolName === 'add' ? 'calculator' : (toolName === 'search' ? 'search' : 'tools');
-    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> Calling: ${toolName}`;
+    const callIdSuffix = callId ? ` <span class="tool-id">#${escapeHtml(callId)}</span>` : '';
+    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> Calling: ${escapeHtml(toolName)}${callIdSuffix}`;
 
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'tool-header-actions';
@@ -3515,27 +4066,37 @@ function renderToolCallPlaceholder(messageContentDiv, toolName, args) {
     const toolArgsDiv = document.createElement('div');
     toolArgsDiv.className = 'tool-arguments';
     try {
-        const argsString = typeof args === 'object' && args !== null
-            ? JSON.stringify(args, null, 2)
-            : String(args);
+    const hasArgs = args && Object.keys(args).length > 0;
+    const displayObject = hasArgs ? args : (!parseError && rawPayload ? JSON.parse(rawPayload) : {});
+        const argsString = JSON.stringify(displayObject, null, 2);
         const pre = document.createElement('pre');
         const code = document.createElement('code');
-        const lang = (typeof args === 'object' && args !== null) ? 'json' : 'plaintext';
-        code.className = `language-${lang}`;
+        code.className = 'language-json';
         code.textContent = argsString;
         try { hljs.highlightElement(code); }
-        catch(e) { console.warn("Error highlighting tool args:", e); }
+        catch (e) { console.warn('Error highlighting tool args:', e); }
         pre.appendChild(code);
         toolArgsDiv.appendChild(pre);
-    } catch {
-        toolArgsDiv.textContent = "[Invalid Arguments]";
+    } catch (err) {
+        toolArgsDiv.textContent = '[Invalid Arguments]';
+    }
+
+    if (parseError) {
+        const errorBanner = document.createElement('div');
+        errorBanner.className = 'tool-parse-error';
+        errorBanner.innerHTML = `<i class="bi bi-exclamation-triangle-fill"></i> ${escapeHtml(parseError)}`;
+        toolCallBlock.appendChild(errorBanner);
     }
     toolCallBlock.appendChild(toolArgsDiv);
     messageContentDiv.appendChild(toolCallBlock);
 }
 
-function renderToolResult(messageContentDiv, resultText) {
+function renderToolResult(messageContentDiv, resultData) {
     if (!messageContentDiv) return;
+
+    const toolName = resultData?.name || null;
+    const status = resultData?.status || null;
+    const resultText = typeof resultData?.body === 'string' ? resultData.body : (typeof resultData === 'string' ? resultData : '');
 
     const toolResultBlock = document.createElement('div');
     toolResultBlock.className = 'tool-result-block collapsed';
@@ -3545,12 +4106,13 @@ function renderToolResult(messageContentDiv, resultText) {
 
     const toolNameSpan = document.createElement('span');
     toolNameSpan.className = 'tool-header-name';
-    const isError = typeof resultText === 'string' &&
-                    (resultText.toLowerCase().startsWith('[error:') ||
-                     resultText.toLowerCase().startsWith('error:'));
+    const lowerText = (resultText || '').toLowerCase();
+    const isError = lowerText.startsWith('[error:') || lowerText.startsWith('error:');
     const iconClass = isError ? 'exclamation-circle-fill text-danger' : 'check-circle-fill';
     const titleText = isError ? 'Tool Error' : 'Tool Result';
-    toolNameSpan.innerHTML = `<i class="bi bi-${iconClass}"></i> ${titleText}`;
+    const nameFragment = toolName ? ` <span class="tool-id">${escapeHtml(toolName)}</span>` : '';
+    const statusFragment = status ? ` <span class="tool-status">(${escapeHtml(status)})</span>` : '';
+    toolNameSpan.innerHTML = `<i class="bi bi-${iconClass}"></i> ${titleText}${nameFragment}${statusFragment}`;
 
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'tool-header-actions';
@@ -3623,22 +4185,43 @@ function createPlaceholderMessageRow(tempId, parentId) {
 }
 
 function removeMessageAndDescendantsFromDOM(startMessageId) {
-    const startRow = messagesWrapper.querySelector(`.message-row[data-message-id="${startMessageId}"]`);
+    const startRow = findRowForMessageId(startMessageId);
     if (!startRow) {
         console.warn(`removeMessageAndDescendantsFromDOM: Start row ${startMessageId} not found.`);
         return;
     }
     const removedIds = new Set();
+
+    function gatherIdsForRow(rowElement) {
+        if (!rowElement) return [];
+        const groupAttr = rowElement.dataset.groupMessageIds;
+        if (groupAttr) {
+            return groupAttr.split(',').map(id => id.trim()).filter(Boolean);
+        }
+        const singleId = rowElement.dataset.messageId;
+        return singleId ? [singleId] : [];
+    }
+
     function removeRecursively(rowElement) {
         if (!rowElement) return;
-        const messageId = rowElement.dataset.messageId;
-        if (!messageId || removedIds.has(messageId)) return;
-        const childRows = messagesWrapper.querySelectorAll(`.message-row[data-parent-id="${messageId}"]`);
-        childRows.forEach(child => removeRecursively(child));
-        console.log(`Removing DOM row for message ${messageId}`);
+
+        const messageIdsForRow = gatherIdsForRow(rowElement);
+        if (messageIdsForRow.length === 0) {
+            console.warn('removeMessageAndDescendantsFromDOM: Row without identifiable message id encountered.');
+        }
+
+        messageIdsForRow.forEach(messageId => {
+            if (!messageId || removedIds.has(messageId)) return;
+            const childRows = messagesWrapper.querySelectorAll(`.message-row[data-parent-id="${messageId}"]`);
+            childRows.forEach(child => removeRecursively(child));
+            removedIds.add(messageId);
+        });
+
+        const logId = messageIdsForRow[messageIdsForRow.length - 1] || rowElement.dataset.messageId || 'unknown';
+        console.log(`Removing DOM row for message ${logId}`);
         rowElement.remove();
-        removedIds.add(messageId);
     }
+
     removeRecursively(startRow);
     console.log("Finished removing branch from DOM, removed IDs:", Array.from(removedIds));
 }
@@ -3666,16 +4249,22 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         return;
     }
 
-    const messageToRegen = state.messages.find(m => m.message_id === messageIdToRegen);
-    const parentMessage = messageToRegen?.parent_message_id
-        ? state.messages.find(m => m.message_id === messageToRegen.parent_message_id)
-        : null;
+    const groupInfo = resolveMessageGroupInfo(messageIdToRegen);
+    const finalMessage = state.messages.find(m => m.message_id === groupInfo.finalMessageId);
+    const primaryMessage = state.messages.find(m => m.message_id === groupInfo.primaryMessageId);
 
-    if (!messageToRegen || messageToRegen.role !== 'llm' || !parentMessage) {
+    if (!finalMessage || finalMessage.role !== 'llm') {
+        addSystemMessage("Can only regenerate assistant responses.", "error");
+        return;
+    }
+
+    const parentMessageId = primaryMessage?.parent_message_id || null;
+    const parentMessage = parentMessageId ? state.messages.find(m => m.message_id === parentMessageId) : null;
+    if (!parentMessage) {
         addSystemMessage("Can only regenerate assistant responses that have a parent.", "error");
         return;
     }
-    const parentMessageId = parentMessage.message_id;
+
     const modelNameToUse = getActiveCharacterModel();
     if (!modelNameToUse) {
         try { await fetchCharacters(true); } catch(e) { /* ignore */ }
@@ -3686,24 +4275,24 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         }
     }
 
-    console.log(`Regenerating from parent ${parentMessageId} (targeting llm message ${messageIdToRegen}, new branch: ${newBranch}) using model ${modelNameToUse}`);
+    console.log(`Regenerating from parent ${parentMessageId} (targeting llm message ${groupInfo.finalMessageId}, new branch: ${newBranch}) using model ${modelNameToUse}`);
     let assistantPlaceholderRow = null;
     const generationParentId = parentMessageId;
 
     try {
-        const parentRow = messagesWrapper.querySelector(`.message-row[data-message-id="${parentMessageId}"]`);
+        const parentRow = parentMessageId ? findClosestMessageRow(parentMessageId) : findClosestMessageRow(groupInfo.primaryMessageId);
         if (!parentRow) {
-             console.error(`Parent row ${parentMessageId} not found in DOM. Cannot place placeholder correctly.`);
-             addSystemMessage("Error: Parent message UI not found. Aborting regeneration.", "error");
-             await loadChat(currentChatId);
-             cleanupAfterGeneration();
-             return;
+            console.error(`Parent row ${parentMessageId ?? groupInfo.primaryMessageId} not found in DOM. Cannot place placeholder correctly.`);
+            addSystemMessage("Error: Parent message UI not found. Aborting regeneration.", "error");
+            await loadChat(currentChatId);
+            cleanupAfterGeneration();
+            return;
         }
 
         if (!newBranch) {
-            console.log(`Replacing: Deleting message branch starting with ${messageIdToRegen}.`);
-            removeMessageAndDescendantsFromDOM(messageIdToRegen);
-            const deleteSuccess = await deleteMessageFromBackend(currentChatId, messageIdToRegen);
+            console.log(`Replacing: Deleting message branch starting with ${groupInfo.primaryMessageId}.`);
+            removeMessageAndDescendantsFromDOM(groupInfo.primaryMessageId);
+            const deleteSuccess = await deleteMessageFromBackend(currentChatId, groupInfo.primaryMessageId);
             if (!deleteSuccess) {
                 addSystemMessage("Failed to delete old message from backend. Reloading chat.", "error");
                 await loadChat(currentChatId);
@@ -3711,7 +4300,7 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
                 return;
             }
             const descendantIds = new Set();
-            const queue = [messageIdToRegen];
+            const queue = [...groupInfo.groupIds];
             while(queue.length > 0) {
                 const currentId = queue.shift();
                 if (!currentId || descendantIds.has(currentId)) continue;
@@ -3731,7 +4320,7 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         } else {
             console.log(`Branching: Visually clearing current active branch from parent ${parentMessageId} before generating new one.`);
             const parentNodeInState = state.messages.find(m => m.message_id === parentMessageId);
-            if (parentNodeInState && parentNodeInState.child_message_ids && parentNodeInState.child_message_ids.length > 0) {
+            if (parentNodeInState && Array.isArray(parentNodeInState.child_message_ids) && parentNodeInState.child_message_ids.length > 0) {
                 const activeChildIndex = parentNodeInState.active_child_index ?? 0;
                 const safeActiveIndex = Math.min(Math.max(0, activeChildIndex), parentNodeInState.child_message_ids.length - 1);
                 const activeChildIdToClear = parentNodeInState.child_message_ids[safeActiveIndex];
@@ -3750,11 +4339,9 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
         const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
         if (!assistantContentDiv) {
-             assistantPlaceholderRow?.remove();
-             throw new Error("Failed to create assistant response placeholder element.");
+            assistantPlaceholderRow?.remove();
+            throw new Error("Failed to create assistant response placeholder element.");
         }
-
-        // The initial scroll to the placeholder will be handled by generateAssistantResponse.
 
         await generateAssistantResponse(
             generationParentId,
@@ -3797,9 +4384,12 @@ async function continueMessage(messageIdToContinue) {
         addSystemMessage("Cannot continue while busy.", "warning");
         return;
     }
-    const messageToContinue = state.messages.find(m => m.message_id === messageIdToContinue);
+
+    const groupInfo = resolveMessageGroupInfo(messageIdToContinue);
+    const messageToContinue = state.messages.find(m => m.message_id === groupInfo.finalMessageId);
     if (!messageToContinue || messageToContinue.role !== 'llm') {
-        addSystemMessage("Can only continue assistant messages.", "error"); return;
+        addSystemMessage("Can only continue assistant messages.", "error");
+        return;
     }
 
     const modelNameToUse = getActiveCharacterModel();
@@ -3811,13 +4401,16 @@ async function continueMessage(messageIdToContinue) {
             return;
         }
     }
+
     const parentId = messageToContinue.parent_message_id;
     const rawMessage = messageToContinue.message || '';
     TOOL_TAG_REGEX.lastIndex = 0;
     let endsWithToolTag = false;
     let match;
     let lastTagEnd = -1;
-    while ((match = TOOL_TAG_REGEX.exec(rawMessage)) !== null) { lastTagEnd = match.index + match[0].length; }
+    while ((match = TOOL_TAG_REGEX.exec(rawMessage)) !== null) {
+        lastTagEnd = match.index + match[0].length;
+    }
     if (lastTagEnd > 0 && lastTagEnd >= rawMessage.trimEnd().length) endsWithToolTag = true;
 
     if (endsWithToolTag) {
@@ -3825,14 +4418,16 @@ async function continueMessage(messageIdToContinue) {
          return;
     }
     if (!parentId) {
-         addSystemMessage("Cannot continue message without a parent.", "error"); return;
+         addSystemMessage("Cannot continue message without a parent.", "error");
+         return;
     }
 
     console.log(`Continuing message ${messageIdToContinue} using model ${modelNameToUse}`);
-    const targetMessageRow = messagesWrapper.querySelector(`.message-row[data-message-id="${messageIdToContinue}"]`);
-    const targetContentDiv = targetMessageRow?.querySelector('.message-content');
+    const targetRow = groupInfo.row || findRowForMessageId(messageIdToContinue);
+    const targetContentDiv = targetRow?.querySelector('.message-content');
     if (!targetContentDiv) {
-        addSystemMessage("Error: Could not find message content area.", "error"); return;
+        addSystemMessage("Error: Could not find message content area.", "error");
+        return;
     }
 
     await generateAssistantResponse(
@@ -3844,6 +4439,11 @@ async function continueMessage(messageIdToContinue) {
         true,
         messageToContinue.message || ''
     );
+
+    cleanupAfterGeneration();
+    requestAnimationFrame(updateScrollButtonVisibility);
+
+    return;
 }
 
 async function stopStreaming() {
@@ -3887,89 +4487,6 @@ async function stopStreaming() {
     }
 }
 
-
-// Legacy character popup/select logic removed. New character management handled in Settings > Characters tab.
-// Placeholder fetchCharacters (will be replaced by Characters tab CRUD implementation)
-async function fetchCharacters() {
-    try {
-        const response = await fetch(`${API_BASE}/characters`);
-        if (!response.ok) throw new Error(`Failed to fetch characters: ${response.statusText}`);
-        return await response.json();
-    } catch (error) {
-        console.error('Error fetching characters:', error);
-        return [];
-    }
-}
-
-async function populateCharacterSelect() { /* Deprecated */ }
-
-function displayActiveSystemPrompt(characterName, promptText) {
-    const displayBtn = document.getElementById('character-btn');
-    if (!displayBtn) return;
-
-    const nameToDisplay = characterName || "No Character";
-    const iconClass = characterName ? 'bi-person-check-fill' : 'bi-person';
-
-    // Update the button's content
-    displayBtn.innerHTML = `
-        <i class="bi ${iconClass}"></i>
-        <span class="character-display-name">${nameToDisplay}</span>
-    `;
-
-    // Remove any existing contextmenu listener to avoid duplicates
-    displayBtn.oncontextmenu = null;
-
-    if (promptText) {
-        displayBtn.title = 'Left-click to change character.\nRight-click to view system prompt.';
-        // Add right-click listener to view prompt
-        displayBtn.oncontextmenu = (e) => {
-            e.preventDefault();
-            viewSystemPromptPopup(promptText, characterName || "Effective System Prompt");
-        };
-    } else {
-        displayBtn.title = 'Select Character';
-    }
-}
-
-
-function viewSystemPromptPopup(promptText, characterName = "System Prompt") {
-    const popup = document.createElement('div');
-    popup.className = 'attachment-popup-overlay';
-    popup.addEventListener('click', (e) => {
-        if (e.target === popup) popup.remove();
-    });
-
-    const container = document.createElement('div');
-    container.className = 'attachment-popup-container';
-
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'attachment-popup-close';
-    closeBtn.innerHTML = '<i class="bi bi-x-lg"></i>';
-    closeBtn.title = `Close ${characterName} Prompt`;
-    closeBtn.addEventListener('click', () => popup.remove());
-
-    const contentElement = document.createElement('pre');
-    contentElement.textContent = promptText;
-    contentElement.className = 'system-prompt-popup-text';
-
-    const titleElement = document.createElement('h4');
-    titleElement.textContent = characterName;
-    titleElement.style.color = "var(--text-primary)";
-    titleElement.style.marginTop = "10px";
-    titleElement.style.textAlign = "center";
-
-    container.appendChild(closeBtn);
-    container.appendChild(titleElement);
-    container.appendChild(contentElement);
-    popup.appendChild(container);
-    document.body.appendChild(popup);
-}
-
-// Removed openCharacterModal (legacy)
-
-function setupCharacterEvents() { /* Legacy popup events removed. Characters handled in settings modal. */ }
-
-function updateCharacterActionButtons() { /* Deprecated */ }
 
 function startNewChat() {
     console.log("Starting new chat...");

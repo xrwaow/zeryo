@@ -7,11 +7,12 @@
   cd zeryo
   ```
 
-  *   You need to provide API keys for OpenRouter, Google AI in a file named `api_keys.yaml`, like api_keys_example.yaml.
+        *   Provide LLM credentials in `api_keys.yaml` (see `api_keys_example.yaml`).
+        *   Provide dedicated Google Custom Search credentials in `search_api_keys.yaml` (see `search_api_keys_example.yaml`). Set `SEARCH_API_KEYS_PATH` if you keep the file elsewhere.
 
-  ```bash
-  pip install PyYAML fastapi requests beautifulsoup4 pydantic uvicorn httpx
-  ```
+    ```bash
+    pip install PyYAML fastapi requests pydantic uvicorn httpx trafilatura
+    ```
   ```bash
   python api.py
   ```
@@ -49,7 +50,7 @@
     *   **Configurable CoT Tags:** Change start/end tags for chain-of-thought blocks (default `<think>` / `</think>`).
 *   **Tool Usage (Beta):**
     *   Enable/disable tool usage for the LLM.
-    *   Includes basic `search` (DuckDuckGo) and `add` tools.
+    *   Built-in tools: `search` (Google Custom Search), `scrape` (trafilatura web extraction), and `add`.
     *   Collapsible display for tool calls and results within the chat.
 *   **UI:**
     *   Waow

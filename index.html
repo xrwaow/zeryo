@@ -125,6 +125,20 @@
             <div class="input-container">
                 <div class="image-preview-container" id="image-preview-container"></div>
                 <textarea id="message-input" placeholder="Say, what's on your mind?" rows="1"></textarea>
+                
+                <!-- Character Selection Dropdown -->
+                <div class="character-dropdown" id="character-dropdown" style="display: none;">
+                    <div class="character-dropdown-header">
+                        <span>Select Character</span>
+                        <button class="character-dropdown-close" id="character-dropdown-close">
+                            <i class="bi bi-x"></i>
+                        </button>
+                    </div>
+                    <div class="character-dropdown-list" id="character-dropdown-list">
+                        <div class="character-dropdown-loading">Loading characters…</div>
+                    </div>
+                </div>
+                
                 <div class="input-controls-row">
                     <div class="input-controls-left">
                         <button class="input-button" id="image-button" title="Attach image">
@@ -132,6 +146,10 @@
                         </button>
                         <button class="input-button" id="file-button" title="Attach file">
                              <i class="bi bi-file-earmark-text"></i>
+                        </button>
+                        <button class="input-button character-select-button" id="character-select-button" title="Select Character">
+                            <i class="bi bi-person-fill"></i>
+                            <span class="character-select-name">Character</span>
                         </button>
                         <!-- Legacy character popup removed. Character selection now managed via Settings > Characters. -->
                     </div>
@@ -159,21 +177,17 @@
                     <h3>Settings</h3>
                     <button id="close-settings-modal" class="popup-close-btn" title="Close"><i class="bi bi-x"></i></button>
                 </div>
-                <div class="settings-modal-tabs">
-                    <button class="settings-tab-btn active" data-tab="main">Main</button>
-                    <button class="settings-tab-btn" data-tab="appearance">Appearance</button>
-                    <button class="settings-tab-btn" data-tab="generation">Generation</button>
-                    <button class="settings-tab-btn" data-tab="tools">Tools</button>
-                    <button class="settings-tab-btn" data-tab="characters">Characters</button>
-                    <button class="settings-tab-btn" data-tab="models">Models</button>
-                    <button class="settings-tab-btn" data-tab="cot">CoT Formatting</button>
-                </div>
-                <div class="settings-modal-panels">
+                <div class="settings-modal-content">
+                    <div class="settings-modal-tabs">
+                        <button class="settings-tab-btn active" data-tab="main">Main</button>
+                        <button class="settings-tab-btn" data-tab="appearance">Appearance</button>
+                        <button class="settings-tab-btn" data-tab="generation">Generation</button>
+                        <button class="settings-tab-btn" data-tab="tools">Tools</button>
+                        <button class="settings-tab-btn" data-tab="characters">Characters</button>
+                        <button class="settings-tab-btn" data-tab="cot">CoT Formatting</button>
+                    </div>
+                    <div class="settings-modal-panels">
                     <div class="settings-tab-panel active" data-panel="main">
-                        <div class="settings-row">
-                            <label for="main-toggle-tools">Enable Tool Calls</label>
-                            <input type="checkbox" id="main-toggle-tools" />
-                        </div>
                         <div class="settings-row">
                             <label for="main-toggle-autoscroll">Autoscroll During Generation</label>
                             <input type="checkbox" id="main-toggle-autoscroll" />
@@ -232,9 +246,17 @@
                         </div>
                     </div>
                     <div class="settings-tab-panel" data-panel="tools">
+                        <div class="settings-row">
+                            <label for="main-toggle-tools">Enable Tool Calls</label>
+                            <input type="checkbox" id="main-toggle-tools" />
+                        </div>
+                        <p class="settings-section-title">Available Tools</p>
+                        <div id="tools-checkbox-list" class="tools-checkbox-list">
+                            <div class="tools-list-empty">Loading tools…</div>
+                        </div>
+                        <small class="settings-hint">Toggle individual tools. These apply when tool calls are enabled.</small>
                         <p class="settings-section-title">Tools Prompt (read-only)</p>
                         <pre id="tools-prompt-preview" class="tools-prompt-preview">Loading...</pre>
-                        <small class="settings-hint">Tool enabling is in Main tab. Prompt fetched from backend.</small>
                     </div>
                     <div class="settings-tab-panel" data-panel="characters">
                         <div class="characters-manager">
@@ -244,16 +266,6 @@
                             </div>
                             <div id="characters-list" class="characters-list empty-state">Loading characters...</div>
                             <small class="settings-hint">Characters bundle system prompt, preferred model, and optional CoT tags.</small>
-                        </div>
-                    </div>
-                    <div class="settings-tab-panel" data-panel="models">
-                        <div class="models-manager">
-                            <div class="models-toolbar">
-                                <button id="models-create-btn" class="btn-primary">Add Model</button>
-                                <button id="models-refresh-btn" class="btn-secondary">Refresh</button>
-                            </div>
-                            <div id="models-list" class="models-list empty-state">Loading models...</div>
-                            <small class="settings-hint">Models are stored in the database. Local provider runtime name is probed dynamically.</small>
                         </div>
                     </div>
                     <div class="settings-tab-panel" data-panel="cot">
@@ -271,6 +283,7 @@
                         </div>
                         <small class="settings-hint">Existing messages keep original tags. New generations use updated tags. Tags are literal (no regex).</small>
                     </div>
+                </div>
                 </div>
             </div>
         </div>
