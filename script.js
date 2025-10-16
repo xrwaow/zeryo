@@ -420,6 +420,9 @@ const state = {
     lastActivatedCharacterPreferredModel: null, // Fallback if characters cache not yet loaded
 };
 
+let cachedPersistedCotTags = null;
+let cachedPersistedCotTagsLoaded = false;
+
 // --- Helper: Escape HTML for safe insertion into attribute/text contexts ---
 function escapeHtml(str) {
     if (str === null || str === undefined) return '';
@@ -429,6 +432,10 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+function escapeRegExp(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 // Display system prompt + character name (fallback if dedicated UI element not present)
@@ -610,12 +617,7 @@ function isAssistantToolOnlyMessage(message) {
         return false;
     }
 
-    const hasThinkContent = /<think\b/i.test(text);
-    if (hasThinkContent) {
-        return false;
-    }
-
-    const stripped = text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    const stripped = stripCotBlocks(text).trim();
     return stripped.length === 0;
 }
 
@@ -752,7 +754,8 @@ function renderToolsCheckboxList(container) {
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
     let processedText = text || '';
     let html = '';
-    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+    const cotTagPairs = getCotTagPairs();
+    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
 
     // This local function performs the complete rendering pipeline for a given piece of markdown.
     // It correctly handles code blocks and KaTeX rendering in the proper order.
@@ -823,7 +826,7 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
     };
 
     if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText);
+        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
 
         const thinkBlockWrapper = document.createElement('div');
         thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
@@ -876,7 +879,8 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
     let processedText = text || '';
     let html = '';
-    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+    const cotTagPairs = getCotTagPairs();
+    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
 
     // This local function performs the complete rendering pipeline for a given piece of markdown.
     // It correctly handles code blocks and KaTeX rendering in the proper order.
@@ -951,7 +955,7 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
     };
 
     if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText);
+        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
 
         const thinkBlockWrapper = document.createElement('div');
         thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
@@ -1004,7 +1008,8 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
     let processedText = text || '';
     let html = '';
-    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+    const cotTagPairs = getCotTagPairs();
+    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
 
     // This local function performs the complete rendering pipeline for a given piece of markdown.
     // It correctly handles code blocks and KaTeX rendering in the proper order.
@@ -1079,7 +1084,7 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
     };
 
     if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText);
+        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
 
         const thinkBlockWrapper = document.createElement('div');
         thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
@@ -1132,7 +1137,8 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
 function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
     let processedText = text || '';
     let html = '';
-    let isThinkBlockSegment = processedText.trim().startsWith('<think>');
+    const cotTagPairs = getCotTagPairs();
+    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
 
     // This local function performs the complete rendering pipeline.
     const renderCore = (markdownText) => {
@@ -1193,7 +1199,7 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
     };
 
     if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText);
+        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
 
         const thinkBlockWrapper = document.createElement('div');
         thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
@@ -2057,10 +2063,12 @@ function buildContentHtml(targetContentDiv, messageText) {
     const textToParse = messageText || '';
     const thinkBlockTempId = 'streaming-think-block';
     const remainingContentTempId = 'streaming-remaining-content';
+    const cotTagPairs = getCotTagPairs();
+    const startsWithCot = startsWithCotBlock(textToParse, cotTagPairs);
 
     targetContentDiv.innerHTML = '';
 
-    if (textToParse.trim().startsWith('<think>')) {
+    if (startsWithCot) {
         const fullRenderedHtml = renderMarkdown(textToParse, true, thinkBlockTempId);
         targetContentDiv.innerHTML = fullRenderedHtml;
          const thinkBlock = targetContentDiv.querySelector('.think-block');
@@ -2068,7 +2076,7 @@ function buildContentHtml(targetContentDiv, messageText) {
              thinkBlock.dataset.tempId = thinkBlockTempId;
          }
          const potentialRemainingDiv = thinkBlock?.nextElementSibling;
-         const { remainingText } = parseThinkContent(textToParse);
+         const { remainingText } = parseThinkContent(textToParse, cotTagPairs);
          if (potentialRemainingDiv && potentialRemainingDiv.tagName === 'DIV' && !potentialRemainingDiv.dataset.tempId && remainingText) {
               potentialRemainingDiv.dataset.tempId = remainingContentTempId;
          }
@@ -2652,13 +2660,9 @@ function copyMessageContent(contentDiv, buttonElement) {
         return;
     }
 
-    // Use a regular expression to find and remove the <think>...</think> block.
-    // The [\s\S]*? part matches any character (including newlines) in a non-greedy way.
-    const thinkBlockRegex = /<think>[\s\S]*?<\/think>/g;
-    const textWithoutThink = rawText.replace(thinkBlockRegex, '');
+    const textWithoutThink = stripCotBlocks(rawText);
 
-    // Trim the result to remove any leading/trailing whitespace that might result
-    // from removing the think block (e.g., if there was a newline after </think>).
+    // Trim the result to remove any leading/trailing whitespace that might result after stripping CoT blocks.
     const textToCopy = textWithoutThink.trim();
 
     // If after removing the think block, the message is empty, inform the user.
@@ -2920,6 +2924,7 @@ function refreshSettingsModalState() {
     // Load and display saved CoT tags
     let savedCot = null;
     try { savedCot = JSON.parse(localStorage.getItem('cotTags') || 'null'); } catch {}
+    setPersistedCotTags(savedCot);
     if (savedCot) {
         if (cotStartInput) cotStartInput.value = savedCot.start;
         if (cotEndInput) cotEndInput.value = savedCot.end;
@@ -2934,7 +2939,9 @@ function refreshSettingsModalState() {
             const end = (cotEndInput?.value || '').trim();
             if (!start || !end) { addSystemMessage('Both CoT tags are required.', 'warning'); return; }
             if (start === end) { addSystemMessage('CoT start/end tags must differ.', 'error'); return; }
-            localStorage.setItem('cotTags', JSON.stringify({ start, end }));
+            const payload = { start, end };
+            localStorage.setItem('cotTags', JSON.stringify(payload));
+            setPersistedCotTags(payload);
             addSystemMessage('Updated CoT tags.', 'info');
         };
     }
@@ -3028,7 +3035,10 @@ function getActiveCharacterModel() {
 function getActiveCharacterCotTags() {
     if (!state.currentCharacterId || !state.charactersCache) return { start: null, end: null };
     const char = state.charactersCache.find(c => c.character_id === state.currentCharacterId);
-    return { start: char?.cot_start_tag || null, end: char?.cot_end_tag || null };
+    return {
+        start: char?.cot_start_tag ? char.cot_start_tag.trim() : null,
+        end: char?.cot_end_tag ? char.cot_end_tag.trim() : null
+    };
 }
 
 function activeCharacterSupportsImages() {
@@ -3482,10 +3492,11 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             (textChunk) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
                 fullRenderedContent += textChunk;
+                const cotTagPairs = getCotTagPairs();
                 
                 // --- Timer Logic ---
-                const hasThinkStart = fullRenderedContent.trim().startsWith('<think>');
-                const hasThinkEnd = fullRenderedContent.includes('</think>');
+                const hasThinkStart = startsWithCotBlock(fullRenderedContent, cotTagPairs);
+                const hasThinkEnd = cotTagPairs.some(({ end }) => end && fullRenderedContent.includes(end));
 
                 // Case 1: Start the timer
                 if (hasThinkStart && !hasThinkEnd && state.streamingThinkTimer.intervalId === null) {
@@ -3502,7 +3513,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                         }
                     }, 100);
                 } 
-                // Case 2: Stop the timer because </think> appeared
+                // Case 2: Stop the timer because a closing CoT tag appeared
                 else if (hasThinkStart && hasThinkEnd && state.streamingThinkTimer.intervalId !== null) {
                     clearInterval(state.streamingThinkTimer.intervalId);
                     if (state.currentAssistantMessageDiv) {
@@ -3520,8 +3531,8 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 const remainingContentTempId = 'streaming-remaining-content';
                 let existingThinkBlockInTarget = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
 
-                if (fullRenderedContent.trim().startsWith('<think>')) {
-                    const { thinkContent, remainingText } = parseThinkContent(fullRenderedContent);
+                if (hasThinkStart) {
+                    const { thinkContent, remainingText } = parseThinkContent(fullRenderedContent, cotTagPairs);
                     if (existingThinkBlockInTarget) {
                         const thinkContentDiv = existingThinkBlockInTarget.querySelector('.think-content');
                         if (thinkContentDiv) {
@@ -4678,22 +4689,81 @@ function setupGenerationSettings() {
     updateSlidersUI();
 }
 
-function parseThinkContent(text) {
-    let thinkContent = '';
-    let remainingText = '';
-    const thinkStartIndex = text.indexOf('<think>');
-    if (thinkStartIndex === -1) {
-        return { thinkContent: null, remainingText: text };
+function getPersistedCotTags() {
+    if (!cachedPersistedCotTagsLoaded) {
+        cachedPersistedCotTagsLoaded = true;
+        try {
+            cachedPersistedCotTags = JSON.parse(localStorage.getItem('cotTags') || 'null');
+        } catch {
+            cachedPersistedCotTags = null;
+        }
     }
-    let thinkEndIndex = text.indexOf('</think>');
-    if (thinkEndIndex === -1) {
-        thinkContent = text.substring(thinkStartIndex + '<think>'.length);
-        remainingText = '';
-    } else {
-        thinkContent = text.substring(thinkStartIndex + '<think>'.length, thinkEndIndex);
-        remainingText = text.substring(thinkEndIndex + '</think>'.length);
+    return cachedPersistedCotTags;
+}
+
+function setPersistedCotTags(value) {
+    cachedPersistedCotTags = value;
+    cachedPersistedCotTagsLoaded = true;
+}
+
+function getCotTagPairs() {
+    const pairs = [];
+    const active = getActiveCharacterCotTags ? getActiveCharacterCotTags() : { start: null, end: null };
+    const activeStart = active?.start ? active.start.trim() : null;
+    const activeEnd = active?.end ? active.end.trim() : null;
+    if (activeStart && activeEnd) pairs.push({ start: activeStart, end: activeEnd });
+
+    const persisted = getPersistedCotTags();
+    const persistedStart = persisted?.start ? persisted.start.trim() : null;
+    const persistedEnd = persisted?.end ? persisted.end.trim() : null;
+    if (persistedStart && persistedEnd) pairs.push({ start: persistedStart, end: persistedEnd });
+
+    pairs.push({ start: '<think>', end: '</think>' });
+
+    const seen = new Set();
+    return pairs.filter(pair => {
+        if (!pair.start || !pair.end) return false;
+        const key = `${pair.start}__${pair.end}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function startsWithCotBlock(text, tagPairs = null) {
+    const candidates = tagPairs || getCotTagPairs();
+    const trimmed = (text || '').trimStart();
+    return candidates.some(({ start }) => start && trimmed.startsWith(start));
+}
+
+function stripCotBlocks(text, tagPairs = null) {
+    if (!text) return '';
+    const candidates = tagPairs || getCotTagPairs();
+    let result = String(text);
+    candidates.forEach(({ start, end }) => {
+        if (!start || !end) return;
+        const regex = new RegExp(`${escapeRegExp(start)}[\s\S]*?${escapeRegExp(end)}`, 'g');
+        result = result.replace(regex, '');
+    });
+    return result;
+}
+
+function parseThinkContent(text, tagPairs = null) {
+    const sourceText = text || '';
+    const candidates = tagPairs || getCotTagPairs();
+    for (const { start, end } of candidates) {
+        const startIndex = sourceText.indexOf(start);
+        if (startIndex === -1) continue;
+        const endIndex = sourceText.indexOf(end, startIndex + start.length);
+        if (endIndex === -1) {
+            const content = sourceText.substring(startIndex + start.length).trim();
+            return { thinkContent: content, remainingText: '' };
+        }
+        const thinkContent = sourceText.substring(startIndex + start.length, endIndex).trim();
+        const remainingText = sourceText.substring(endIndex + end.length).trim();
+        return { thinkContent, remainingText };
     }
-    return { thinkContent: thinkContent.trim(), remainingText: remainingText.trim() };
+    return { thinkContent: null, remainingText: sourceText };
 }
 
 function addSystemMessage(text, type = "info", timeout = null) {

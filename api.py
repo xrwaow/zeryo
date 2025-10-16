@@ -11,7 +11,7 @@ import asyncio # <-- NEW: For cancellation
 import html
 from enum import Enum
 from contextlib import asynccontextmanager
-from typing import List, Dict, Any, Optional, AsyncGenerator, Callable, Tuple
+from typing import List, Dict, Any, Optional, AsyncGenerator, Callable, Tuple, Set
 from fastapi import FastAPI, HTTPException, Request, Query
 from fastapi.responses import StreamingResponse # <-- NEW: For SSE
 from fastapi.middleware.cors import CORSMiddleware
@@ -101,15 +101,6 @@ def init_db():
         FOREIGN KEY (message_id) REFERENCES messages (message_id) ON DELETE CASCADE
     )
     ''')
-    # Models table (dynamic instead of YAML-only)
-    cursor.execute('''
-    CREATE TABLE IF NOT EXISTS models (
-        model_name TEXT PRIMARY KEY,
-        provider TEXT,
-        model_identifier TEXT,
-        supports_images INTEGER DEFAULT 0
-    )
-    ''')
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS characters (
         character_id TEXT PRIMARY KEY,
@@ -145,19 +136,6 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE characters ADD COLUMN model_supports_images INTEGER")
     except sqlite3.OperationalError: pass
-    # One-time migration: if model fields empty but preferred_model set and models table has entry, copy data
-    try:
-        cursor.execute("SELECT character_id, preferred_model FROM characters WHERE preferred_model IS NOT NULL")
-        chars = cursor.fetchall()
-        for ch in chars:
-            pm = ch['preferred_model']
-            cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE model_name = ?", (pm,))
-            row = cursor.fetchone()
-            if row:
-                cursor.execute("UPDATE characters SET model_name = ?, model_provider = ?, model_identifier = ?, model_supports_images = ? WHERE character_id = ? AND (model_name IS NULL OR model_name = '')",
-                               (row['model_name'], row['provider'], row['model_identifier'], row['supports_images'], ch['character_id']))
-    except Exception as e:
-        print(f"Embedded model migration warning: {e}")
     # --- Indexes ---
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages (parent_message_id)")
@@ -267,17 +245,6 @@ class UpdateCharacterRequest(Character):
     cot_end_tag: Optional[str] = None
     settings: Optional[Dict[str, Any]] = None
 
-class ModelDefinition(BaseModel):
-    model_name: str
-    provider: str
-    model_identifier: Optional[str] = None
-    supports_images: bool = False
-
-class UpdateModelDefinition(BaseModel):
-    provider: Optional[str] = None
-    model_identifier: Optional[str] = None
-    supports_images: Optional[bool] = None
-
 class SetActiveBranchRequest(BaseModel):
     child_index: int
 
@@ -328,10 +295,11 @@ def format_tools_for_prompt(tools: List[ToolDefinition]) -> str:
     lines = [
         "Model Context Protocol Tool Instructions:",
         #"- To invoke a tool, respond with a message that contains only a single <tool_call> block.",
-        "- To invoke a tool, respond with a single <tool_call> block.",
+        #"- To invoke a tool, respond with a <tool_call> block.",
+        "- To invoke a tool you *must* respond with a <tool_call> block, following the exact tool calling format below.",
         "- The block must wrap a JSON object with the arguments you intend to send.",
         #"- Do not include natural language before or after the block.",
-        "Example format:",
+        "Tool calling format:",
         "<tool_call name=\"tool_name\">",
         "{",
         "  \"arguments\": { ... }",
@@ -369,7 +337,9 @@ def build_context_from_db(
     cursor: sqlite3.Cursor,
     chat_id: str,
     stop_at_message_id: str, # This is the ID of the *last message to include*
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    cot_start_tag: Optional[str] = None,
+    cot_end_tag: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """
     Fetches message history from DB up to and including the stop_at_message_id,
@@ -422,6 +392,23 @@ def build_context_from_db(
 
     processed_ids = set()
 
+    sanitized_start = (cot_start_tag or "").strip() or None
+    sanitized_end = (cot_end_tag or "").strip() or None
+    cot_tag_pairs: List[Tuple[str, str]] = []
+    seen_pairs: Set[Tuple[str, str]] = set()
+    for candidate in ((sanitized_start, sanitized_end), ("<think>", "</think>")):
+        start_tag, end_tag = candidate
+        if start_tag and end_tag:
+            key = (start_tag, end_tag)
+            if key not in seen_pairs:
+                seen_pairs.add(key)
+                cot_tag_pairs.append(key)
+
+    cot_strip_patterns: List[Tuple[str, str, re.Pattern[str]]] = [
+        (start_tag, end_tag, re.compile(rf"{re.escape(start_tag)}.*?{re.escape(end_tag)}\\s*", re.DOTALL))
+        for start_tag, end_tag in cot_tag_pairs
+    ]
+
     def traverse_active(message_id: str) -> bool:
         """Recursively traverses the active branch, adding messages to context."""
         if not message_id or message_id not in messages_map or message_id in processed_ids:
@@ -437,12 +424,20 @@ def build_context_from_db(
         role_for_context = msg["role"] # user, llm, tool
         content_for_context = msg["message"] or ''
 
-        # Strip <think> blocks from LLM messages before adding to context
+        # Strip CoT blocks from LLM messages before adding to context
         is_llm = role_for_context == 'llm'
-        think_pattern = r"<think>.*?</think>\s*"
-        if is_llm and "<think>" in content_for_context:
-            content_for_context = re.sub(think_pattern, "", content_for_context, flags=re.DOTALL).strip()
-            # print(f"Stripped think block from message {message_id} for context")
+        if is_llm and cot_strip_patterns:
+            cleaned_content = content_for_context or ''
+            content_changed = False
+            for start_tag, end_tag, pattern in cot_strip_patterns:
+                if start_tag in cleaned_content and end_tag in cleaned_content:
+                    updated = pattern.sub("", cleaned_content)
+                    if updated != cleaned_content:
+                        content_changed = True
+                        cleaned_content = updated
+            if content_changed:
+                cleaned_content = cleaned_content.strip()
+            content_for_context = cleaned_content
 
         # Map internal roles to standard API roles ('llm' -> 'assistant')
         context_role = "assistant" if role_for_context == "llm" else role_for_context
@@ -765,11 +760,15 @@ async def _perform_generation_stream(
     generation_completed_normally = False
     last_saved_message_id = parent_message_id
     provider = None
-    backend_is_streaming_reasoning = False # Specific to OpenRouter/OpenAI <think> tags (customizable)
+    backend_is_streaming_reasoning = False # Specific to OpenRouter/OpenAI CoT tags (customizable)
     current_turn_content_accumulated = "" # Accumulates all text from current LLM turn (segment)
     # Custom CoT tag handling
-    think_open_tag = cot_start_tag if cot_start_tag else "<think>"
-    think_close_tag = (cot_end_tag if cot_end_tag else "</think>") + "\n"
+    effective_cot_start = (cot_start_tag or "").strip() or None
+    effective_cot_end = (cot_end_tag or "").strip() or None
+    think_open_tag = effective_cot_start or "<think>"
+    base_close_tag = effective_cot_end or "</think>"
+    newline_suffix = "" if base_close_tag.endswith("\n") else "\n"
+    think_close_tag = base_close_tag + newline_suffix
 
     active_tool_defs: List[ToolDefinition] = []
     active_tool_registry: Dict[str, Callable[..., Any]] = {}
@@ -784,11 +783,24 @@ async def _perform_generation_stream(
             raise HTTPException(status_code=404, detail="Chat not found")
 
         system_prompt_text = ""
-        char_info = None
+        char_info: Optional[Dict[str, Any]] = None
+        provider_hint: Optional[str] = None
         if chat_info["character_id"]:
             cursor_check.execute("SELECT sysprompt, model_name, model_provider, model_identifier, model_supports_images, preferred_model FROM characters WHERE character_id = ?", (chat_info["character_id"],))
-            char_info = cursor_check.fetchone()
-            system_prompt_text = char_info["sysprompt"] if char_info else ""
+            char_info_row = cursor_check.fetchone()
+            if char_info_row:
+                char_info = dict(char_info_row)
+                system_prompt_text = char_info.get("sysprompt", "") or ""
+                candidate_provider = (char_info.get("model_provider") or "").strip().lower()
+                if candidate_provider:
+                    provider_hint = candidate_provider
+                else:
+                    for name_candidate in (char_info.get("model_name"), char_info.get("preferred_model")):
+                        if name_candidate and name_candidate.strip().lower() == "local":
+                            provider_hint = "local"
+                            break
+            else:
+                system_prompt_text = ""
 
         tool_system_prompt_text = ""
         if tools_enabled:
@@ -817,6 +829,30 @@ async def _perform_generation_stream(
                     'supports_images': bool(char_info.get('model_supports_images'))
                 }
                 print(f"[Gen Fallback] Using embedded character model config for '{model_name}' (provider={model_config['provider']}).")
+                provider_hint = (model_config.get('provider') or provider_hint)
+
+        if not provider_hint:
+            model_name_lower = (model_name or "").strip().lower()
+            if model_name_lower == "local":
+                provider_hint = "local"
+            elif model_name and (model_name.startswith('/') or model_name.startswith('~') or '\\' in model_name or model_name_lower.endswith((".gguf", ".ggml", ".bin", ".pth", ".safetensors"))):
+                provider_hint = "local"
+
+        if not model_config and provider_hint == "local":
+            supports_images = False
+            if char_info and char_info.get('model_supports_images') is not None:
+                supports_images = bool(char_info.get('model_supports_images'))
+            else:
+                local_template = next((cfg for cfg in model_configs.get('models', []) if (cfg.get('provider') or '').lower() == 'local'), None)
+                if local_template:
+                    supports_images = bool(local_template.get('supports_images', False))
+            model_config = {
+                'name': model_name,
+                'provider': 'local',
+                'model_identifier': model_name,
+                'supports_images': supports_images
+            }
+            print(f"[Gen Fallback] Synthesized local model config for '{model_name}'.")
         if not model_config: raise ValueError(f"Configuration for model '{model_name}' not found.")
         provider = model_config.get('provider', 'openrouter').lower()
         model_identifier = model_config.get('model_identifier', model_name)
@@ -824,12 +860,20 @@ async def _perform_generation_stream(
         print(f"[Gen Setup] Provider: {provider}, Identifier: {model_identifier}")
 
         _system_prompt_for_context_build = effective_system_prompt if provider not in ['google'] else None
-        current_llm_history = build_context_from_db(conn_check, cursor_check, chat_id, last_saved_message_id, _system_prompt_for_context_build)
+        current_llm_history = build_context_from_db(
+            conn_check,
+            cursor_check,
+            chat_id,
+            last_saved_message_id,
+            _system_prompt_for_context_build,
+            cot_start_tag=effective_cot_start,
+            cot_end_tag=effective_cot_end
+        )
 
         conn_check.close(); conn_check = None; cursor_check = None
 
         tool_call_count = 0 # For manual tool loop (currently only for non-Google)
-        max_tool_calls = 5
+        max_tool_calls = 10
 
         while tool_call_count < max_tool_calls:
             if abort_event.is_set():
@@ -978,9 +1022,9 @@ async def _perform_generation_stream(
                                 if data_str == "[DONE]":
                                     is_done_signal_from_llm = True
                                     if backend_is_streaming_reasoning:
-                                        yield f"data: {json.dumps({'type': 'chunk', 'data': '</think>\n'})}\n\n"
-                                        full_response_content_for_frontend += "</think>\n"
-                                        current_turn_content_accumulated += "</think>\n"
+                                        yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
+                                        full_response_content_for_frontend += think_close_tag
+                                        current_turn_content_accumulated += think_close_tag
                                         backend_is_streaming_reasoning = False
                                     break # Exit aiter_lines loop
 
@@ -1040,75 +1084,67 @@ async def _perform_generation_stream(
                                     
                                     # --- Manual Tool Call Detection (for non-Google, if tools_enabled and no native calls) ---
                                     if not potential_tool_calls and tools_enabled and '</tool_call>' in current_turn_content_accumulated:
-                                        last_match = None
-                                        for potential_match in TOOL_CALL_REGEX.finditer(current_turn_content_accumulated):
-                                            last_match = potential_match
-                                        if last_match:
-                                            raw_tag = last_match.group(0)
-                                            tool_name = last_match.group(1)
-                                            tag_supplied_id = last_match.group(2)
-                                            payload_str = (last_match.group(3) or "").strip()
+                                        matches = list(TOOL_CALL_REGEX.finditer(current_turn_content_accumulated))
+                                        if matches:
+                                            pre_tool_text = current_turn_content_accumulated[:matches[0].start()]
+                                            trailing_text = current_turn_content_accumulated[matches[-1].end():]
 
-                                            parsed_payload: Optional[Dict[str, Any]] = None
-                                            tool_args: Dict[str, Any] = {}
-                                            parse_error: Optional[Exception] = None
-                                            if payload_str:
-                                                try:
-                                                    parsed_payload = json.loads(payload_str)
-                                                    if not isinstance(parsed_payload, dict):
-                                                        raise ValueError("Tool call payload must be a JSON object")
-                                                    candidate_args = parsed_payload.get("arguments")
-                                                    if candidate_args is None:
-                                                        candidate_args = parsed_payload.get("input", parsed_payload)
-                                                    if isinstance(candidate_args, dict):
-                                                        tool_args = candidate_args
-                                                    else:
-                                                        raise ValueError("Tool call payload must contain an 'arguments' object")
-                                                except Exception as parse_err:
-                                                    parse_error = parse_err
-                                                    tool_args = {}
-                                                    print(f"[Gen Tool] Warning: failed to parse tool call payload for '{tool_name}': {parse_err}")
-                                            else:
+                                            calls = []
+                                            raw_tags = []
+                                            for m in matches:
+                                                tool_name = m.group(1)
+                                                tag_supplied_id = m.group(2)
+                                                payload_str = (m.group(3) or "").strip()
+
+                                                parsed_payload = None
                                                 tool_args = {}
+                                                parse_error = None
+                                                if payload_str:
+                                                    try:
+                                                        parsed_payload = json.loads(payload_str)
+                                                        candidate_args = parsed_payload.get("arguments", parsed_payload.get("input", parsed_payload))
+                                                        tool_args = candidate_args if isinstance(candidate_args, dict) else {"value": candidate_args}
+                                                    except Exception as e_parse:
+                                                        parse_error = e_parse
+                                                        tool_args = {}
 
-                                            tool_call_id_manual = tag_supplied_id
-                                            if not tool_call_id_manual and parsed_payload and isinstance(parsed_payload.get("id"), str):
-                                                tool_call_id_manual = parsed_payload.get("id")
-                                            if not tool_call_id_manual:
-                                                tool_call_id_manual = f"tool_{uuid.uuid4().hex[:8]}"
+                                                call_id = tag_supplied_id
+                                                if not call_id and isinstance(parsed_payload, dict) and isinstance(parsed_payload.get("id"), str):
+                                                    call_id = parsed_payload["id"]
+                                                if not call_id:
+                                                    call_id = f"tool_{uuid.uuid4().hex[:8]}"
 
-                                            pre_tool_text = current_turn_content_accumulated[:last_match.start()]
-                                            trailing_text = current_turn_content_accumulated[last_match.end():]
-                                            if trailing_text.strip():
-                                                print(f"[Gen Tool] Warning: trailing text detected after tool call for '{tool_name}'. It will be deferred.")
+                                                raw_tag = m.group(0)
+                                                raw_tags.append(raw_tag)
+                                                calls.append({
+                                                    "name": tool_name,
+                                                    "id": call_id,
+                                                    "arguments": tool_args,
+                                                    "raw_payload": payload_str,
+                                                    "raw_tag": raw_tag,
+                                                    "parse_error": parse_error,
+                                                    "enabled": tool_name in active_tool_registry,
+                                                    "parsed_payload": parsed_payload
+                                                })
 
+                                            # Keep only the text before the first tool_call in the assistant message content
                                             current_turn_content_accumulated = pre_tool_text
-                                            detected_tool_call_info = {
-                                                "name": tool_name,
-                                                "arguments": tool_args,
-                                                "raw_tag": raw_tag,
-                                                "id": tool_call_id_manual,
-                                                "type": "manual",
-                                                "payload": parsed_payload,
-                                                "payload_raw": payload_str,
-                                                "parse_error": parse_error,
-                                                "trailing_text": trailing_text,
-                                                "enabled": tool_name in active_tool_registry,
-                                                "pre_text": pre_tool_text,
-                                                "calls": [
-                                                    {
-                                                        "name": tool_name,
-                                                        "id": tool_call_id_manual,
-                                                        "arguments": tool_args,
-                                                        "raw_payload": payload_str,
-                                                        "raw_tag": raw_tag,
-                                                        "parse_error": parse_error,
-                                                        "enabled": tool_name in active_tool_registry
-                                                    }
-                                                ]
-                                            }
 
-                                            break # Break from aiter_lines to process this tool call
+                                            detected_tool_call_info = {
+                                                "name": calls[0]["name"],
+                                                "arguments": calls[0]["arguments"],
+                                                "raw_tag": "".join(raw_tags),
+                                                "id": calls[0]["id"],
+                                                "type": "manual",
+                                                "payload": calls[0].get("parsed_payload"),
+                                                "payload_raw": calls[0]["raw_payload"],
+                                                "parse_error": calls[0]["parse_error"],
+                                                "trailing_text": trailing_text,
+                                                "enabled": calls[0]["enabled"],
+                                                "pre_text": pre_tool_text,
+                                                "calls": calls
+                                            }
+                                            break # Break from aiter_lines to process these tool calls
                                     
                                     # --- TODO: Handle Native OpenAI Tool Calls (potential_tool_calls) ---
                                     # if potential_tool_calls:
@@ -1350,7 +1386,7 @@ async def _perform_generation_stream(
     finally:
         print(f"[Gen Finally] Chat {chat_id}. Abort: {abort_event.is_set()}, StreamError: {type(stream_error).__name__ if stream_error else 'None'}, Completed Loop: {generation_completed_normally}")
 
-        if backend_is_streaming_reasoning: # Final safety net for OpenAI <think> tags
+        if backend_is_streaming_reasoning: # Final safety net for streamed CoT tags
             try:
                 yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
             except Exception:
@@ -1368,7 +1404,7 @@ async def _perform_generation_stream(
                 )
                 print(f"[Gen Finally - Abort Save] Saved partial message ID: {aborted_message_id}")
             except Exception as save_err: print(f"[Gen Finally - Abort Save Error] Failed to save partial: {save_err}")
-        
+
         if conn_check:
             try: conn_check.close()
             except Exception: pass
@@ -1380,8 +1416,8 @@ async def _perform_generation_stream(
             try: yield f"data: {json.dumps({'type': 'done'})}\n\n"
             except Exception: pass
         else:
-             print("[Gen Finish] Skipping 'done' event due to error, abort, or incomplete tool loop.")
-                      
+            print("[Gen Finish] Skipping 'done' event due to error, abort, or incomplete tool loop.")
+
 def create_message(
     chat_id: str,
     role: MessageRole,
@@ -1507,9 +1543,13 @@ def get_model_config(model_name: str) -> Optional[Dict[str, Any]]:
       3. Characters table preferred_model fallback
     Returns synthesized config dict when using embedded data.
     """
+    if not model_name:
+        return None
+    target_name_lower = model_name.lower()
     # 1. Legacy config list
     for config in model_configs.get('models', []):
-        if config.get('name') == model_name:
+        name = config.get('name')
+        if name and name.lower() == target_name_lower:
             return config
 
     # 2 & 3. Search characters for embedded definitions
@@ -1611,107 +1651,6 @@ async def get_config():
     # print("Sending config to frontend:", {k: (v[:2] + '...' if isinstance(v, str) and k != 'local_base_url' and v else v) for k, v in config_data.items()})
     return config_data
 
-@app.get("/models")
-async def get_available_models():
-    """Return models from DB plus dynamic local model name if provider 'local' present."""
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models ORDER BY model_name")
-    rows = cursor.fetchall()
-    conn.close()
-    available_models = []
-    # Dynamic local model discovery
-    local_model_runtime_name = None
-    try:
-        # Only probe if any DB model has provider local OR fallback
-        if any(r["provider"].lower() == 'local' for r in rows):
-            import requests
-            resp = requests.get(f"{api_keys_config.get('local_base_url', 'http://127.0.0.1:8080')}/v1/models", timeout=2)
-            if resp.ok:
-                data = resp.json()
-                # Prefer first entry in data.models if present
-                if isinstance(data, dict):
-                    if 'models' in data and isinstance(data['models'], list) and data['models']:
-                        first = data['models'][0]
-                        local_model_runtime_name = first.get('name') or first.get('model')
-                    elif 'data' in data and isinstance(data['data'], list) and data['data']:
-                        first = data['data'][0]
-                        local_model_runtime_name = first.get('id')
-            else:
-                print(f"Local model probe non-OK status: {resp.status_code}")
-    except Exception as e:
-        print(f"Local model probe failed: {e}")
-
-    for row in rows:
-        model_name = row['model_name']
-        provider = row['provider']
-        model_identifier = row['model_identifier'] or model_name
-        supports_images = bool(row['supports_images'])
-        display_name = model_name.split('/')[-1]
-        if provider.lower() == 'local' and local_model_runtime_name:
-            # Preserve stable DB model_name as key; use runtime name only for display so character preferred_model continues matching
-            display_name = local_model_runtime_name
-        available_models.append({
-            "name": model_name,
-            "model_identifier": model_identifier,
-            "displayName": display_name,
-            "supportsImages": supports_images,
-            "provider": provider
-        })
-    return available_models
-
-@app.post("/model", response_model=Dict[str, str])
-async def create_model(model: ModelDefinition):
-    conn = get_db_connection(); cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "INSERT INTO models (model_name, provider, model_identifier, supports_images) VALUES (?, ?, ?, ?)",
-            (model.model_name, model.provider, model.model_identifier or model.model_name, 1 if model.supports_images else 0)
-        ); conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback(); raise HTTPException(status_code=409, detail="Model name already exists")
-    finally: conn.close()
-    return {"status": "ok"}
-
-@app.get('/model/{model_name}')
-async def get_model(model_name: str):
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE model_name = ?", (model_name,))
-    row = cursor.fetchone(); conn.close()
-    if not row: raise HTTPException(status_code=404, detail="Model not found")
-    return {"model_name": row['model_name'], "provider": row['provider'], "model_identifier": row['model_identifier'], "supports_images": bool(row['supports_images'])}
-
-@app.put('/model/{model_name}')
-async def update_model(model_name: str, update: UpdateModelDefinition):
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT model_name, provider, model_identifier, supports_images FROM models WHERE model_name = ?", (model_name,))
-    existing = cursor.fetchone()
-    if not existing:
-        conn.close(); raise HTTPException(status_code=404, detail="Model not found")
-    new_provider = update.provider if update.provider is not None else existing['provider']
-    new_identifier = update.model_identifier if update.model_identifier is not None else existing['model_identifier']
-    new_supports = existing['supports_images'] if update.supports_images is None else (1 if update.supports_images else 0)
-    try:
-        cursor.execute("UPDATE models SET provider = ?, model_identifier = ?, supports_images = ? WHERE model_name = ?",
-                       (new_provider, new_identifier, new_supports, model_name))
-        conn.commit()
-    except sqlite3.Error as e:
-        conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
-    finally: conn.close()
-    return {"status": "ok"}
-
-@app.delete('/model/{model_name}')
-async def delete_model(model_name: str):
-    conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT model_name FROM models WHERE model_name = ?", (model_name,))
-    if not cursor.fetchone():
-        conn.close(); raise HTTPException(status_code=404, detail="Model not found")
-    try:
-        cursor.execute("DELETE FROM models WHERE model_name = ?", (model_name,)); conn.commit()
-    except sqlite3.Error as e:
-        conn.rollback(); raise HTTPException(status_code=500, detail=f"Database error: {e}")
-    finally: conn.close()
-    return {"status": "ok"}
-
 # (NEW) API Endpoint
 @app.post("/chat/{chat_id}/generate")
 async def generate_response(chat_id: str, request: GenerateRequest):
@@ -1731,43 +1670,34 @@ async def generate_response(chat_id: str, request: GenerateRequest):
 
     # If character_id provided, prefer embedded model fields
     embedded_model_override = None
+    char_row: Optional[Dict[str, Any]] = None
     if request.character_id:
         try:
             conn_char = get_db_connection(); cur_char = conn_char.cursor()
             cur_char.execute("SELECT model_name, model_provider, model_identifier, model_supports_images, preferred_model FROM characters WHERE character_id = ?", (request.character_id,))
-            char_row = cur_char.fetchone(); conn_char.close()
-            if char_row:
-                if char_row['model_name']:
+            fetched_char_row = cur_char.fetchone(); conn_char.close()
+            if fetched_char_row:
+                char_row = dict(fetched_char_row)
+                if char_row.get('model_name'):
                     embedded_model_override = char_row['model_name']
-                elif char_row['preferred_model']:
+                elif char_row.get('preferred_model'):
                     embedded_model_override = char_row['preferred_model']
         except Exception as e:
             print(f"[Gen] Embedded model lookup failed: {e}")
 
     if embedded_model_override:
         request.model_name = embedded_model_override
-    else:
-        # Canonicalize provided model_name case-insensitively to stored key (legacy path)
-        try:
-            conn_norm = get_db_connection(); cur_norm = conn_norm.cursor()
-            cur_norm.execute("SELECT model_name FROM models WHERE lower(model_name) = lower(?)", (request.model_name,))
-            row_norm = cur_norm.fetchone(); conn_norm.close()
-            if row_norm:
-                request.model_name = row_norm['model_name']
-            else:
-                print(f"[Gen] Warning: model '{request.model_name}' not found in DB (case-insensitive lookup).")
-        except Exception as e:
-            print(f"[Gen] Model normalization lookup failed: {e}")
 
     # Resolve runtime local model name if requested
     resolved_model_name = request.model_name
     if request.resolve_local_runtime_model:
         try:
-            # Query DB for provider of current model_name (fallback to request.model_name if not found)
-            conn = get_db_connection(); cursor = conn.cursor()
-            cursor.execute("SELECT provider FROM models WHERE model_name = ?", (request.model_name,))
-            row = cursor.fetchone(); conn.close()
-            provider_val = row['provider'] if row else None
+            provider_val = None
+            model_config_for_resolution = get_model_config(request.model_name)
+            if model_config_for_resolution:
+                provider_val = model_config_for_resolution.get('provider')
+            elif char_row and char_row.get('model_provider'):
+                provider_val = char_row.get('model_provider')
             if provider_val and provider_val.lower() == 'local':
                 import requests
                 resp = requests.get(f"{api_keys_config.get('local_base_url', 'http://127.0.0.1:8080')}/v1/models", timeout=2)
