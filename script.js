@@ -1,4 +1,3 @@
-// (Removed duplicate block from earlier patch)
 // API Configuration (Backend Data API)
 const API_BASE = 'http://localhost:8000';
 
@@ -34,8 +33,7 @@ const chatHistoryContainer = document.querySelector('.chat-history');
 const toggleToolsBtn = document.getElementById('toggle-tools-btn');
 const toggleAutoscrollBtn = document.getElementById('toggle-autoscroll-btn');
 
-const settingsBtn = document.getElementById('settings-btn'); // Main gear icon
-// Legacy popup elements may be removed; keep refs optional
+const settingsBtn = document.getElementById('settings-btn');
 const mainSettingsPopup = document.getElementById('main-settings-popup');
 const closeSettingsPopupBtn = document.getElementById('close-settings-popup-btn');
 // New centered modal (expected id)
@@ -59,17 +57,6 @@ function querySettingsModalElements() {
         toolsPromptPreview: document.getElementById('tools-prompt-preview'),
         toolsListContainer: document.getElementById('tools-checkbox-list')
     };
-}
-
-// Models Management UI (deprecated - model data now embedded per character)
-function setupModelsTab() {
-    const listEl = document.getElementById('models-list');
-    if (listEl) {
-        listEl.classList.add('empty-state');
-        listEl.textContent = 'Models tab deprecated: edit model fields directly on each character.';
-    }
-    const createBtn = document.getElementById('models-create-btn'); if (createBtn) createBtn.style.display='none';
-    const refreshBtn = document.getElementById('models-refresh-btn'); if (refreshBtn) refreshBtn.style.display='none';
 }
 
 // --- Characters Tab Implementation ---
@@ -443,16 +430,12 @@ const state = {
     currentChatId: null,
     chats: [], // List of {chat_id, preview, timestamp_updated}
     messages: [], // All messages for the current chat { message_id, ..., children_ids: [] }
-    models: [], // deprecated after embedding model fields directly in characters
-    modelsCache: {}, // deprecated
     charactersCache: [],
     currentImages: [], // { base64, dataUrl, type, name }
-    currentTextFiles: [], // { name, content (formatted), type, rawContent }
-    streamController: null, // AbortController for fetch
-    currentAssistantMessageDiv: null, // The div being actively streamed into
+    currentTextFiles: [],
+    streamController: null,
+    currentAssistantMessageDiv: null,
     currentCharacterId: null,
-
-    // Timer for streaming <think> blocks
     streamingThinkTimer: { intervalId: null, startTime: null },
 
     activeSystemPrompt: null, // Store the actual character prompt text
@@ -472,8 +455,10 @@ const state = {
     abortingForToolCall: false,
     scrollDebounceTimer: null,
     codeBlocksDefaultCollapsed: false,
-    autoscrollEnabled: false, // Default to false
-    lastActivatedCharacterPreferredModel: null, // Fallback if characters cache not yet loaded
+    autoscrollEnabled: false,
+    lastActivatedCharacterPreferredModel: null,
+    // Persistent collapse states keyed by message ID to survive re-renders
+    userCollapseStates: new Map(), // Map<messageId, { code: Map, think: Map, tool: Map }>
 };
 
 let cachedPersistedCotTags = null;
@@ -1083,6 +1068,7 @@ function handleCodeCollapse(collapseBtn) {
         return;
     }
 
+    wrapper.dataset.userToggled = 'true';
     const isCollapsed = wrapper.classList.toggle('collapsed');
 
     if (isCollapsed) {
@@ -1100,6 +1086,8 @@ function handleCodeCollapse(collapseBtn) {
         collapseInfoSpan.style.display = 'none';
         preElement.style.display = '';
     }
+    
+    persistCollapseState(wrapper, 'code', isCollapsed);
 }
 
 function handleThinkBlockToggle(e) {
@@ -1107,6 +1095,7 @@ function handleThinkBlockToggle(e) {
     if (toggleBtn) {
         const block = toggleBtn.closest('.think-block');
         if (block) {
+            block.dataset.userToggled = 'true';
             const isCollapsed = block.classList.toggle('collapsed');
             const icon = toggleBtn.querySelector('i');
             if (isCollapsed) {
@@ -1116,6 +1105,7 @@ function handleThinkBlockToggle(e) {
                 icon.className = 'bi bi-chevron-up';
                 toggleBtn.title = 'Collapse thought process';
             }
+            persistCollapseState(block, 'think', isCollapsed);
         }
     }
 }
@@ -1224,9 +1214,7 @@ async function init() {
     const savedCollapsed = localStorage.getItem('codeBlocksDefaultCollapsed');
     if (savedCollapsed !== null) state.codeBlocksDefaultCollapsed = savedCollapsed === 'true';
 
-    // Setup all UI events and components
     setupCharactersTab();
-    setupModelsTab();
     setupEventListeners();
     setupScrollListener();
     setupAutoscrollToggle();
@@ -1253,12 +1241,11 @@ async function fetchProviderConfig() {
         state.apiKeys.google = backendConfig.google || null;
         state.apiKeys.local = backendConfig.local_api_key || null;
 
-    console.log("Fetched provider config and populated API keys (models now embedded per character).");
+    console.log("Fetched provider config.");
 
     } catch (error) {
         console.error('Error fetching provider config:', error);
-        addSystemMessage("Failed to fetch API configuration from backend. Models requiring keys may be disabled.", "error");
-    // populateModelSelect removed
+        addSystemMessage("Failed to fetch API configuration from backend.", "error");
     }
 }
 
@@ -1316,17 +1303,13 @@ async function loadGenArgs() {
     const savedGenArgs = localStorage.getItem('genArgs');
     if (savedGenArgs) {
         try { Object.assign(defaultGenArgs, JSON.parse(savedGenArgs)); }
-        catch { /* ignore parse error for corrupted local storage */ }
+        catch (e) { console.warn('Failed to parse saved genArgs:', e); }
     }
     defaultGenArgs.temperature = defaultGenArgs.temperature ?? null;
     defaultGenArgs.min_p = defaultGenArgs.min_p ?? null;
     defaultGenArgs.max_tokens = defaultGenArgs.max_tokens ?? null;
     defaultGenArgs.top_p = defaultGenArgs.top_p ?? null;
 }
-
-// fetchModels removed (legacy models endpoint deprecated)
-
-// Removed global populateModelSelect (model now bound per character)
 
 async function fetchChats() {
     try {
@@ -1882,6 +1865,9 @@ function buildContentHtml(targetContentDiv, messageText) {
     const cotTagPairs = getCotTagPairs();
     const startsWithCot = startsWithCotBlock(textToParse, cotTagPairs);
 
+    // Save collapse states before rebuilding to preserve user interactions
+    const savedStates = captureCollapseStates(targetContentDiv);
+    
     targetContentDiv.innerHTML = '';
 
     if (startsWithCot) {
@@ -1975,14 +1961,104 @@ function buildContentHtml(targetContentDiv, messageText) {
         });
     }
     applyCodeBlockDefaults(targetContentDiv);
+    applyCollapseStates(targetContentDiv, savedStates);
 }
 
 function applyCodeBlockDefaults(containerElement) {
     if (!containerElement) return;
-    const codeBlocks = containerElement.querySelectorAll('.code-block-wrapper');
-    codeBlocks.forEach(block => {
-        setCodeBlockCollapsedState(block, state.codeBlocksDefaultCollapsed);
+    containerElement.querySelectorAll('.code-block-wrapper').forEach(block => {
+        if (!block.dataset.userToggled) {
+            setCodeBlockCollapsedState(block, state.codeBlocksDefaultCollapsed);
+        }
     });
+}
+
+// Unified collapse state management - captures user-toggled states from DOM
+function captureCollapseStates(containerElement) {
+    if (!containerElement) return null;
+    const states = { code: new Map(), think: new Map(), tool: new Map() };
+    
+    containerElement.querySelectorAll('.code-block-wrapper').forEach(block => {
+        if (block.dataset.userToggled !== 'true') return;
+        const key = (block.dataset.rawCode || '').substring(0, 100);
+        states.code.set(key, block.classList.contains('collapsed'));
+    });
+    
+    containerElement.querySelectorAll('.think-block').forEach(block => {
+        if (block.dataset.userToggled !== 'true') return;
+        states.think.set('think_0', block.classList.contains('collapsed'));
+    });
+    
+    containerElement.querySelectorAll('.tool-call-block, .tool-result-block').forEach(block => {
+        if (block.dataset.userToggled !== 'true') return;
+        const key = `${block.dataset.toolName || ''}_${block.dataset.callId || ''}`;
+        states.tool.set(key, block.classList.contains('collapsed'));
+    });
+    
+    return (states.code.size || states.think.size || states.tool.size) ? states : null;
+}
+
+// Apply saved collapse states to container
+function applyCollapseStates(containerElement, states) {
+    if (!containerElement || !states) return;
+    
+    containerElement.querySelectorAll('.code-block-wrapper').forEach(block => {
+        const key = (block.dataset.rawCode || '').substring(0, 100);
+        if (states.code?.has(key)) {
+            block.dataset.userToggled = 'true';
+            setCodeBlockCollapsedState(block, states.code.get(key));
+        }
+    });
+    
+    containerElement.querySelectorAll('.think-block').forEach(block => {
+        if (states.think?.has('think_0')) {
+            block.dataset.userToggled = 'true';
+            const collapsed = states.think.get('think_0');
+            block.classList.toggle('collapsed', collapsed);
+            const icon = block.querySelector('.think-block-toggle i');
+            if (icon) icon.className = collapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+        }
+    });
+    
+    containerElement.querySelectorAll('.tool-call-block, .tool-result-block').forEach(block => {
+        const key = `${block.dataset.toolName || ''}_${block.dataset.callId || ''}`;
+        if (states.tool?.has(key)) {
+            block.dataset.userToggled = 'true';
+            const collapsed = states.tool.get(key);
+            block.classList.toggle('collapsed', collapsed);
+            const icon = block.querySelector('.tool-collapse-btn i');
+            if (icon) icon.className = collapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+        }
+    });
+}
+
+// Persist a single element's collapse state to the message-level store
+function persistCollapseState(element, type, isCollapsed) {
+    const messageRow = element.closest('.message-row');
+    const messageId = messageRow?.dataset.messageId;
+    if (!messageId) return;
+    
+    if (!state.userCollapseStates.has(messageId)) {
+        state.userCollapseStates.set(messageId, { code: new Map(), think: new Map(), tool: new Map() });
+    }
+    const msgState = state.userCollapseStates.get(messageId);
+    
+    if (type === 'code') {
+        msgState.code.set((element.dataset.rawCode || '').substring(0, 100), isCollapsed);
+    } else if (type === 'think') {
+        msgState.think.set('think_0', isCollapsed);
+    } else if (type === 'tool') {
+        msgState.tool.set(`${element.dataset.toolName || ''}_${element.dataset.callId || ''}`, isCollapsed);
+    }
+}
+
+// Apply persisted collapse states to a message row (after loadChat)
+function applyPersistedCollapseStates(messageRow) {
+    const messageId = messageRow?.dataset.messageId;
+    if (!messageId || !state.userCollapseStates.has(messageId)) return;
+    
+    const contentDiv = messageRow.querySelector('.message-content');
+    if (contentDiv) applyCollapseStates(contentDiv, state.userCollapseStates.get(messageId));
 }
 
 async function handleGenerateOrRegenerateFromUser(userMessageId) {
@@ -2324,6 +2400,10 @@ function addMessage(message) {
     }
 
     messagesWrapper.appendChild(messageRow);
+    
+    // Apply any persisted user collapse states for this message
+    applyPersistedCollapseStates(messageRow);
+    
     return contentDiv;
 }
 
@@ -2599,7 +2679,6 @@ function setupEventListeners() {
     }
     
     sidebarToggle.addEventListener('click', toggleSidebar);
-    // removed global modelSelect listener
     document.addEventListener('paste', handlePaste);
 
     const mobileMenuBtn = document.getElementById('mobile-menu-btn');
@@ -2613,11 +2692,14 @@ function setupEventListeners() {
     if (mobileMenuBtn && sidebarElement && sidebarOverlay) {
         mobileMenuBtn.addEventListener('click', (e) => {
             e.stopPropagation();
+            // On mobile, remove sidebar-collapsed and toggle 'show' class
+            sidebarElement.classList.remove('sidebar-collapsed');
             sidebarElement.classList.toggle('show');
             sidebarOverlay.classList.toggle('show');
         });
         sidebarOverlay.addEventListener('click', () => {
             sidebarElement.classList.remove('show');
+            sidebarElement.classList.add('sidebar-collapsed');
             sidebarOverlay.classList.remove('show');
         });
         document.addEventListener('click', (e) => {
@@ -2626,6 +2708,7 @@ function setupEventListeners() {
                 !sidebarElement.contains(e.target) &&
                 !mobileMenuBtn.contains(e.target)) {
                 sidebarElement.classList.remove('show');
+                sidebarElement.classList.add('sidebar-collapsed');
                 sidebarOverlay.classList.remove('show');
             }
         });
@@ -2660,15 +2743,12 @@ function setupEventListeners() {
         });
     }
 
-    // Removed obsolete appearance/theme modal handlers (appearanceSettingsBtn not defined in current markup)
-    // If a future theme modal is reintroduced, rewire it here.
     document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
         button.addEventListener('click', () => {
             applyTheme(button.dataset.theme);
         });
     });
 
-    // Legacy popup outside-click close (retain only if element still exists)
     document.addEventListener('click', (e) => {
         if (mainSettingsPopup && mainSettingsPopup.style.display === 'block') {
             if (!mainSettingsPopup.contains(e.target) && !settingsBtn.contains(e.target)) {
@@ -2804,8 +2884,6 @@ function setupToolToggle() {
     updateEffectiveSystemPrompt();
 }
 
-// handleModelChange removed (no global model select)
-
 function handleInputKeydown(e) {
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey) {
         e.preventDefault();
@@ -2883,11 +2961,7 @@ function updateAttachmentButtonsForModel() {
     if (fileButton) fileButton.disabled = false; // Always allow text file attachments
 }
 
-function updateAttachButtons() {
-    const supportsImages = activeCharacterSupportsImages();
-    imageButton.style.display = supportsImages ? 'flex' : 'none';
-    fileButton.style.display = 'flex';
-}
+
 
 function openFileSelector(accept) {
     const input = document.createElement('input');
@@ -3246,8 +3320,7 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
 }
 
 async function generateAssistantResponse(parentId, targetContentDiv, modelName, generationArgs, toolsEnabled, isEditing = false, initialText = '') {
-    console.log(`%c[generateAssistantResponse RUN - Backend Mode] parentId: ${parentId}, toolsEnabled: ${toolsEnabled}, isEditing: ${isEditing}, targetContentDiv provided: ${!!targetContentDiv}`, "color: purple; font-weight: bold;", { currentChatId: state.currentChatId });
-    console.log(`%c[DEBUG GEN] targetContentDiv isConnected: ${targetContentDiv?.isConnected}, parent: ${targetContentDiv?.parentElement?.className}`, 'color: cyan; font-weight: bold;');
+    console.log(`[generateAssistantResponse] parentId: ${parentId}, toolsEnabled: ${toolsEnabled}`);
 
     if (!state.currentChatId) { console.error("generateAssistantResponse: No current chat ID."); cleanupAfterGeneration(); return; }
     if (!targetContentDiv) { console.error("generateAssistantResponse: No target content div provided."); cleanupAfterGeneration(); return; }
@@ -3272,19 +3345,22 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
 
 
     setGenerationInProgressUI(true);
-    state.currentAssistantMessageDiv = targetContentDiv; // Keep track of the div we are streaming into
+    state.currentAssistantMessageDiv = targetContentDiv;
     targetContentDiv.classList.add('streaming');
     const messageDivForStream = targetContentDiv.closest('.message');
     if (messageDivForStream) {
         messageDivForStream.style.minHeight = '';
     }
 
-    buildContentHtml(targetContentDiv, initialText); // Initial render before streaming updates
+    buildContentHtml(targetContentDiv, initialText);
     updateAttachmentButtonsForModel();
     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
-    let fullRenderedContent = initialText; // This will accumulate chunks
+    let fullRenderedContent = initialText;
+    let lastRenderTime = 0;
+    let pendingRenderTimeout = null;
+    const RENDER_THROTTLE_MS = 50; // Only re-render every 50ms max
 
     const updateStreamingMinHeight = () => {
         if (targetContentDiv) {
@@ -3313,129 +3389,147 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             effectiveModelName,
             generationArgs,
             toolsEnabled,
-            // --- onChunk Callback ---
+            // onChunk - throttled to reduce DOM thrashing
             (textChunk) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) {
-                    console.log(`%c[DEBUG CHUNK] Skipping chunk - targetContentDiv: ${!!targetContentDiv}, aborted: ${state.streamController?.signal.aborted}, divMismatch: ${state.currentAssistantMessageDiv !== targetContentDiv}`, 'color: red;');
                     return;
                 }
                 fullRenderedContent += textChunk;
-                const cotTagPairs = getCotTagPairs();
                 
-                // --- Timer Logic ---
-                const hasThinkStart = startsWithCotBlock(fullRenderedContent, cotTagPairs);
-                const hasThinkEnd = cotTagPairs.some(({ end }) => end && fullRenderedContent.includes(end));
+                const now = Date.now();
+                const timeSinceLastRender = now - lastRenderTime;
+                
+                // Clear any pending render since we have new content
+                if (pendingRenderTimeout) {
+                    clearTimeout(pendingRenderTimeout);
+                    pendingRenderTimeout = null;
+                }
+                
+                const doRender = () => {
+                    if (!targetContentDiv || state.streamController?.signal.aborted) return;
+                    
+                    const cotTagPairs = getCotTagPairs();
+                    const hasThinkStart = startsWithCotBlock(fullRenderedContent, cotTagPairs);
+                    const hasThinkEnd = cotTagPairs.some(({ end }) => end && fullRenderedContent.includes(end));
 
-                // Case 1: Start the timer
-                if (hasThinkStart && !hasThinkEnd && state.streamingThinkTimer.intervalId === null) {
-                    state.streamingThinkTimer.startTime = Date.now();
-                    state.streamingThinkTimer.intervalId = setInterval(() => {
-                        if (state.streamingThinkTimer.intervalId && state.currentAssistantMessageDiv) {
+                    // Timer logic for think blocks
+                    if (hasThinkStart && !hasThinkEnd && state.streamingThinkTimer.intervalId === null) {
+                        state.streamingThinkTimer.startTime = Date.now();
+                        state.streamingThinkTimer.intervalId = setInterval(() => {
+                            if (state.streamingThinkTimer.intervalId && state.currentAssistantMessageDiv) {
+                                const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
+                                if (timerEl) {
+                                    const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
+                                    timerEl.textContent = `${elapsed}s`;
+                                }
+                            } else if (state.streamingThinkTimer.intervalId) {
+                                clearInterval(state.streamingThinkTimer.intervalId);
+                            }
+                        }, 100);
+                    } else if (hasThinkStart && hasThinkEnd && state.streamingThinkTimer.intervalId !== null) {
+                        clearInterval(state.streamingThinkTimer.intervalId);
+                        if (state.currentAssistantMessageDiv) {
                             const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                            if (timerEl) {
+                            if (timerEl && state.streamingThinkTimer.startTime) {
                                 const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
                                 timerEl.textContent = `${elapsed}s`;
                             }
-                        } else if (state.streamingThinkTimer.intervalId) {
-                            clearInterval(state.streamingThinkTimer.intervalId);
                         }
-                    }, 100);
-                } 
-                // Case 2: Stop the timer because a closing CoT tag appeared
-                else if (hasThinkStart && hasThinkEnd && state.streamingThinkTimer.intervalId !== null) {
-                    clearInterval(state.streamingThinkTimer.intervalId);
-                    if (state.currentAssistantMessageDiv) {
-                        const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                        if (timerEl && state.streamingThinkTimer.startTime) {
-                            const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
-                            timerEl.textContent = `${elapsed}s`;
-                        }
+                        state.streamingThinkTimer = { intervalId: null, startTime: null };
                     }
-                    state.streamingThinkTimer = { intervalId: null, startTime: null };
-                }
-                // --- End Timer Logic ---
 
-                const thinkBlockTempId = 'streaming-think-block';
-                const remainingContentTempId = 'streaming-remaining-content';
-                let existingThinkBlockInTarget = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
+                    const thinkBlockTempId = 'streaming-think-block';
+                    const remainingContentTempId = 'streaming-remaining-content';
+                    let existingThinkBlockInTarget = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
 
-                if (hasThinkStart) {
-                    const { thinkContent, remainingText } = parseThinkContent(fullRenderedContent, cotTagPairs);
-                    if (existingThinkBlockInTarget) {
-                        const thinkContentDiv = existingThinkBlockInTarget.querySelector('.think-content');
-                        if (thinkContentDiv) {
-                            thinkContentDiv.innerHTML = marked.parse(thinkContent || '');
-                            thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
-                            applyCodeBlockDefaults(thinkContentDiv);
-                            finalizeStreamingCodeBlocks(thinkContentDiv);
-                        }
-                        let existingRemainingDiv = targetContentDiv.querySelector(`div[data-temp-id="${remainingContentTempId}"]`);
-                        if (remainingText) {
-                            const remainingHtml = renderMarkdown(remainingText, true, null);
-                            if (existingRemainingDiv) {
-                                existingRemainingDiv.innerHTML = remainingHtml;
-                            } else {
-                                existingRemainingDiv = document.createElement('div');
-                                existingRemainingDiv.dataset.tempId = remainingContentTempId;
-                                existingRemainingDiv.innerHTML = remainingHtml;
-                                existingThinkBlockInTarget.insertAdjacentElement('afterend', existingRemainingDiv);
+                    if (hasThinkStart) {
+                        const { thinkContent, remainingText } = parseThinkContent(fullRenderedContent, cotTagPairs);
+                        if (existingThinkBlockInTarget) {
+                            const thinkContentDiv = existingThinkBlockInTarget.querySelector('.think-content');
+                            if (thinkContentDiv) {
+                                thinkContentDiv.innerHTML = marked.parse(thinkContent || '');
+                                thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
+                                applyCodeBlockDefaults(thinkContentDiv);
+                                finalizeStreamingCodeBlocks(thinkContentDiv);
                             }
-                            finalizeStreamingCodeBlocks(existingRemainingDiv);
-                        } else if (existingRemainingDiv) {
-                            existingRemainingDiv.remove();
+                            let existingRemainingDiv = targetContentDiv.querySelector(`div[data-temp-id="${remainingContentTempId}"]`);
+                            if (remainingText) {
+                                const remainingHtml = renderMarkdown(remainingText, true, null);
+                                if (existingRemainingDiv) {
+                                    existingRemainingDiv.innerHTML = remainingHtml;
+                                } else {
+                                    existingRemainingDiv = document.createElement('div');
+                                    existingRemainingDiv.dataset.tempId = remainingContentTempId;
+                                    existingRemainingDiv.innerHTML = remainingHtml;
+                                    existingThinkBlockInTarget.insertAdjacentElement('afterend', existingRemainingDiv);
+                                }
+                                finalizeStreamingCodeBlocks(existingRemainingDiv);
+                            } else if (existingRemainingDiv) {
+                                existingRemainingDiv.remove();
+                            }
+                        } else {
+                            buildContentHtml(targetContentDiv, fullRenderedContent);
+                            finalizeStreamingCodeBlocks(targetContentDiv);
                         }
                     } else {
                         buildContentHtml(targetContentDiv, fullRenderedContent);
                         finalizeStreamingCodeBlocks(targetContentDiv);
                     }
+                    
+                    targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                    if (!state.streamController?.signal.aborted) {
+                        targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
+                    }
+                    updateStreamingMinHeight();
+                    if (state.autoscrollEnabled) requestAutoScroll();
+                    
+                    lastRenderTime = Date.now();
+                };
+                
+                // Throttle: only render if enough time has passed, otherwise schedule
+                if (timeSinceLastRender >= RENDER_THROTTLE_MS) {
+                    doRender();
                 } else {
-                    buildContentHtml(targetContentDiv, fullRenderedContent);
-                    finalizeStreamingCodeBlocks(targetContentDiv);
+                    // Schedule a render for when throttle period ends
+                    pendingRenderTimeout = setTimeout(doRender, RENDER_THROTTLE_MS - timeSinceLastRender);
                 }
+            },
+            // onToolStart
+            (name, args) => {
+                if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                buildContentHtml(targetContentDiv, fullRenderedContent);
                 targetContentDiv.querySelector('.pulsing-cursor')?.remove();
                 if (!state.streamController?.signal.aborted) {
                     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
                 }
-                updateStreamingMinHeight();
-                if (state.autoscrollEnabled) requestAutoScroll();
-            },
-            // --- onToolStart Callback ---
-            (name, args) => {
-                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-                console.log(`Tool Start received: ${name}`, args);
-                buildContentHtml(targetContentDiv, fullRenderedContent); // Render accumulated content before tool
-                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                 if (!state.streamController?.signal.aborted) {
-                    targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
-                 }
                 finalizeStreamingCodeBlocks(targetContentDiv);
                 updateStreamingMinHeight();
                 if (state.autoscrollEnabled) requestAutoScroll();
             },
-            // --- onToolEnd Callback ---
+            // onToolEnd
             (name, result, error) => {
-                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-                 console.log(`Tool End received: ${name}`, error ? `Error: ${error}` : `Result: ${result}`);
-                 buildContentHtml(targetContentDiv, fullRenderedContent); // Render accumulated content before tool result
-                 targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                 if (!state.streamController?.signal.aborted) {
+                if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                buildContentHtml(targetContentDiv, fullRenderedContent);
+                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                if (!state.streamController?.signal.aborted) {
                     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
-                 }
+                }
                  finalizeStreamingCodeBlocks(targetContentDiv);
                  updateStreamingMinHeight();
                 if (state.autoscrollEnabled) requestAutoScroll();
             },
-            // --- onComplete Callback ---
+            // onComplete
             async () => {
-                // ... (onComplete logic remains largely the same, it implies successful completion)
+                if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
                 if (state.currentAssistantMessageDiv !== targetContentDiv) {
-                     console.warn("onComplete: Target div no longer the active streaming div. Skipping final updates.");
+                     console.warn("onComplete: Target div no longer active. Skipping.");
                      if (stopButton.style.display !== 'none' || sendButton.disabled) {
                           setGenerationInProgressUI(false);
                      }
                      return;
                 }
-                console.log("Backend generation completed successfully.");
                 if (targetContentDiv) {
                     targetContentDiv.classList.remove('streaming');
                     targetContentDiv.querySelector('.pulsing-cursor')?.remove();
@@ -3446,10 +3540,26 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 if (state.autoscrollEnabled) requestAutoScroll();
                 else requestAnimationFrame(updateScrollButtonVisibility);
 
+                // Capture collapse states from current DOM before loadChat replaces it
+                const streamingRow = targetContentDiv?.closest('.message-row');
+                const capturedStates = streamingRow ? captureCollapseStates(targetContentDiv) : null;
+
                 try {
                     console.log("Reloading chat state after successful backend generation.");
-                    if (state.currentChatId && targetContentDiv?.closest('.message-row')) {
+                    if (state.currentChatId && streamingRow) {
                         await loadChat(state.currentChatId);
+                        
+                        // Apply captured states to the last assistant message (which now has real ID)
+                        if (capturedStates) {
+                            const lastAssistantRow = messagesWrapper.querySelector('.assistant-row:last-of-type');
+                            if (lastAssistantRow) {
+                                const realMessageId = lastAssistantRow.dataset.messageId;
+                                if (realMessageId && !realMessageId.startsWith('temp_')) {
+                                    state.userCollapseStates.set(realMessageId, capturedStates);
+                                    applyPersistedCollapseStates(lastAssistantRow);
+                                }
+                            }
+                        }
                     } else {
                          // ... (fallback logic if chat context changed)
                     }
@@ -3462,78 +3572,56 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     }
                 }
             },
-            // --- onError Callback (MODIFIED) ---
+            // onError
             async (error, isAbort) => {
-                console.warn(`>>> onError called: isAbort=${isAbort}, message: ${error.message}`);
-                console.log("State of fullRenderedContent at start of onError:", JSON.stringify(fullRenderedContent));
-
+                if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
                 const rowBeingStreamedTo = targetContentDiv ? targetContentDiv.closest('.message-row') : null;
                 const isPlaceholderRow = rowBeingStreamedTo ? rowBeingStreamedTo.classList.contains('placeholder') : false;
 
-                // 1. Clean up visual streaming indicators from the current target div.
-                //    The actual content will be rendered by loadChat.
                 if (targetContentDiv) {
                     targetContentDiv.classList.remove('streaming');
                     targetContentDiv.querySelector('.pulsing-cursor')?.remove();
                     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
-                    console.log("Cleaned streaming UI from targetContentDiv in onError.");
-                } else if (state.currentAssistantMessageDiv) { // Fallback
+                } else if (state.currentAssistantMessageDiv) {
                     state.currentAssistantMessageDiv.classList.remove('streaming');
                     state.currentAssistantMessageDiv.querySelector('.pulsing-cursor')?.remove();
                     state.currentAssistantMessageDiv.querySelector('.generation-stopped-indicator')?.remove();
-                    console.log("Cleaned streaming UI from state.currentAssistantMessageDiv (fallback) in onError.");
                 }
 
-                // 2. Reset global generation UI state. This also nulls state.streamController.
                 setGenerationInProgressUI(false);
-                state.currentAssistantMessageDiv = null; // Ensure this is cleared
+                state.currentAssistantMessageDiv = null;
 
-                // 3. Handle specific logic for abort vs. other errors.
                 if (isAbort) {
                     addSystemMessage("Generation stopped by user.", "info", 2000);
 
                     if (state.currentChatId) {
                         try {
-                            console.log("User abort: Reloading chat state. Delaying for backend save completion.");
-                            // Increased delay: gives backend more time to save the aborted message
-                            // before loadChat attempts to fetch it.
-                            await new Promise(resolve => setTimeout(resolve, 750)); // Adjust as needed
-
+                            await new Promise(resolve => setTimeout(resolve, 750));
                             await loadChat(state.currentChatId);
-                            console.log("Chat reloaded after user abort.");
-                            // scrollToBottom might be useful here if autoscroll is off but user expects to see the new message
-                             if (state.autoscrollEnabled) scrollToBottom('smooth');
-                             else requestAnimationFrame(updateScrollButtonVisibility);
-
+                            if (state.autoscrollEnabled) scrollToBottom('smooth');
+                            else requestAnimationFrame(updateScrollButtonVisibility);
                         } catch (loadError) {
-                            console.error("User abort: Error reloading chat even after delay.", loadError);
-                            addSystemMessage("Error refreshing chat after stop. Please try manually.", "error");
-                            // Fallback UI adjustments if loadChat fails post-abort
+                            console.error("Error reloading chat after abort:", loadError);
+                            addSystemMessage("Error refreshing chat after stop.", "error");
                             if (rowBeingStreamedTo && isPlaceholderRow) {
-                                console.warn("User abort & loadChat fail: Removing placeholder row.");
                                 rowBeingStreamedTo.remove();
                             }
                         }
-                    } else {
-                        console.warn("User abort: No current chat ID. Cannot reload chat state.");
-                        if (rowBeingStreamedTo && isPlaceholderRow) {
-                            rowBeingStreamedTo.remove(); // Clean up placeholder if no chat context
-                        }
+                    } else if (rowBeingStreamedTo && isPlaceholderRow) {
+                        rowBeingStreamedTo.remove();
                     }
-                } else { // Non-abort error
+                } else {
                     addSystemMessage(`Generation Error: ${error.message}`, "error");
-                    // For non-aborts, render what we have plus an error message.
                     if (targetContentDiv) {
                         buildContentHtml(targetContentDiv, fullRenderedContent);
                         finalizeStreamingCodeBlocks(targetContentDiv);
                         targetContentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Error: ${error.message}</span>`);
                     }
                     if (rowBeingStreamedTo && isPlaceholderRow) {
-                        // If it was an error on a brand new placeholder, remove it.
                         rowBeingStreamedTo.remove();
                     }
                 }
-                // Ensure min-height is correctly set for the new last message, if any
+                
                 const lastMessageRowElement = messagesWrapper.lastElementChild;
                 if (lastMessageRowElement && lastMessageRowElement.classList.contains('assistant-row') && !lastMessageRowElement.classList.contains('placeholder')) {
                     const lastAssistantMessageDivElement = lastMessageRowElement.querySelector('.message');
@@ -3543,7 +3631,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 }
                 requestAnimationFrame(updateScrollButtonVisibility);
             },
-            // --- onToolPendingConfirmation Callback ---
+            // onToolPendingConfirmation
             (name, args, callId) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
                 console.log(`Tool pending confirmation: ${name}`, args);
@@ -3615,16 +3703,14 @@ function finalizeStreamingCodeBlocks(containerElement) {
 }
 
 function setGenerationInProgressUI(inProgress) {
-    console.log(`>>> setGenerationInProgressUI called with inProgress = ${inProgress}`);
     if (inProgress) {
         stopButton.style.display = 'flex';
         sendButton.disabled = true;
         sendButton.innerHTML = '<div class="spinner"></div>';
     } else {
-        // Stop and clear any active think timer as a failsafe
+        // Stop and clear any active think timer
         if (state.streamingThinkTimer.intervalId) {
             clearInterval(state.streamingThinkTimer.intervalId);
-            // Perform one final update to show the total duration
             if (state.currentAssistantMessageDiv) {
                 const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
                 if (timerEl && state.streamingThinkTimer.startTime) {
@@ -3633,32 +3719,23 @@ function setGenerationInProgressUI(inProgress) {
                 }
             }
             state.streamingThinkTimer = { intervalId: null, startTime: null };
-            console.log(">>> Cleared think timer in setGenerationInProgressUI");
         }
 
         stopButton.style.display = 'none';
         sendButton.disabled = false;
         sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';
-        console.log(">>> Send button state reset in setGenerationInProgressUI");
         requestAnimationFrame(updateScrollButtonVisibility);
 
-        // Ensure the controller is aborted and nulled if we are truly done.
         if (state.streamController) {
             if (!state.streamController.signal.aborted) {
-                 console.warn(">>> Controller not aborted when setGenerationInProgressUI(false) called. Aborting now.");
                  state.streamController.abort();
             }
             state.streamController = null;
-            console.log(">>> Cleared streamController reference");
-        } else {
-             console.log(">>> No streamController reference to clear or already cleared");
         }
-        // Resetting tool state flags, assuming this is a general "generation ended" state.
         state.toolCallPending = false;
         state.toolContinuationContext = null;
         state.currentToolCallId = null;
         state.abortingForToolCall = false;
-        console.log(">>> Reset tool state flags");
     }
 }
 
@@ -3865,30 +3942,21 @@ function findLastActiveMessageId(messages) {
 }
 
 function cleanupAfterGeneration() {
-    console.log("Running cleanupAfterGeneration");
+    setGenerationInProgressUI(false);
 
-    // Abort stream and reset UI buttons (send/stop)
-    setGenerationInProgressUI(false); // This also aborts and nulls state.streamController if active
-
-    // Explicitly clear and clean the currentAssistantMessageDiv if it's still set
     if (state.currentAssistantMessageDiv) {
         state.currentAssistantMessageDiv.classList.remove('streaming');
         state.currentAssistantMessageDiv.querySelector('.pulsing-cursor')?.remove();
         state.currentAssistantMessageDiv.querySelector('.generation-stopped-indicator')?.remove();
-        // Also reset its minHeight if it was potentially set for streaming the last message
         const messageDiv = state.currentAssistantMessageDiv.closest('.message');
         if (messageDiv) messageDiv.style.minHeight = '';
-
         state.currentAssistantMessageDiv = null;
-        console.log("Cleared and cleaned state.currentAssistantMessageDiv in cleanupAfterGeneration.");
     }
 
-    // Reset tool-related state flags as a general precaution
     state.toolCallPending = false;
     state.toolContinuationContext = null;
     state.currentToolCallId = null;
     state.abortingForToolCall = false;
-    console.log("Reset tool state flags in cleanupAfterGeneration.");
 }
 
 function renderToolCallPlaceholder(messageContentDiv, toolData, options = {}) {
@@ -4100,10 +4168,12 @@ function handleToolBlockToggle(e) {
     if (toggleBtn) {
         const block = toggleBtn.closest('.tool-call-block, .tool-result-block');
         if (block) {
+            block.dataset.userToggled = 'true';
             const isCollapsed = block.classList.toggle('collapsed');
             const icon = toggleBtn.querySelector('i');
             icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
             toggleBtn.title = isCollapsed ? 'Expand details' : 'Collapse details';
+            persistCollapseState(block, 'tool', isCollapsed);
         }
     }
 }
@@ -4326,24 +4396,12 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         }
 
         assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
-        console.log(`%c[DEBUG BRANCH] Created placeholder row:`, 'color: orange; font-weight: bold;', {
-            placeholderId: assistantPlaceholderRow.dataset.messageId,
-            parentRowId: parentRow.dataset.messageId,
-            parentRowInDOM: parentRow.isConnected,
-            generationParentId: generationParentId
-        });
         parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
-        console.log(`%c[DEBUG BRANCH] After insertion:`, 'color: orange; font-weight: bold;', {
-            placeholderInDOM: assistantPlaceholderRow.isConnected,
-            placeholderParent: assistantPlaceholderRow.parentElement?.id || assistantPlaceholderRow.parentElement?.className,
-            messagesWrapperChildren: messagesWrapper.children.length
-        });
         const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
         if (!assistantContentDiv) {
             assistantPlaceholderRow?.remove();
             throw new Error("Failed to create assistant response placeholder element.");
         }
-        console.log(`%c[DEBUG BRANCH] assistantContentDiv found, calling generateAssistantResponse`, 'color: orange; font-weight: bold;');
 
         await generateAssistantResponse(
             generationParentId,

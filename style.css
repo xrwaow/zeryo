@@ -793,6 +793,11 @@ body.welcome-active .input-area .input-container {
     margin-right: 12px;
 }
 
+/* Mobile menu button - hidden by default on desktop */
+.mobile-menu-btn {
+    display: none;
+}
+
 /* Media Query for Mobile */
 @media (max-width: 768px) {
     .sidebar {
@@ -1093,7 +1098,6 @@ body.welcome-active .input-area .input-container {
     cursor: pointer;
     transition: color 0.2s ease;
     appearance: none;
-    appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%23a0a0b0' class='bi bi-chevron-down' viewBox='0 0 16 16'%3E%3Cpath fill-rule='evenodd' d='M1.646 4.646a.5.5 0 0 1 .708 0L8 10.293l5.646-5.647a.5.5 0 0 1 .708.708l-6 6a.5.5 0 0 1-.708 0l-6-6a.5.5 0 0 1 0-.708z'/%3E%3C/svg%3E"); /* IMPORTANT: Update fill='%23...' if your --text-secondary is different */
@@ -1117,15 +1121,7 @@ body.welcome-active .input-area .input-container {
      opacity: 0.6;
 }
 
-.character-create-btn,
-.character-edit-btn,
-.character-delete-btn {
-    width: 100%;
-    margin-bottom: 5px;
-}
-.character-popup button:last-of-type {
-    margin-bottom: 0; /* Remove margin from last button */
-}
+
 
 
 /* Character Modal */
@@ -1362,12 +1358,6 @@ body.welcome-active .input-area .input-container {
     align-items: center;
     color: var(--text-secondary);
     font-size: 14px;
-}
-
-.form-actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
 }
 
 /* === UPDATED/NEW CSS === */
@@ -1984,82 +1974,6 @@ body.welcome-active .input-area .input-container {
     font-style: italic;
 }
 
-.character-card {
-    background: var(--bg-tertiary);
-    border: 1px solid var(--border-color);
-    border-radius: var(--border-radius-md);
-    padding: 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    transition: all .2s ease;
-    cursor: pointer;
-}
-
-.character-card:hover {
-    border-color: var(--accent-color);
-    background: color-mix(in srgb, var(--accent-color) 5%, var(--bg-tertiary));
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-}
-
-.character-card-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 8px;
-}
-
-.character-card-name {
-    font-weight: 600;
-    font-size: 15px;
-    color: var(--text-primary);
-    word-break: break-word;
-    flex: 1;
-}
-
-.character-card-actions {
-    display: flex;
-    gap: 6px;
-}
-
-.character-card-btn {
-    background: transparent;
-    border: 1px solid var(--border-color);
-    color: var(--text-secondary);
-    padding: 4px 8px;
-    border-radius: var(--border-radius-sm);
-    cursor: pointer;
-    font-size: 12px;
-    transition: all .15s ease;
-}
-
-.character-card-btn:hover {
-    border-color: var(--accent-color);
-    color: var(--accent-color);
-    background: color-mix(in srgb, var(--accent-color) 10%, transparent);
-}
-
-.character-card-btn.delete-btn:hover {
-    border-color: var(--error-color);
-    color: var(--error-color);
-    background: color-mix(in srgb, var(--error-color) 10%, transparent);
-}
-
-.character-card-info {
-    font-size: 13px;
-    color: var(--text-secondary);
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.character-card-model {
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
-    color: var(--accent-color);
-}
-
 /* Character Row Styling (in settings modal characters list) */
 .character-row {
     display: flex;
@@ -2607,14 +2521,6 @@ body.welcome-active .input-area .input-container {
 }
 
 /* === ADD THESE RULES AT THE END OF YOUR style.css FILE === */
-
-.mobile-menu-btn {
-    display: none; /* Show the button */
-    position: absolute; /* Position it */
-    left: 10px;
-    top: 9px; /* Adjust vertical alignment */
-    z-index: 110; /* Ensure it's above header background but below sidebar */
-}
 
 @media (max-width: 768px) {
 

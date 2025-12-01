@@ -9,7 +9,6 @@ import yaml
 import sqlite3
 import httpx # <-- NEW: For async requests to LLM providers
 import asyncio # <-- NEW: For cancellation
-import html
 from enum import Enum
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional, AsyncGenerator, Callable, Tuple, Set
@@ -20,6 +19,7 @@ from pydantic import BaseModel, Field, ValidationError
 import traceback # <-- NEW: For detailed error logging
 import re # Add 're' import at the top of the file
 from fastapi.staticfiles import StaticFiles
+import html
 
 app = FastAPI(title="Chat Data API")
 

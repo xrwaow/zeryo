@@ -48,65 +48,7 @@
         </div>
     </div>
     
-    <!-- Modals -->
-    <div class="theme-modal" id="theme-modal">
-        <div class="theme-modal-content">
-            <h3>Appearance Settings</h3>
-            <div class="theme-options">
-                <button class="theme-option" data-theme="white">White Theme</button>
-                <button class="theme-option" data-theme="solarized">Solarized</button>
-                <button class="theme-option" data-theme="dark">Dark Theme</button>
-                <button class="theme-option" data-theme="claude_white">Claude White</button>
-                <button class="theme-option" data-theme="gpt_dark">GPT Dark</button>
-                <button class="theme-option" data-theme="gruvbox_light">Gruvbox Light</button>
-                <button class="theme-option" data-theme="gruvbox_dark">Gruvbox Dark</button>
-            </div>
-            <button id="close-theme-modal-btn" class="btn-secondary" style="margin-top: 20px;">Close</button>
-        </div>
-    </div>
-    
 
-    <div class="gen-settings-modal" id="gen-settings-modal">
-        <div class="gen-settings-modal-content">
-            <h3>Generation Settings</h3>
-            <div class="gen-setting">
-                <label>Temperature (0 to 2)</label>
-                <div class="slider-container">
-                    <input type="range" id="temp-slider" min="0" max="2" step="0.01" value="0.7">
-                    <span id="temp-value">0.7</span>
-                    <label><input type="checkbox" id="temp-none"> None</label>
-                </div>
-            </div>
-            <div class="gen-setting">
-                <label>Min P (0 to 0.5)</label>
-                <div class="slider-container">
-                    <input type="range" id="minp-slider" min="0" max="0.5" step="0.01" value="0.05">
-                    <span id="minp-value">0.05</span>
-                    <label><input type="checkbox" id="minp-none"> None</label>
-                </div>
-            </div>
-            <div class="gen-setting">
-                <label>Max Tokens (1 to 8192)</label>
-                <div class="slider-container">
-                    <input type="range" id="maxt-slider" min="1" max="8192" step="1" value="1024">
-                    <span id="maxt-value">1024</span>
-                    <label><input type="checkbox" id="maxt-none"> None</label>
-                </div>
-            </div>
-             <div class="gen-setting"> <!-- Added Top P slider -->
-                <label>Top P (0 to 1.0)</label>
-                <div class="slider-container">
-                    <input type="range" id="topp-slider" min="0" max="1.0" step="0.01" value="1.0">
-                    <span id="topp-value">1.0</span>
-                    <label><input type="checkbox" id="topp-none"> None</label>
-                </div>
-            </div>
-            <div class="form-actions">
-                <button id="apply-gen-settings" class="btn-primary">Apply</button>
-                <button id="cancel-gen-settings" class="btn-secondary">Cancel</button>
-            </div>
-        </div>
-    </div>
 
 
     <!-- Main Content -->
@@ -176,7 +118,7 @@
             <div class="center-modal-dialog">
                 <div class="center-modal-header">
                     <h3>Settings</h3>
-                    <button id="close-settings-modal" class="popup-close-btn" title="Close"><i class="bi bi-x"></i></button>
+                    <button id="settings-modal-close" class="popup-close-btn" title="Close"><i class="bi bi-x"></i></button>
                 </div>
                 <div class="settings-modal-content">
                     <div class="settings-modal-tabs">
