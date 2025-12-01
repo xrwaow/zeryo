@@ -2955,7 +2955,8 @@ function activeCharacterSupportsImages() {
 function updateAttachmentButtonsForModel() {
     const supports = activeCharacterSupportsImages();
     if (imageButton) {
-        imageButton.disabled = !supports;
+        // Hide the image button entirely when model doesn't support images
+        imageButton.style.display = supports ? '' : 'none';
         imageButton.title = supports ? 'Attach image' : 'Model does not support images';
     }
     if (fileButton) fileButton.disabled = false; // Always allow text file attachments
@@ -3612,13 +3613,21 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     }
                 } else {
                     addSystemMessage(`Generation Error: ${error.message}`, "error");
-                    if (targetContentDiv) {
-                        buildContentHtml(targetContentDiv, fullRenderedContent);
-                        finalizeStreamingCodeBlocks(targetContentDiv);
-                        targetContentDiv.insertAdjacentHTML('beforeend', `<br><span class="system-info-row error">Error: ${error.message}</span>`);
-                    }
+                    // Remove the placeholder row first
                     if (rowBeingStreamedTo && isPlaceholderRow) {
                         rowBeingStreamedTo.remove();
+                    }
+                    // Reload chat to restore previous state (important for regenerate/branch errors)
+                    if (state.currentChatId) {
+                        try {
+                            console.log("Reloading chat to restore state after generation error.");
+                            await loadChat(state.currentChatId);
+                            if (state.autoscrollEnabled) scrollToBottom('smooth');
+                            else requestAnimationFrame(updateScrollButtonVisibility);
+                        } catch (loadError) {
+                            console.error("Error reloading chat after generation error:", loadError);
+                            addSystemMessage("Error refreshing chat after generation failure.", "error");
+                        }
                     }
                 }
                 
