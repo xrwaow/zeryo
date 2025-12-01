@@ -1,3 +1,4 @@
+#!/home/xr/.venv/bin/python
 # api.py
 import base64
 import json
@@ -49,10 +50,11 @@ def get_db_connection():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
     try:
+        conn.execute("PRAGMA foreign_keys = ON;")  # Enable foreign key constraints for CASCADE delete
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA busy_timeout = 5000;")
     except Exception as e:
-        print(f"Warning: Could not set WAL mode or busy_timeout: {e}")
+        print(f"Warning: Could not set pragmas: {e}")
     return conn
 
 # --- Database Initialization (Add tool_calls column) ---
@@ -1016,8 +1018,8 @@ async def _perform_generation_stream(
                                 if not line_strip: continue
 
                                 if not line_strip.startswith("data:"): continue
-                                data_str = line_strip[len("data:"):]
-                                if not data_str.strip(): continue # Handle "data: " lines with only whitespace after
+                                data_str = line_strip[len("data:"):].strip()
+                                if not data_str: continue # Handle "data: " lines with only whitespace after
 
                                 if data_str == "[DONE]":
                                     is_done_signal_from_llm = True
@@ -1345,20 +1347,32 @@ async def _perform_generation_stream(
                     if tool_error_str:
                         print(f"[Gen Tool] {tool_error_str}")
 
-                    result_for_llm_context = tool_result_content_str if not tool_error_str else tool_error_str
+                    # Full result for database and frontend (includes base64 images)
+                    result_for_storage = tool_result_content_str if not tool_error_str else tool_error_str
+                    
+                    # For LLM context, replace base64 image data with [image] placeholder
+                    # to avoid sending huge base64 strings to the model
+                    result_for_llm = result_for_storage
+                    if result_for_llm:
+                        import re
+                        result_for_llm = re.sub(
+                            r'\[IMAGE:base64:[A-Za-z0-9+/=]+\]',
+                            '[image]',
+                            result_for_llm
+                        )
 
                     message_id_B = create_message(
-                        chat_id=chat_id, role=MessageRole.TOOL, content=result_for_llm_context,
+                        chat_id=chat_id, role=MessageRole.TOOL, content=result_for_storage,
                         parent_message_id=message_id_A, model_name=None,
                         tool_call_id=tool_call_id, commit=True
                     )
                     last_saved_message_id = message_id_B
                     print(f"Saved Tool Result Message: {message_id_B}")
 
-                    tool_msg_for_history = {"role": "tool", "message": result_for_llm_context, "tool_call_id": tool_call_id}
+                    tool_msg_for_history = {"role": "tool", "message": result_for_llm, "tool_call_id": tool_call_id}
                     current_llm_history.append(tool_msg_for_history)
 
-                    escaped_result_text = html.escape(result_for_llm_context or "")
+                    escaped_result_text = html.escape(result_for_storage or "")
                     status_attr = ' status="error"' if tool_error_str else ''
                     result_tag_for_frontend = f'<tool_result name="{tool_name}"{status_attr}>{escaped_result_text}</tool_result>'
                     yield f"data: {json.dumps({'type': 'chunk', 'data': result_tag_for_frontend})}\n\n"
@@ -1367,6 +1381,7 @@ async def _perform_generation_stream(
                 tool_call_count += len(tool_calls_info)
                 current_turn_content_accumulated = ""
                 detected_tool_call_info = None
+                continue  # Continue outer while loop for next LLM call
         # --- End of Outer Generation (tool call) Loop ---
 
     except (HTTPException, ValueError, asyncio.CancelledError) as e_outer:

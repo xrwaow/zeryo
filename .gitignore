@@ -8,3 +8,4 @@ __pycache__
 *save*
 electron
 search_api_keys.yaml
+.venv

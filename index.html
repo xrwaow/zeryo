@@ -21,6 +21,18 @@
     <link rel="icon" href="xr_hehe.jpg" type="image/x-icon">
 </head>
 <body>
+    <!-- Character Selection Dropdown -->
+    <div class="character-dropdown" id="character-dropdown" style="display: none;">
+        <div class="character-dropdown-header">
+            <span>Select Character</span>
+            <button class="character-dropdown-close" id="character-dropdown-close">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
+        <div class="character-dropdown-list" id="character-dropdown-list">
+            <div class="character-dropdown-loading">Loading characters…</div>
+        </div>
+    </div>
     <button class="base-button new-chat-btn" id="new-chat-btn">
             <i class="bi bi-plus-lg"></i>
     </button>
@@ -46,6 +58,8 @@
                 <button class="theme-option" data-theme="dark">Dark Theme</button>
                 <button class="theme-option" data-theme="claude_white">Claude White</button>
                 <button class="theme-option" data-theme="gpt_dark">GPT Dark</button>
+                <button class="theme-option" data-theme="gruvbox_light">Gruvbox Light</button>
+                <button class="theme-option" data-theme="gruvbox_dark">Gruvbox Dark</button>
             </div>
             <button id="close-theme-modal-btn" class="btn-secondary" style="margin-top: 20px;">Close</button>
         </div>
@@ -126,19 +140,6 @@
                 <div class="image-preview-container" id="image-preview-container"></div>
                 <textarea id="message-input" placeholder="Say, what's on your mind?" rows="1"></textarea>
                 
-                <!-- Character Selection Dropdown -->
-                <div class="character-dropdown" id="character-dropdown" style="display: none;">
-                    <div class="character-dropdown-header">
-                        <span>Select Character</span>
-                        <button class="character-dropdown-close" id="character-dropdown-close">
-                            <i class="bi bi-x"></i>
-                        </button>
-                    </div>
-                    <div class="character-dropdown-list" id="character-dropdown-list">
-                        <div class="character-dropdown-loading">Loading characters…</div>
-                    </div>
-                </div>
-                
                 <div class="input-controls-row">
                     <div class="input-controls-left">
                         <button class="input-button" id="image-button" title="Attach image">
@@ -184,7 +185,6 @@
                         <button class="settings-tab-btn" data-tab="generation">Generation</button>
                         <button class="settings-tab-btn" data-tab="tools">Tools</button>
                         <button class="settings-tab-btn" data-tab="characters">Characters</button>
-                        <button class="settings-tab-btn" data-tab="cot">CoT Formatting</button>
                     </div>
                     <div class="settings-modal-panels">
                     <div class="settings-tab-panel active" data-panel="main">
@@ -206,6 +206,8 @@
                             <button class="theme-option" data-theme="dark">Dark</button>
                             <button class="theme-option" data-theme="claude_white">Claude White</button>
                             <button class="theme-option" data-theme="gpt_dark">GPT Dark</button>
+                            <button class="theme-option" data-theme="gruvbox_light">Gruvbox Light</button>
+                            <button class="theme-option" data-theme="gruvbox_dark">Gruvbox Dark</button>
                         </div>
                     </div>
                     <div class="settings-tab-panel" data-panel="generation">
@@ -267,21 +269,6 @@
                             <div id="characters-list" class="characters-list empty-state">Loading characters...</div>
                             <small class="settings-hint">Characters bundle system prompt, preferred model, and optional CoT tags.</small>
                         </div>
-                    </div>
-                    <div class="settings-tab-panel" data-panel="cot">
-                        <p class="settings-section-title">Chain-of-Thought Formatting</p>
-                        <div class="settings-row">
-                            <label for="cot-start-tag">Start Tag</label>
-                            <input type="text" id="cot-start-tag" placeholder="<think>" />
-                        </div>
-                        <div class="settings-row">
-                            <label for="cot-end-tag">End Tag</label>
-                            <input type="text" id="cot-end-tag" placeholder="</think>" />
-                        </div>
-                        <div class="form-actions">
-                            <button id="cot-save-btn" class="btn-primary">Save CoT Tags</button>
-                        </div>
-                        <small class="settings-hint">Existing messages keep original tags. New generations use updated tags. Tags are literal (no regex).</small>
                     </div>
                 </div>
                 </div>

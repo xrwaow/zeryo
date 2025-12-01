@@ -21,6 +21,7 @@ const imageButton = document.getElementById('image-button');
 const fileButton = document.getElementById('file-button');
 const stopButton = document.getElementById('stop-button');
 const characterSelectButton = document.getElementById('character-select-button');
+const inputContainer = document.querySelector('.input-container');
 const characterDropdown = document.getElementById('character-dropdown');
 const characterDropdownClose = document.getElementById('character-dropdown-close');
 const characterDropdownList = document.getElementById('character-dropdown-list');
@@ -46,7 +47,6 @@ const settingsModalClose = document.getElementById('settings-modal-close');
 //  - Tab buttons: .settings-tab-btn  with data-tab="<name>"
 //  - Panels: .settings-tab-panel with data-panel="<name>"
 //  - Main checkboxes: #main-toggle-tools, #main-toggle-autoscroll, #main-toggle-codeblocks
-//  - CoT tag inputs: #cot-start-tag, #cot-end-tag and save button #cot-save-btn
 // We'll resolve/query these lazily each time the modal opens to avoid stale NodeLists.
 function querySettingsModalElements() {
     if (!settingsModal) return {};
@@ -56,9 +56,6 @@ function querySettingsModalElements() {
         cbTools: document.getElementById('main-toggle-tools'),
         cbAutoscroll: document.getElementById('main-toggle-autoscroll'),
         cbCodeblocks: document.getElementById('main-toggle-codeblocks'),
-        cotStartInput: document.getElementById('cot-start-tag'),
-        cotEndInput: document.getElementById('cot-end-tag'),
-        cotSaveBtn: document.getElementById('cot-save-btn'),
         toolsPromptPreview: document.getElementById('tools-prompt-preview'),
         toolsListContainer: document.getElementById('tools-checkbox-list')
     };
@@ -76,14 +73,14 @@ function setupModelsTab() {
 }
 
 // --- Characters Tab Implementation ---
-async function fetchCharacters(force=false) {
+async function fetchCharacters(force = false) {
     if (!force && state.charactersCache.length) return state.charactersCache;
     try {
         const resp = await fetch(`${API_BASE}/characters`);
         if (!resp.ok) throw new Error(await resp.text());
         const chars = await resp.json();
-        state.charactersCache = chars;
-        return chars;
+        state.charactersCache = Array.isArray(chars) ? chars : [];
+        return state.charactersCache;
     } catch (e) {
         console.error('Fetch characters failed:', e);
         return [];
@@ -103,21 +100,25 @@ function setupCharactersTab() {
     refreshCharactersUI();
 }
 
-function refreshCharactersUI(preserveScroll=true) {
+function refreshCharactersUI(preserveScroll = true) {
     const listEl = document.getElementById('characters-list');
     if (!listEl) return;
     const prevScroll = listEl.scrollTop;
     listEl.classList.remove('empty-state');
     listEl.textContent = 'Loading...';
     fetchCharacters(true).then(chars => {
-        state.charactersCache = Array.isArray(chars) ? chars : [];
-        if (!chars.length) {
+        const resolvedChars = Array.isArray(chars) ? chars : [];
+        state.charactersCache = resolvedChars;
+        synchronizeActiveCharacterState({ updateUI: false });
+
+        if (!resolvedChars.length) {
             listEl.classList.add('empty-state');
             listEl.textContent = 'No characters yet.';
+            updateActiveCharacterUI();
             return;
         }
         listEl.innerHTML = '';
-        chars.forEach(char => {
+        resolvedChars.forEach(char => {
             const row = document.createElement('div');
             row.className = 'character-row';
             row.dataset.characterId = char.character_id;
@@ -139,15 +140,19 @@ function refreshCharactersUI(preserveScroll=true) {
             listEl.appendChild(row);
         });
         if (preserveScroll) listEl.scrollTop = prevScroll;
+        updateActiveCharacterUI();
     });
 }
 
 async function activateCharacter(characterId) {
     if (!state.currentChatId) {
-        // If no chat yet, just set locally and start new chat bound to that character
         state.currentCharacterId = characterId;
         const cachedChar = state.charactersCache.find(c => c.character_id === characterId);
-        if (cachedChar) state.lastActivatedCharacterPreferredModel = cachedChar.preferred_model || null;
+        if (cachedChar) {
+            state.lastActivatedCharacterPreferredModel = cachedChar.model_name || cachedChar.preferred_model || null;
+            state.activeSystemPrompt = cachedChar.sysprompt || null;
+        }
+        setPersistedCharacterId(characterId);
         updateActiveCharacterUI();
         return;
     }
@@ -159,7 +164,11 @@ async function activateCharacter(characterId) {
         if (!resp.ok) throw new Error(await resp.text());
         state.currentCharacterId = characterId;
         const cachedChar2 = state.charactersCache.find(c => c.character_id === characterId);
-        if (cachedChar2) state.lastActivatedCharacterPreferredModel = cachedChar2.preferred_model || null;
+        if (cachedChar2) {
+            state.lastActivatedCharacterPreferredModel = cachedChar2.model_name || cachedChar2.preferred_model || null;
+            state.activeSystemPrompt = cachedChar2.sysprompt || null;
+        }
+        setPersistedCharacterId(characterId);
         updateActiveCharacterUI();
         refreshCharactersUI(false);
         updateEffectiveSystemPrompt();
@@ -172,23 +181,28 @@ async function activateCharacter(characterId) {
 function hideCharacterDropdown() {
     if (!characterDropdown) return;
     characterDropdown.style.display = 'none';
-    characterDropdown.style.left = '';
 }
 
-function positionCharacterDropdown() {
-    if (!characterDropdown || !characterSelectButton) return;
-    if (characterDropdown.style.display === 'none') return;
-    const container = characterSelectButton.closest('.input-container');
+function showCharacterDropdown() {
+    if (!characterDropdown) return;
+    
+    const container = document.querySelector('.input-container');
     if (!container) return;
-    const buttonRect = characterSelectButton.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    const dropdownRect = characterDropdown.getBoundingClientRect();
-    if (!buttonRect || !containerRect || !dropdownRect) return;
-    const padding = 8;
-    let left = buttonRect.left - containerRect.left + (buttonRect.width - dropdownRect.width) / 2;
-    const maxLeft = containerRect.width - dropdownRect.width - padding;
-    left = Math.max(padding, Math.min(left, maxLeft < padding ? padding : maxLeft));
-    characterDropdown.style.left = `${left}px`;
+    
+    const rect = container.getBoundingClientRect();
+    const gap = 10;
+    
+    // Show dropdown and position it
+    characterDropdown.style.display = 'flex';
+    characterDropdown.style.position = 'fixed';
+    characterDropdown.style.left = `${rect.left}px`;
+    
+    // Position above input container
+    const dropdownHeight = characterDropdown.offsetHeight || 300;
+    const top = Math.max(10, rect.top - gap - dropdownHeight);
+    
+    characterDropdown.style.top = `${top}px`;
+    characterDropdown.style.bottom = 'auto';
 }
 
 // Populate the character dropdown in input area
@@ -245,36 +259,86 @@ async function populateCharacterDropdown() {
     });
     characterDropdownList.appendChild(createItem);
 
-    requestAnimationFrame(positionCharacterDropdown);
+    requestAnimationFrame(showCharacterDropdown);
 }
 
 function openCharacterEditor(existing=null) {
     const overlay = document.createElement('div'); overlay.className='attachment-popup-overlay';
     overlay.addEventListener('click', e=>{ if (e.target===overlay) overlay.remove(); });
+    
     const container = document.createElement('div'); container.className='attachment-popup-container character-editor';
+    
+    // Header with title and close button (matches center-modal-dialog pattern)
+    const header = document.createElement('div'); header.className='character-editor-header';
     const title = document.createElement('h3'); title.textContent = existing ? 'Edit Character' : 'Add Character';
-    const nameInput = document.createElement('input'); nameInput.placeholder='Character Name'; nameInput.value=existing?.character_name||''; if (existing) nameInput.disabled = true;
-    const promptArea = document.createElement('textarea'); promptArea.placeholder='System Prompt'; promptArea.value=existing?.sysprompt||'';
-    // Embedded model freeform fields
-    const modelNameInput = document.createElement('input'); modelNameInput.placeholder='Model Name (stable key)'; modelNameInput.value = existing?.model_name || existing?.preferred_model || '';
-    const modelProviderInput = document.createElement('input'); modelProviderInput.placeholder='Provider (openrouter/local/etc)'; modelProviderInput.value = existing?.model_provider || '';
-    const modelIdentifierInput = document.createElement('input'); modelIdentifierInput.placeholder='Model Identifier (API)'; modelIdentifierInput.value = existing?.model_identifier || '';
-    const supportsImagesLabel = document.createElement('label'); supportsImagesLabel.className='checkbox-inline'; supportsImagesLabel.innerHTML=`<input type="checkbox" ${ (existing?.model_supports_images || existing?.preferred_model_supports_images)?'checked':''}> Supports Images`;
-    const cotStart = document.createElement('input'); cotStart.placeholder='CoT Start Tag e.g. <think>'; cotStart.value = existing?.cot_start_tag || '';
-    const cotEnd = document.createElement('input'); cotEnd.placeholder='CoT End Tag e.g. </think>'; cotEnd.value = existing?.cot_end_tag || '';
+    const closeBtn = document.createElement('button'); closeBtn.className='popup-close-btn'; closeBtn.innerHTML='<i class="bi bi-x"></i>';
+    closeBtn.addEventListener('click', ()=>overlay.remove());
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+    
+    // Scrollable body
+    const body = document.createElement('div'); body.className='character-editor-body';
+    
+    // Form groups
+    const createFormGroup = (labelText, input) => {
+        const group = document.createElement('div'); group.className='form-group';
+        const label = document.createElement('label'); label.textContent = labelText;
+        group.appendChild(label);
+        group.appendChild(input);
+        return group;
+    };
+    
+    const nameInput = document.createElement('input'); nameInput.type='text'; nameInput.placeholder='Enter character name'; nameInput.value=existing?.character_name||''; if (existing) nameInput.disabled = true;
+    const promptArea = document.createElement('textarea'); promptArea.placeholder='Enter the system prompt for this character...'; promptArea.value=existing?.sysprompt||'';
+    
+    // Model fields
+    const modelNameInput = document.createElement('input'); modelNameInput.type='text'; modelNameInput.placeholder='e.g., claude-3-opus'; modelNameInput.value = existing?.model_name || existing?.preferred_model || '';
+    const modelProviderSelect = document.createElement('select');
+    ['openrouter', 'google', 'local'].forEach(provider => {
+        const opt = document.createElement('option');
+        opt.value = provider;
+        opt.textContent = provider.charAt(0).toUpperCase() + provider.slice(1);
+        if ((existing?.model_provider || 'openrouter') === provider) opt.selected = true;
+        modelProviderSelect.appendChild(opt);
+    });
+    const modelIdentifierInput = document.createElement('input'); modelIdentifierInput.type='text'; modelIdentifierInput.placeholder='e.g., anthropic/claude-3-opus'; modelIdentifierInput.value = existing?.model_identifier || '';
+    
+    // Checkbox for image support
+    const supportsImagesLabel = document.createElement('label'); supportsImagesLabel.className='checkbox-inline';
+    const supportsImagesCheckbox = document.createElement('input'); supportsImagesCheckbox.type='checkbox'; supportsImagesCheckbox.checked = existing?.model_supports_images || existing?.preferred_model_supports_images || false;
+    supportsImagesLabel.appendChild(supportsImagesCheckbox);
+    supportsImagesLabel.appendChild(document.createTextNode(' Supports Images'));
+    
+    // CoT tags in a row
+    const cotStart = document.createElement('input'); cotStart.type='text'; cotStart.placeholder='<think>'; cotStart.value = existing?.cot_start_tag || '';
+    const cotEnd = document.createElement('input'); cotEnd.type='text'; cotEnd.placeholder='</think>'; cotEnd.value = existing?.cot_end_tag || '';
+    const cotRow = document.createElement('div'); cotRow.className='form-row';
+    cotRow.appendChild(createFormGroup('CoT Start Tag', cotStart));
+    cotRow.appendChild(createFormGroup('CoT End Tag', cotEnd));
+    
+    // Assemble body
+    body.appendChild(createFormGroup('Character Name', nameInput));
+    body.appendChild(createFormGroup('System Prompt', promptArea));
+    body.appendChild(createFormGroup('Model Name', modelNameInput));
+    body.appendChild(createFormGroup('Provider', modelProviderSelect));
+    body.appendChild(createFormGroup('Model Identifier (API)', modelIdentifierInput));
+    body.appendChild(supportsImagesLabel);
+    body.appendChild(cotRow);
+    
+    // Actions footer
     const actions = document.createElement('div'); actions.className='form-actions';
-    const saveBtn = document.createElement('button'); saveBtn.className='btn-primary'; saveBtn.textContent='Save';
     const cancelBtn = document.createElement('button'); cancelBtn.className='btn-secondary'; cancelBtn.textContent='Cancel'; cancelBtn.addEventListener('click', ()=>overlay.remove());
+    const saveBtn = document.createElement('button'); saveBtn.className='btn-primary'; saveBtn.textContent='Save';
     saveBtn.addEventListener('click', async () => {
         const body = {
             character_name: nameInput.value.trim(),
             sysprompt: promptArea.value,
-            preferred_model: modelNameInput.value.trim() || null, // legacy field retained for compat
-            preferred_model_supports_images: supportsImagesLabel.querySelector('input').checked,
+            preferred_model: modelNameInput.value.trim() || null,
+            preferred_model_supports_images: supportsImagesCheckbox.checked,
             model_name: modelNameInput.value.trim() || null,
-            model_provider: modelProviderInput.value.trim() || null,
+            model_provider: modelProviderSelect.value || null,
             model_identifier: modelIdentifierInput.value.trim() || null,
-            model_supports_images: supportsImagesLabel.querySelector('input').checked,
+            model_supports_images: supportsImagesCheckbox.checked,
             cot_start_tag: cotStart.value.trim() || null,
             cot_end_tag: cotEnd.value.trim() || null,
             settings: {}
@@ -284,7 +348,6 @@ function openCharacterEditor(existing=null) {
             if (existing) {
                 resp = await fetch(`${API_BASE}/character/${existing.character_id}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
                 if (!resp.ok) throw new Error(await resp.text());
-                // Update local cache entry immediately to avoid race where activeSystemPrompt becomes null
                 const idx = state.charactersCache.findIndex(c => c.character_id === existing.character_id);
                 if (idx !== -1) {
                     state.charactersCache[idx] = {
@@ -302,7 +365,6 @@ function openCharacterEditor(existing=null) {
                         settings: body.settings
                     };
                 }
-                // If this character is active, refresh prompt + preferred model fallback now
                 if (state.currentCharacterId === existing.character_id) {
                     state.lastActivatedCharacterPreferredModel = body.model_name || body.preferred_model || null;
                     state.activeSystemPrompt = body.sysprompt || null;
@@ -316,7 +378,6 @@ function openCharacterEditor(existing=null) {
                 if (!resp.ok) throw new Error(await resp.text());
                 const data = await resp.json();
                 const newId = data.character_id;
-                // Construct new character object locally (mirrors /characters shape)
                 const newChar = {
                     character_id: newId,
                     character_name: body.character_name,
@@ -331,13 +392,10 @@ function openCharacterEditor(existing=null) {
                     cot_end_tag: body.cot_end_tag,
                     settings: body.settings
                 };
-                // Insert into cache immediately to avoid needing a refetch before activation
                 state.charactersCache.push(newChar);
                 refreshCharactersUI(false);
                 overlay.remove();
-                // Activate immediately (will handle chat binding if chat exists)
                 await activateCharacter(newId);
-                // Ensure system prompt + fallback model set (activateCharacter may have raced before cache list UI re-render)
                 state.lastActivatedCharacterPreferredModel = newChar.model_name || newChar.preferred_model || null;
                 state.activeSystemPrompt = newChar.sysprompt || null;
                 updateEffectiveSystemPrompt();
@@ -347,18 +405,15 @@ function openCharacterEditor(existing=null) {
             alert('Character save failed: '+ e.message);
         }
     });
-    actions.appendChild(saveBtn); actions.appendChild(cancelBtn);
-    container.appendChild(title);
-    container.appendChild(nameInput);
-    container.appendChild(promptArea);
-    container.appendChild(modelNameInput);
-    container.appendChild(modelProviderInput);
-    container.appendChild(modelIdentifierInput);
-    container.appendChild(supportsImagesLabel);
-    container.appendChild(cotStart);
-    container.appendChild(cotEnd);
+    actions.appendChild(cancelBtn);
+    actions.appendChild(saveBtn);
+    
+    // Assemble container
+    container.appendChild(header);
+    container.appendChild(body);
     container.appendChild(actions);
-    overlay.appendChild(container); document.body.appendChild(overlay);
+    overlay.appendChild(container);
+    document.body.appendChild(overlay);
 }
 
 async function deleteCharacter(characterId) {
@@ -370,6 +425,7 @@ async function deleteCharacter(characterId) {
             state.currentCharacterId = null;
             updateActiveCharacterUI();
             updateEffectiveSystemPrompt();
+            setPersistedCharacterId(null);
         }
         state.charactersCache = []; // Force refetch
         refreshCharactersUI(false);
@@ -422,6 +478,70 @@ const state = {
 
 let cachedPersistedCotTags = null;
 let cachedPersistedCotTagsLoaded = false;
+
+const LAST_CHARACTER_STORAGE_KEY = 'lastCharacterId';
+let autoScrollFrameId = null;
+
+function getPersistedCharacterId() {
+    try {
+        const value = localStorage.getItem(LAST_CHARACTER_STORAGE_KEY);
+        return value || null;
+    } catch (error) {
+        console.warn('Failed to read persisted character id from storage:', error);
+        return null;
+    }
+}
+
+function setPersistedCharacterId(characterId) {
+    try {
+        if (characterId) {
+            localStorage.setItem(LAST_CHARACTER_STORAGE_KEY, characterId);
+        } else {
+            localStorage.removeItem(LAST_CHARACTER_STORAGE_KEY);
+        }
+    } catch (error) {
+        console.warn('Failed to persist character id:', error);
+    }
+}
+
+function synchronizeActiveCharacterState({ updateUI = true } = {}) {
+    const cache = Array.isArray(state.charactersCache) ? state.charactersCache : [];
+    const storedId = getPersistedCharacterId();
+    let effectiveId = state.currentCharacterId || storedId || null;
+    let activeChar = null;
+
+    if (effectiveId) {
+        activeChar = cache.find(c => c.character_id === effectiveId) || null;
+    }
+
+    if (!activeChar && storedId && storedId !== effectiveId) {
+        activeChar = cache.find(c => c.character_id === storedId) || null;
+        if (activeChar) {
+            effectiveId = storedId;
+        }
+    }
+
+    if (!activeChar && effectiveId) {
+        if (storedId === effectiveId) {
+            setPersistedCharacterId(null);
+        }
+        state.currentCharacterId = null;
+        state.lastActivatedCharacterPreferredModel = null;
+        state.activeSystemPrompt = null;
+    } else if (activeChar) {
+        state.currentCharacterId = activeChar.character_id;
+        state.lastActivatedCharacterPreferredModel = activeChar.model_name || activeChar.preferred_model || null;
+        state.activeSystemPrompt = activeChar.sysprompt || null;
+        setPersistedCharacterId(activeChar.character_id);
+    } else {
+        state.currentCharacterId = null;
+        state.lastActivatedCharacterPreferredModel = null;
+        state.activeSystemPrompt = null;
+    }
+
+    if (updateUI) updateActiveCharacterUI();
+    return activeChar;
+}
 
 // --- Helper: Escape HTML for safe insertion into attribute/text contexts ---
 function escapeHtml(str) {
@@ -569,6 +689,46 @@ const THEMES_CONFIG = {
         '--tool-call-border': '#e97c5d',
         '--tool-result-bg': 'rgba(0, 0, 0, 0.02)',
         '--tool-result-border': '#aaa',
+    },
+    gruvbox_dark: {
+        '--bg-primary': '#1d2021',
+        '--bg-secondary': '#282828',
+        '--bg-tertiary': '#3c3836',
+        '--text-primary': '#ebdbb2',
+        '--text-secondary': '#a89984',
+        '--accent-color': '#ebdbb2',
+        '--accent-hover': '#a89984',
+        '--accent-color-highlight': 'rgba(235, 219, 178, 0.3)',
+        '--error-color': '#fb4934',
+        '--error-hover': '#cc241d',
+        '--message-user': '#32302f',
+        '--scrollbar-bg': '#32302f',
+        '--scrollbar-thumb': '#504945',
+        '--border-color': '#504945',
+        '--tool-call-bg': 'rgba(250, 189, 47, 0.1)',
+        '--tool-call-border': '#a89984',
+        '--tool-result-bg': 'rgba(168, 153, 132, 0.08)',
+        '--tool-result-border': '#a89984',
+    },
+    gruvbox_light: {
+        '--bg-primary': '#fbf1c7',
+        '--bg-secondary': '#f9f5d7',
+        '--bg-tertiary': '#ebdbb2',
+        '--text-primary': '#3c3836',
+        '--text-secondary': '#665c54',
+        '--accent-color': '#d79921',
+        '--accent-hover': '#b57614',
+        '--accent-color-highlight': 'rgba(215, 153, 33, 0.3)',
+        '--error-color': '#cc241d',
+        '--error-hover': '#9d0006',
+        '--message-user': '#f2e5bc',
+        '--scrollbar-bg': '#f2e5bc',
+        '--scrollbar-thumb': '#d5c4a1',
+        '--border-color': '#d5c4a1',
+        '--tool-call-bg': 'rgba(215, 153, 33, 0.1)',
+        '--tool-call-border': '#d79921',
+        '--tool-result-bg': 'rgba(102, 92, 84, 0.08)',
+        '--tool-result-border': '#665c54',
     }
 };
 
@@ -743,389 +903,6 @@ function renderToolsCheckboxList(container) {
 
 /**
  * Renders markdown text, handling think blocks, code blocks, and LaTeX.
- * It does NOT handle the special <tool> or <tool_result> tags itself.
- * Code block enhancement respects the global state.codeBlocksDefaultCollapsed.
- *
- * @param {string} text The raw text segment to render (can include <think> block).
- * @param {boolean} [initialCollapsedState=true] Initial collapsed state for think blocks (if any).
- * @param {string|null} [temporaryId=null] Optional temporary ID for the think block wrapper (used during streaming).
- * @returns {string} The rendered HTML string.
- */
-function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
-    let processedText = text || '';
-    let html = '';
-    const cotTagPairs = getCotTagPairs();
-    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
-
-    // This local function performs the complete rendering pipeline for a given piece of markdown.
-    // It correctly handles code blocks and KaTeX rendering in the proper order.
-    const renderCore = (markdownText) => {
-        if (!markdownText) return '';
-
-        // 1. Parse markdown into an HTML string. marked.js handles the initial structure.
-        let htmlString = marked.parse(markdownText);
-
-        // 2. Protect code blocks by replacing them with placeholders.
-        const protectedCodeBlocks = [];
-        htmlString = htmlString.replace(/<pre>[\s\S]*?<\/pre>/g, (match) => {
-            const placeholder = `%%CODE_BLOCK_${protectedCodeBlocks.length}%%`;
-            protectedCodeBlocks.push(match);
-            return placeholder;
-        });
-
-        // 3. Now that code blocks are safe, run the KaTeX placeholder logic on the remaining HTML.
-        const katexBlocks = [];
-        const katexInlines = [];
-
-        htmlString = htmlString.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
-            const placeholder = `%%LATEX_BLOCK_${katexBlocks.length}%%`;
-            katexBlocks.push(latex.trim());
-            return placeholder;
-        });
-
-        htmlString = htmlString.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
-            const placeholder = `%%LATEX_INLINE_${katexInlines.length}%%`;
-            katexInlines.push(latex.trim());
-            return placeholder;
-        });
-        
-        // 4. Render the KaTeX placeholders into final HTML.
-        htmlString = htmlString.replace(/%%LATEX_BLOCK_(\d+)%%/g, (match, index) => {
-            const latex = katexBlocks[parseInt(index, 10)];
-            try {
-                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
-            } catch (e) {
-                console.error('KaTeX block rendering error:', e, "Input:", latex);
-                return `<span class="katex-error">[Block LaTeX Error]</span>`;
-            }
-        });
-
-        htmlString = htmlString.replace(/%%LATEX_INLINE_(\d+)%%/g, (match, index) => {
-            const latex = katexInlines[parseInt(index, 10)];
-            try {
-                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
-            } catch (e) {
-                console.error('KaTeX inline rendering error:', e, "Input:", latex);
-                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
-            }
-        });
-
-        // 5. Restore the original code blocks.
-        htmlString = htmlString.replace(/%%CODE_BLOCK_(\d+)%%/g, (match, index) => {
-            return protectedCodeBlocks[parseInt(index, 10)];
-        });
-
-        // 6. Finally, enhance the restored code blocks with our custom wrappers.
-        const tempContainer = document.createElement('div');
-        tempContainer.innerHTML = htmlString;
-        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
-
-        return tempContainer.innerHTML;
-    };
-
-    if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
-
-        const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
-        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
-
-        const header = document.createElement('div');
-        header.className = 'think-header';
-        header.innerHTML = `
-            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
-            <span class="think-timer"></span>
-            <div class="think-header-actions">
-                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
-                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
-                </button>
-            </div>`;
-        thinkBlockWrapper.appendChild(header);
-
-        const thinkContentDiv = document.createElement('div');
-        thinkContentDiv.className = 'think-content';
-        // Use the unified core renderer for the think block's content.
-        thinkContentDiv.innerHTML = renderCore(thinkContent);
-        thinkBlockWrapper.appendChild(thinkContentDiv);
-
-        html += thinkBlockWrapper.outerHTML;
-        processedText = remainingText; // Set the rest of the text to be processed.
-    }
-
-    if (processedText) {
-        // Use the unified core renderer for the main/remaining content.
-        const renderedMainContent = renderCore(processedText);
-        
-        if (isThinkBlockSegment && temporaryId) {
-            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
-        } else {
-            html += renderedMainContent;
-        }
-    }
-
-    return html;
-}/**
- * Renders markdown text, handling think blocks, code blocks, and LaTeX.
- * It does NOT handle the special <tool> or <tool_result> tags itself.
- * Code block enhancement respects the global state.codeBlocksDefaultCollapsed.
- *
- * @param {string} text The raw text segment to render (can include <think> block).
- * @param {boolean} [initialCollapsedState=true] Initial collapsed state for think blocks (if any).
- * @param {string|null} [temporaryId=null] Optional temporary ID for the think block wrapper (used during streaming).
- * @returns {string} The rendered HTML string.
- */
-function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
-    let processedText = text || '';
-    let html = '';
-    const cotTagPairs = getCotTagPairs();
-    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
-
-    // This local function performs the complete rendering pipeline for a given piece of markdown.
-    // It correctly handles code blocks and KaTeX rendering in the proper order.
-    const renderCore = (markdownText) => {
-        if (!markdownText) return '';
-
-        // 1. Parse markdown into an HTML string. marked.js handles the initial structure.
-        let htmlString = marked.parse(markdownText);
-
-        // 2. Protect code blocks by replacing them with placeholders.
-        const protectedCodeBlocks = [];
-        htmlString = htmlString.replace(/<pre>[\s\S]*?<\/pre>/g, (match) => {
-            const placeholder = `%%CODE_BLOCK_${protectedCodeBlocks.length}%%`;
-            protectedCodeBlocks.push(match);
-            return placeholder;
-        });
-
-        // 3. Now that code blocks are safe, run the KaTeX placeholder logic on the remaining HTML.
-        const katexBlocks = [];
-        const katexInlines = [];
-
-        // For Block-level KaTeX ($$ ... $$)
-        htmlString = htmlString.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
-            const placeholder = `%%LATEX_BLOCK_${katexBlocks.length}%%`;
-            // **THE FIX:** Clean up <br> tags inserted by marked.js due to the `breaks: true` option.
-            const cleanedLatex = latex.replace(/<br\s*\/?>/gi, '\n');
-            katexBlocks.push(cleanedLatex.trim());
-            return placeholder;
-        });
-
-        // For Inline KaTeX ($ ... $)
-        htmlString = htmlString.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
-            const placeholder = `%%LATEX_INLINE_${katexInlines.length}%%`;
-            katexInlines.push(latex.trim());
-            return placeholder;
-        });
-
-        // 4. Render the KaTeX placeholders into final HTML.
-        htmlString = htmlString.replace(/%%LATEX_BLOCK_(\d+)%%/g, (match, index) => {
-            const latex = katexBlocks[parseInt(index, 10)];
-            try {
-                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
-            } catch (e) {
-                console.error('KaTeX block rendering error:', e, "Input:", latex);
-                return `<span class="katex-error">[Block LaTeX Error]</span>`;
-            }
-        });
-
-        htmlString = htmlString.replace(/%%LATEX_INLINE_(\d+)%%/g, (match, index) => {
-            const latex = katexInlines[parseInt(index, 10)];
-            try {
-                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
-            } catch (e) {
-                console.error('KaTeX inline rendering error:', e, "Input:", latex);
-                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
-            }
-        });
-
-        // 5. Restore the original code blocks.
-        htmlString = htmlString.replace(/%%CODE_BLOCK_(\d+)%%/g, (match, index) => {
-            return protectedCodeBlocks[parseInt(index, 10)];
-        });
-
-        // 6. Finally, enhance the restored code blocks with our custom wrappers.
-        const tempContainer = document.createElement('div');
-        tempContainer.innerHTML = htmlString;
-        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
-
-        return tempContainer.innerHTML;
-    };
-
-    if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
-
-        const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
-        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
-
-        const header = document.createElement('div');
-        header.className = 'think-header';
-        header.innerHTML = `
-            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
-            <span class="think-timer"></span>
-            <div class="think-header-actions">
-                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
-                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
-                </button>
-            </div>`;
-        thinkBlockWrapper.appendChild(header);
-
-        const thinkContentDiv = document.createElement('div');
-        thinkContentDiv.className = 'think-content';
-        // Use the unified core renderer for the think block's content.
-        thinkContentDiv.innerHTML = renderCore(thinkContent);
-        thinkBlockWrapper.appendChild(thinkContentDiv);
-
-        html += thinkBlockWrapper.outerHTML;
-        processedText = remainingText; // Set the rest of the text to be processed.
-    }
-
-    if (processedText) {
-        // Use the unified core renderer for the main/remaining content.
-        const renderedMainContent = renderCore(processedText);
-        
-        if (isThinkBlockSegment && temporaryId) {
-            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
-        } else {
-            html += renderedMainContent;
-        }
-    }
-
-    return html;
-}/**
- * Renders markdown text, handling think blocks, code blocks, and LaTeX.
- * It does NOT handle the special <tool> or <tool_result> tags itself.
- * Code block enhancement respects the global state.codeBlocksDefaultCollapsed.
- *
- * @param {string} text The raw text segment to render (can include <think> block).
- * @param {boolean} [initialCollapsedState=true] Initial collapsed state for think blocks (if any).
- * @param {string|null} [temporaryId=null] Optional temporary ID for the think block wrapper (used during streaming).
- * @returns {string} The rendered HTML string.
- */
-function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) {
-    let processedText = text || '';
-    let html = '';
-    const cotTagPairs = getCotTagPairs();
-    let isThinkBlockSegment = startsWithCotBlock(processedText, cotTagPairs);
-
-    // This local function performs the complete rendering pipeline for a given piece of markdown.
-    // It correctly handles code blocks and KaTeX rendering in the proper order.
-    const renderCore = (markdownText) => {
-        if (!markdownText) return '';
-
-        // 1. Parse markdown into an HTML string.
-        let htmlString = marked.parse(markdownText);
-
-        // 2. Protect code blocks by replacing them with a markdown-safe placeholder.
-        const protectedCodeBlocks = [];
-        // Using @@...@@ as a placeholder to avoid markdown parsers interpreting _ or *
-        htmlString = htmlString.replace(/<pre>[\s\S]*?<\/pre>/g, (match) => {
-            const placeholder = `@@CODE_BLOCK_${protectedCodeBlocks.length}@@`;
-            protectedCodeBlocks.push(match);
-            return placeholder;
-        });
-
-        // 3. Now that code blocks are safe, run the KaTeX placeholder logic on the remaining HTML.
-        const katexBlocks = [];
-        const katexInlines = [];
-
-        htmlString = htmlString.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
-            // Using @@...@@ as a placeholder to avoid markdown parsers.
-            const placeholder = `@@LATEX_BLOCK_${katexBlocks.length}@@`;
-            const cleanedLatex = latex.replace(/<br\s*\/?>/gi, '\n');
-            katexBlocks.push(cleanedLatex.trim());
-            return placeholder;
-        });
-
-        htmlString = htmlString.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
-            // Using @@...@@ as a placeholder to avoid markdown parsers.
-            const placeholder = `@@LATEX_INLINE_${katexInlines.length}@@`;
-            katexInlines.push(latex.trim());
-            return placeholder;
-        });
-
-        // 4. Render the KaTeX placeholders into final HTML.
-        htmlString = htmlString.replace(/@@LATEX_BLOCK_(\d+)@@/g, (match, index) => {
-            const latex = katexBlocks[parseInt(index, 10)];
-            try {
-                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                return katex.renderToString(decodedLatex, { displayMode: true, throwOnError: false });
-            } catch (e) {
-                console.error('KaTeX block rendering error:', e, "Input:", latex);
-                return `<span class="katex-error">[Block LaTeX Error]</span>`;
-            }
-        });
-
-        htmlString = htmlString.replace(/@@LATEX_INLINE_(\d+)@@/g, (match, index) => {
-            const latex = katexInlines[parseInt(index, 10)];
-            try {
-                const decodedLatex = latex.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-                return katex.renderToString(decodedLatex, { displayMode: false, throwOnError: false });
-            } catch (e) {
-                console.error('KaTeX inline rendering error:', e, "Input:", latex);
-                return `<span class="katex-error">[Inline LaTeX Error]</span>`;
-            }
-        });
-
-        // 5. Restore the original code blocks.
-        htmlString = htmlString.replace(/@@CODE_BLOCK_(\d+)@@/g, (match, index) => {
-            return protectedCodeBlocks[parseInt(index, 10)];
-        });
-
-        // 6. Finally, enhance the restored code blocks with our custom wrappers.
-        const tempContainer = document.createElement('div');
-        tempContainer.innerHTML = htmlString;
-        tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
-
-        return tempContainer.innerHTML;
-    };
-
-    if (isThinkBlockSegment) {
-        const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
-
-        const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
-        if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
-
-        const header = document.createElement('div');
-        header.className = 'think-header';
-        header.innerHTML = `
-            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
-            <span class="think-timer"></span>
-            <div class="think-header-actions">
-                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
-                    <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
-                </button>
-            </div>`;
-        thinkBlockWrapper.appendChild(header);
-
-        const thinkContentDiv = document.createElement('div');
-        thinkContentDiv.className = 'think-content';
-        // Use the unified core renderer for the think block's content.
-        thinkContentDiv.innerHTML = renderCore(thinkContent);
-        thinkBlockWrapper.appendChild(thinkContentDiv);
-
-        html += thinkBlockWrapper.outerHTML;
-        processedText = remainingText; // Set the rest of the text to be processed.
-    }
-
-    if (processedText) {
-        // Use the unified core renderer for the main/remaining content.
-        const renderedMainContent = renderCore(processedText);
-        
-        if (isThinkBlockSegment && temporaryId) {
-            html += `<div data-temp-id="streaming-remaining-content">${renderedMainContent}</div>`;
-        } else {
-            html += renderedMainContent;
-        }
-    }
-
-    return html;
-}/**
- * Renders markdown text, handling think blocks, code blocks, and LaTeX.
  * This version uses a robust multi-pass strategy to correctly handle LaTeX
  * by isolating it before the markdown parser can interfere.
  *
@@ -1147,15 +924,43 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
         const katexBlocks = [];
         const katexInlines = [];
 
+        // Helper to check if a match position is escaped by preceding backslash
+        const isEscaped = (source, startIndex) => {
+            let slashCount = 0;
+            for (let i = startIndex - 1; i >= 0 && source[i] === '\\'; i--) {
+                slashCount++;
+            }
+            return (slashCount % 2) === 1;
+        };
+
         // 1. ISOLATE AND PROTECT LATEX FIRST.
         // This is the crucial step. We remove LaTeX from the string before the
         // markdown parser can see and corrupt characters like '_' or '|'.
-        let textWithPlaceholders = markdownText.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+        
+        // Handle \[...\] block LaTeX (must come before $$ to avoid conflicts)
+        let textWithPlaceholders = markdownText.replace(/\\\[([\s\S]+?)\\\]/g, (match, latex, offset, source) => {
+            if (isEscaped(source, offset)) return match;
             const placeholder = `@@LATEX_BLOCK_${katexBlocks.length}@@`;
             katexBlocks.push(latex.trim());
             return placeholder;
         });
 
+        // Handle $$...$$ block LaTeX
+        textWithPlaceholders = textWithPlaceholders.replace(/\$\$([\s\S]+?)\$\$/g, (match, latex) => {
+            const placeholder = `@@LATEX_BLOCK_${katexBlocks.length}@@`;
+            katexBlocks.push(latex.trim());
+            return placeholder;
+        });
+
+        // Handle \(...\) inline LaTeX (must come before $ to avoid conflicts)
+        textWithPlaceholders = textWithPlaceholders.replace(/\\\((.+?)\\\)/g, (match, latex, offset, source) => {
+            if (isEscaped(source, offset)) return match;
+            const placeholder = `@@LATEX_INLINE_${katexInlines.length}@@`;
+            katexInlines.push(latex.trim());
+            return placeholder;
+        });
+
+        // Handle $...$ inline LaTeX (single line, not empty)
         textWithPlaceholders = textWithPlaceholders.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
             const placeholder = `@@LATEX_INLINE_${katexInlines.length}@@`;
             katexInlines.push(latex.trim());
@@ -1403,6 +1208,11 @@ async function init() {
         console.warn('Failed to parse stored enabled tool names:', error);
     }
 
+    const persistedCharacterId = getPersistedCharacterId();
+    if (persistedCharacterId) {
+        state.currentCharacterId = persistedCharacterId;
+    }
+
     await fetchProviderConfig();
     await initializeToolsCatalog();
     await loadGenArgs();
@@ -1624,6 +1434,11 @@ async function loadChat(chatId) {
         state.activeSystemPrompt = null;
 
     localStorage.setItem('lastChatId', chatId);
+    if (state.currentCharacterId) {
+        setPersistedCharacterId(state.currentCharacterId);
+    } else {
+        setPersistedCharacterId(null);
+    }
     updateActiveCharacterUI();
 
         if (state.currentCharacterId) {
@@ -1636,6 +1451,7 @@ async function loadChat(chatId) {
                         console.warn(`Failed to fetch character ${state.currentCharacterId} details. Character might be deleted.`);
                         state.currentCharacterId = null;
                         updateActiveCharacterUI();
+                setPersistedCharacterId(null);
                   }
              } catch (charError) {
                 console.error("Error fetching character details:", charError);
@@ -2131,11 +1947,28 @@ function buildContentHtml(targetContentDiv, messageText) {
             segments.push({ type: 'text', data: remainingTextAfterTags });
         }
 
-        segments.forEach(segment => {
+        // Determine which tool calls have corresponding results
+        const toolCallsWithResults = new Set();
+        for (let i = 0; i < segments.length; i++) {
+            if (segments[i].type === 'tool') {
+                const toolName = segments[i].data?.name;
+                // Check if there's a result for this tool call in subsequent segments
+                for (let j = i + 1; j < segments.length; j++) {
+                    if (segments[j].type === 'result' && segments[j].data?.name === toolName) {
+                        toolCallsWithResults.add(i);
+                        break;
+                    }
+                }
+            }
+        }
+
+        segments.forEach((segment, idx) => {
             if (segment.type === 'text') {
                 targetContentDiv.insertAdjacentHTML('beforeend', renderMarkdown(segment.data));
             } else if (segment.type === 'tool') {
-                renderToolCallPlaceholder(targetContentDiv, segment.data);
+                // Pass options to indicate if this tool was already executed
+                const wasExecuted = toolCallsWithResults.has(idx);
+                renderToolCallPlaceholder(targetContentDiv, segment.data, { executed: wasExecuted });
             } else if (segment.type === 'result') {
                 renderToolResult(targetContentDiv, segment.data);
             }
@@ -2319,7 +2152,7 @@ function addMessage(message) {
     let avatarActionsDiv = null;
     let actionsDiv = null;
     const suppressAssistantActions = role === 'assistant' && isAssistantToolOnlyMessage(message);
-    const shouldCreateActions = role === 'user' || (role === 'assistant' && !suppressAssistantActions);
+    const shouldCreateActions = role === 'user' || role === 'tool' || (role === 'assistant' && !suppressAssistantActions);
 
     if (shouldCreateActions) {
         avatarActionsDiv = document.createElement('div');
@@ -2410,16 +2243,23 @@ function addMessage(message) {
         branchBtn.title = 'Regenerate as new branch';
         branchBtn.addEventListener('click', () => regenerateMessage(message.message_id, true));
 
-        const continueBtn = document.createElement('button');
-        continueBtn.className = 'message-action-btn';
-        continueBtn.innerHTML = '<i class="bi bi-arrow-bar-right"></i>';
-        continueBtn.title = 'Continue generating this response';
-        continueBtn.addEventListener('click', () => continueMessage(message.message_id));
-
-        orderedButtons = [genInfoBtn, copyBtn, editBtn, regenerateBtn, branchBtn, continueBtn, deleteBtn];
+    orderedButtons = [genInfoBtn, copyBtn, editBtn, regenerateBtn, branchBtn, deleteBtn];
 
     } else if (role === 'tool') {
-        orderedButtons = [copyBtn, deleteBtn];
+        // Tool messages can trigger regeneration of the parent LLM message
+        const regenerateBtn = document.createElement('button');
+        regenerateBtn.className = 'message-action-btn';
+        regenerateBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i>';
+        regenerateBtn.title = 'Regenerate parent response (Replace)';
+        regenerateBtn.addEventListener('click', () => regenerateMessage(message.message_id, false));
+
+        const branchBtn = document.createElement('button');
+        branchBtn.className = 'message-action-btn';
+        branchBtn.innerHTML = '<i class="bi bi-diagram-3"></i>';
+        branchBtn.title = 'Regenerate parent as new branch';
+        branchBtn.addEventListener('click', () => regenerateMessage(message.message_id, true));
+
+        orderedButtons = [copyBtn, regenerateBtn, branchBtn, deleteBtn];
     }
 
     if (actionsDiv) {
@@ -2511,11 +2351,24 @@ async function setActiveBranch(parentMessageId, newIndex) {
 async function deleteMessage(messageId) {
     if (!state.currentChatId) return;
 
-    const messageToDelete = state.messages.find(m => m.message_id === messageId);
+    let messageToDelete = state.messages.find(m => m.message_id === messageId);
     if (!messageToDelete) {
         console.warn(`Message ${messageId} not found in state for deletion.`);
         return;
     }
+    
+    // If deleting a tool message, walk up to find the parent LLM message and delete from there
+    // This ensures the full tool call chain is deleted together
+    if (messageToDelete.role === 'tool') {
+        const parentLlmId = messageToDelete.parent_message_id;
+        const parentLlm = parentLlmId ? state.messages.find(m => m.message_id === parentLlmId) : null;
+        if (parentLlm && (parentLlm.role === 'llm' || parentLlm.role === 'assistant')) {
+            console.log(`Tool message ${messageId} -> walking up to delete parent LLM message ${parentLlmId}`);
+            messageToDelete = parentLlm;
+            messageId = parentLlmId;
+        }
+    }
+    
     console.log(`Deleting message ${messageId} and descendants.`);
 
     try {
@@ -2705,14 +2558,13 @@ function setupEventListeners() {
             if (isVisible) {
                 hideCharacterDropdown();
             } else {
-                characterDropdown.style.display = 'flex';
+                showCharacterDropdown();
                 populateCharacterDropdown().catch(err => {
                     console.error('Failed to populate character dropdown', err);
                     if (characterDropdownList) {
                         characterDropdownList.innerHTML = '<div class="character-dropdown-loading">Failed to load characters.</div>';
                     }
                 });
-                positionCharacterDropdown();
             }
         });
 
@@ -2735,13 +2587,13 @@ function setupEventListeners() {
 
         window.addEventListener('resize', () => {
             if (characterDropdown.style.display === 'flex') {
-                positionCharacterDropdown();
+                showCharacterDropdown();
             }
         });
 
         window.addEventListener('scroll', () => {
             if (characterDropdown.style.display === 'flex') {
-                positionCharacterDropdown();
+                showCharacterDropdown();
             }
         }, true);
     }
@@ -2873,9 +2725,6 @@ function refreshSettingsModalState() {
         cbTools,
         cbAutoscroll,
         cbCodeblocks,
-        cotStartInput,
-        cotEndInput,
-        cotSaveBtn,
         toolsPromptPreview,
         toolsListContainer
     } = querySettingsModalElements();
@@ -2920,31 +2769,6 @@ function refreshSettingsModalState() {
     renderToolsCheckboxList(toolsListContainer);
     updateToolsCheckboxDisableState();
     updateToolsPromptPreviewDisplay();
-
-    // Load and display saved CoT tags
-    let savedCot = null;
-    try { savedCot = JSON.parse(localStorage.getItem('cotTags') || 'null'); } catch {}
-    setPersistedCotTags(savedCot);
-    if (savedCot) {
-        if (cotStartInput) cotStartInput.value = savedCot.start;
-        if (cotEndInput) cotEndInput.value = savedCot.end;
-    } else {
-        if (cotStartInput && !cotStartInput.value) cotStartInput.value = '<think>';
-        if (cotEndInput && !cotEndInput.value) cotEndInput.value = '</think>';
-    }
-
-    if (cotSaveBtn) {
-        cotSaveBtn.onclick = () => {
-            const start = (cotStartInput?.value || '').trim();
-            const end = (cotEndInput?.value || '').trim();
-            if (!start || !end) { addSystemMessage('Both CoT tags are required.', 'warning'); return; }
-            if (start === end) { addSystemMessage('CoT start/end tags must differ.', 'error'); return; }
-            const payload = { start, end };
-            localStorage.setItem('cotTags', JSON.stringify(payload));
-            setPersistedCotTags(payload);
-            addSystemMessage('Updated CoT tags.', 'info');
-        };
-    }
 
     // Restore last active tab (fallback to first button)
     const lastTab = localStorage.getItem('settingsActiveTab');
@@ -3287,7 +3111,7 @@ function getApiKey(provider) {
     return key;
 }
 
-async function streamFromBackend(chatId, parentMessageId, modelName, generationArgs, toolsEnabled, onChunk, onToolStart, onToolEnd, onComplete, onError) {
+async function streamFromBackend(chatId, parentMessageId, modelName, generationArgs, toolsEnabled, onChunk, onToolStart, onToolEnd, onComplete, onError, onToolPendingConfirmation) {
     console.log(`streamFromBackend called for chat: ${chatId}, parent: ${parentMessageId}, model: ${modelName}, toolsEnabled: ${toolsEnabled}`);
 
     if (state.streamController && !state.streamController.signal.aborted) {
@@ -3423,6 +3247,7 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
 
 async function generateAssistantResponse(parentId, targetContentDiv, modelName, generationArgs, toolsEnabled, isEditing = false, initialText = '') {
     console.log(`%c[generateAssistantResponse RUN - Backend Mode] parentId: ${parentId}, toolsEnabled: ${toolsEnabled}, isEditing: ${isEditing}, targetContentDiv provided: ${!!targetContentDiv}`, "color: purple; font-weight: bold;", { currentChatId: state.currentChatId });
+    console.log(`%c[DEBUG GEN] targetContentDiv isConnected: ${targetContentDiv?.isConnected}, parent: ${targetContentDiv?.parentElement?.className}`, 'color: cyan; font-weight: bold;');
 
     if (!state.currentChatId) { console.error("generateAssistantResponse: No current chat ID."); cleanupAfterGeneration(); return; }
     if (!targetContentDiv) { console.error("generateAssistantResponse: No target content div provided."); cleanupAfterGeneration(); return; }
@@ -3454,7 +3279,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         messageDivForStream.style.minHeight = '';
     }
 
-    buildContentHtml(targetContentDiv, initialText); // Initial render (e.g. for "continue")
+    buildContentHtml(targetContentDiv, initialText); // Initial render before streaming updates
     updateAttachmentButtonsForModel();
     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
@@ -3490,7 +3315,10 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             toolsEnabled,
             // --- onChunk Callback ---
             (textChunk) => {
-                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) {
+                    console.log(`%c[DEBUG CHUNK] Skipping chunk - targetContentDiv: ${!!targetContentDiv}, aborted: ${state.streamController?.signal.aborted}, divMismatch: ${state.currentAssistantMessageDiv !== targetContentDiv}`, 'color: red;');
+                    return;
+                }
                 fullRenderedContent += textChunk;
                 const cotTagPairs = getCotTagPairs();
                 
@@ -3714,6 +3542,30 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     }
                 }
                 requestAnimationFrame(updateScrollButtonVisibility);
+            },
+            // --- onToolPendingConfirmation Callback ---
+            (name, args, callId) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                console.log(`Tool pending confirmation: ${name}`, args);
+                
+                // Render accumulated content first
+                buildContentHtml(targetContentDiv, fullRenderedContent);
+                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                
+                // Find the tool call block that was just rendered and ensure it shows confirmation UI
+                const toolBlocks = targetContentDiv.querySelectorAll('.tool-call-block');
+                const lastToolBlock = toolBlocks[toolBlocks.length - 1];
+                if (lastToolBlock && lastToolBlock.dataset.toolName === name) {
+                    // The block should already have the confirmation UI from renderToolCallPlaceholder
+                    // Just make sure it's not collapsed
+                    lastToolBlock.classList.remove('collapsed');
+                    const collapseIcon = lastToolBlock.querySelector('.tool-collapse-btn i');
+                    if (collapseIcon) collapseIcon.className = 'bi bi-chevron-up';
+                }
+                
+                finalizeStreamingCodeBlocks(targetContentDiv);
+                updateStreamingMinHeight();
+                if (state.autoscrollEnabled) requestAutoScroll();
             }
         );
     } catch (error) { // Catch errors from streamFromBackend setup itself (e.g. network error before stream starts)
@@ -4039,7 +3891,7 @@ function cleanupAfterGeneration() {
     console.log("Reset tool state flags in cleanupAfterGeneration.");
 }
 
-function renderToolCallPlaceholder(messageContentDiv, toolData) {
+function renderToolCallPlaceholder(messageContentDiv, toolData, options = {}) {
     if (!messageContentDiv) return;
 
     const toolName = toolData?.name || 'tool';
@@ -4048,22 +3900,37 @@ function renderToolCallPlaceholder(messageContentDiv, toolData) {
     const args = payloadInfo.arguments || {};
     const rawPayload = payloadInfo.raw || '';
     const parseError = payloadInfo.error;
-
+    
     const toolCallBlock = document.createElement('div');
     toolCallBlock.className = 'tool-call-block collapsed';
     toolCallBlock.dataset.toolName = toolName;
+    if (callId) toolCallBlock.dataset.callId = callId;
+
+    // Get appropriate icon for the tool
+    const getToolIcon = (name) => {
+        const iconMap = {
+            'add': 'calculator',
+            'search': 'search',
+            'scrape': 'globe',
+            'python_interpreter': 'terminal-fill'
+        };
+        return iconMap[name] || 'tools';
+    };
 
     const toolHeader = document.createElement('div');
     toolHeader.className = 'tool-header';
 
     const toolNameSpan = document.createElement('span');
     toolNameSpan.className = 'tool-header-name';
-    const toolIcon = toolName === 'add' ? 'calculator' : (toolName === 'search' ? 'search' : 'tools');
-    const callIdSuffix = callId ? ` <span class="tool-id">#${escapeHtml(callId)}</span>` : '';
-    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> Calling: ${escapeHtml(toolName)}${callIdSuffix}`;
+    const toolIcon = getToolIcon(toolName);
+    
+    // Display format: icon + "Using tool_name"
+    const actionVerb = options.executed ? 'Ran' : 'Using';
+    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> <span class="tool-action-verb">${actionVerb}</span> <span class="tool-name-text">${escapeHtml(toolName)}</span>`;
 
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'tool-header-actions';
+    
     const collapseBtn = document.createElement('button');
     collapseBtn.className = 'tool-collapse-btn';
     collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>';
@@ -4076,18 +3943,27 @@ function renderToolCallPlaceholder(messageContentDiv, toolData) {
 
     const toolArgsDiv = document.createElement('div');
     toolArgsDiv.className = 'tool-arguments';
+    
     try {
-    const hasArgs = args && Object.keys(args).length > 0;
-    const displayObject = hasArgs ? args : (!parseError && rawPayload ? JSON.parse(rawPayload) : {});
-        const argsString = JSON.stringify(displayObject, null, 2);
-        const pre = document.createElement('pre');
-        const code = document.createElement('code');
-        code.className = 'language-json';
-        code.textContent = argsString;
-        try { hljs.highlightElement(code); }
-        catch (e) { console.warn('Error highlighting tool args:', e); }
-        pre.appendChild(code);
-        toolArgsDiv.appendChild(pre);
+        const hasArgs = args && Object.keys(args).length > 0;
+        const displayObject = hasArgs ? args : (!parseError && rawPayload ? JSON.parse(rawPayload) : {});
+        
+        // For python_interpreter, show code in a nice code block
+        if (toolName === 'python_interpreter' && displayObject.code) {
+            const codeContent = displayObject.code;
+            const wrapper = createCodeBlockWithContent(codeContent, 'python');
+            toolArgsDiv.appendChild(wrapper);
+        } else {
+            const argsString = JSON.stringify(displayObject, null, 2);
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.className = 'language-json';
+            code.textContent = argsString;
+            try { hljs.highlightElement(code); }
+            catch (e) { console.warn('Error highlighting tool args:', e); }
+            pre.appendChild(code);
+            toolArgsDiv.appendChild(pre);
+        }
     } catch (err) {
         toolArgsDiv.textContent = '[Invalid Arguments]';
     }
@@ -4100,6 +3976,8 @@ function renderToolCallPlaceholder(messageContentDiv, toolData) {
     }
     toolCallBlock.appendChild(toolArgsDiv);
     messageContentDiv.appendChild(toolCallBlock);
+    
+    return toolCallBlock;
 }
 
 function renderToolResult(messageContentDiv, resultData) {
@@ -4118,12 +3996,27 @@ function renderToolResult(messageContentDiv, resultData) {
     const toolNameSpan = document.createElement('span');
     toolNameSpan.className = 'tool-header-name';
     const lowerText = (resultText || '').toLowerCase();
-    const isError = lowerText.startsWith('[error:') || lowerText.startsWith('error:');
-    const iconClass = isError ? 'exclamation-circle-fill text-danger' : 'check-circle-fill';
-    const titleText = isError ? 'Tool Error' : 'Tool Result';
-    const nameFragment = toolName ? ` <span class="tool-id">${escapeHtml(toolName)}</span>` : '';
-    const statusFragment = status ? ` <span class="tool-status">(${escapeHtml(status)})</span>` : '';
-    toolNameSpan.innerHTML = `<i class="bi bi-${iconClass}"></i> ${titleText}${nameFragment}${statusFragment}`;
+    
+    // Detect error or success status
+    const isError = lowerText.startsWith('[error:') || lowerText.startsWith('error:') || status === 'error';
+    
+    // Get tool-specific icon
+    const getToolIcon = (name) => {
+        const iconMap = {
+            'add': 'calculator',
+            'search': 'search',
+            'scrape': 'globe',
+            'python_interpreter': 'terminal-fill'
+        };
+        return iconMap[name] || 'tools';
+    };
+    
+    const toolIcon = toolName ? getToolIcon(toolName) : (isError ? 'exclamation-circle-fill' : 'check-circle-fill');
+    const statusClass = isError ? 'error' : 'success';
+    const statusLabel = isError ? 'Error' : 'Output';
+    toolResultBlock.classList.add(statusClass);
+    
+    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> <span class="tool-result-status ${statusClass}">${statusLabel}</span>${toolName ? ` <span class="tool-name-text">${escapeHtml(toolName)}</span>` : ''}`;
 
     const actionsDiv = document.createElement('div');
     actionsDiv.className = 'tool-header-actions';
@@ -4139,10 +4032,67 @@ function renderToolResult(messageContentDiv, resultData) {
 
     const toolResultContent = document.createElement('div');
     toolResultContent.className = 'tool-result-content';
-    toolResultContent.innerHTML = renderMarkdown(resultText || '[Empty Result]');
+    
+    // Check for images in the result (format: [IMAGE:base64:...])
+    const imageRegex = /\[IMAGE:base64:([A-Za-z0-9+/=]+)\]/g;
+    const hasImages = imageRegex.test(resultText);
+    imageRegex.lastIndex = 0; // Reset regex
+    
+    if (hasImages) {
+        // Split text by images and render each part
+        let lastIndex = 0;
+        let match;
+        
+        while ((match = imageRegex.exec(resultText)) !== null) {
+            // Add text before the image
+            const textBefore = resultText.substring(lastIndex, match.index).trim();
+            if (textBefore) {
+                const pre = document.createElement('pre');
+                const code = document.createElement('code');
+                code.textContent = textBefore;
+                pre.appendChild(code);
+                toolResultContent.appendChild(pre);
+            }
+            
+            // Add the image
+            const imgContainer = document.createElement('div');
+            imgContainer.className = 'tool-result-image';
+            const img = document.createElement('img');
+            img.src = `data:image/png;base64,${match[1]}`;
+            img.alt = 'Python output image';
+            img.style.maxWidth = '100%';
+            img.style.borderRadius = '4px';
+            img.style.marginTop = '8px';
+            imgContainer.appendChild(img);
+            toolResultContent.appendChild(imgContainer);
+            
+            lastIndex = imageRegex.lastIndex;
+        }
+        
+        // Add any remaining text after the last image
+        const textAfter = resultText.substring(lastIndex).trim();
+        if (textAfter) {
+            const pre = document.createElement('pre');
+            const code = document.createElement('code');
+            code.textContent = textAfter;
+            pre.appendChild(code);
+            toolResultContent.appendChild(pre);
+        }
+    } else if (toolName === 'python_interpreter' || resultText.includes('\n')) {
+        // For code output, wrap in a pre/code block
+        const pre = document.createElement('pre');
+        const code = document.createElement('code');
+        code.textContent = resultText || '[Empty Result]';
+        pre.appendChild(code);
+        toolResultContent.appendChild(pre);
+    } else {
+        toolResultContent.innerHTML = renderMarkdown(resultText || '[Empty Result]');
+    }
 
     toolResultBlock.appendChild(toolResultContent);
     messageContentDiv.appendChild(toolResultBlock);
+    
+    return toolResultBlock;
 }
 
 function handleToolBlockToggle(e) {
@@ -4261,10 +4211,26 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
     }
 
     const groupInfo = resolveMessageGroupInfo(messageIdToRegen);
-    const finalMessage = state.messages.find(m => m.message_id === groupInfo.finalMessageId);
-    const primaryMessage = state.messages.find(m => m.message_id === groupInfo.primaryMessageId);
+    let finalMessage = state.messages.find(m => m.message_id === groupInfo.finalMessageId);
+    let primaryMessage = state.messages.find(m => m.message_id === groupInfo.primaryMessageId);
 
-    if (!finalMessage || finalMessage.role !== 'llm') {
+    // If the target message is a 'tool' message, walk up to find the parent 'llm' message
+    // Tool messages have parent_message_id pointing to the LLM message that made the tool call
+    if (finalMessage && finalMessage.role === 'tool') {
+        const parentLlmId = finalMessage.parent_message_id;
+        const parentLlm = parentLlmId ? state.messages.find(m => m.message_id === parentLlmId) : null;
+        if (parentLlm && (parentLlm.role === 'llm' || parentLlm.role === 'assistant')) {
+            console.log(`Regenerating from tool message ${finalMessage.message_id}, walking up to parent LLM message ${parentLlmId}`);
+            // Update groupInfo to point to the LLM message instead
+            primaryMessage = parentLlm;
+            finalMessage = parentLlm;
+        } else {
+            addSystemMessage("Cannot regenerate: tool message has no valid parent assistant message.", "error");
+            return;
+        }
+    }
+
+    if (!finalMessage || (finalMessage.role !== 'llm' && finalMessage.role !== 'assistant')) {
         addSystemMessage("Can only regenerate assistant responses.", "error");
         return;
     }
@@ -4286,14 +4252,16 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         }
     }
 
-    console.log(`Regenerating from parent ${parentMessageId} (targeting llm message ${groupInfo.finalMessageId}, new branch: ${newBranch}) using model ${modelNameToUse}`);
+    console.log(`Regenerating from parent ${parentMessageId} (targeting llm message ${primaryMessage.message_id}, new branch: ${newBranch}) using model ${modelNameToUse}`);
     let assistantPlaceholderRow = null;
     const generationParentId = parentMessageId;
+    // Use the resolved primaryMessage.message_id for deletion (may differ from groupInfo if we walked up from tool msg)
+    const messageIdToDelete = primaryMessage.message_id;
 
     try {
-        const parentRow = parentMessageId ? findClosestMessageRow(parentMessageId) : findClosestMessageRow(groupInfo.primaryMessageId);
+        const parentRow = parentMessageId ? findClosestMessageRow(parentMessageId) : findClosestMessageRow(messageIdToDelete);
         if (!parentRow) {
-            console.error(`Parent row ${parentMessageId ?? groupInfo.primaryMessageId} not found in DOM. Cannot place placeholder correctly.`);
+            console.error(`Parent row ${parentMessageId ?? messageIdToDelete} not found in DOM. Cannot place placeholder correctly.`);
             addSystemMessage("Error: Parent message UI not found. Aborting regeneration.", "error");
             await loadChat(currentChatId);
             cleanupAfterGeneration();
@@ -4301,9 +4269,9 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         }
 
         if (!newBranch) {
-            console.log(`Replacing: Deleting message branch starting with ${groupInfo.primaryMessageId}.`);
-            removeMessageAndDescendantsFromDOM(groupInfo.primaryMessageId);
-            const deleteSuccess = await deleteMessageFromBackend(currentChatId, groupInfo.primaryMessageId);
+            console.log(`Replacing: Deleting message branch starting with ${messageIdToDelete}.`);
+            removeMessageAndDescendantsFromDOM(messageIdToDelete);
+            const deleteSuccess = await deleteMessageFromBackend(currentChatId, messageIdToDelete);
             if (!deleteSuccess) {
                 addSystemMessage("Failed to delete old message from backend. Reloading chat.", "error");
                 await loadChat(currentChatId);
@@ -4311,7 +4279,7 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
                 return;
             }
             const descendantIds = new Set();
-            const queue = [...groupInfo.groupIds];
+            const queue = [messageIdToDelete];
             while(queue.length > 0) {
                 const currentId = queue.shift();
                 if (!currentId || descendantIds.has(currentId)) continue;
@@ -4331,28 +4299,51 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
         } else {
             console.log(`Branching: Visually clearing current active branch from parent ${parentMessageId} before generating new one.`);
             const parentNodeInState = state.messages.find(m => m.message_id === parentMessageId);
+            
+            // For branching, we need to remove the current visible branch from DOM
+            // Try using child_message_ids first, fallback to finding children by parent_message_id
+            let activeChildIdToClear = null;
+            
             if (parentNodeInState && Array.isArray(parentNodeInState.child_message_ids) && parentNodeInState.child_message_ids.length > 0) {
                 const activeChildIndex = parentNodeInState.active_child_index ?? 0;
                 const safeActiveIndex = Math.min(Math.max(0, activeChildIndex), parentNodeInState.child_message_ids.length - 1);
-                const activeChildIdToClear = parentNodeInState.child_message_ids[safeActiveIndex];
-                if (activeChildIdToClear) {
-                    console.log(`Branching: Visually removing current active branch starting with ${activeChildIdToClear} from DOM.`);
-                    removeMessageAndDescendantsFromDOM(activeChildIdToClear);
-                } else {
-                    console.log("Branching: Parent had no known active children in state to remove from DOM, or index out of bounds.");
-                }
+                activeChildIdToClear = parentNodeInState.child_message_ids[safeActiveIndex];
             } else {
-                console.warn(`Branching: Parent ${parentMessageId} has no children in state, or child_message_ids is empty. No DOM branch to clear visually.`);
+                // Fallback: find children by iterating state.messages
+                const childMessages = state.messages.filter(m => m.parent_message_id === parentMessageId);
+                if (childMessages.length > 0) {
+                    // Use the first child (or the one we're trying to regenerate)
+                    activeChildIdToClear = messageIdToDelete;
+                }
+            }
+            
+            if (activeChildIdToClear) {
+                console.log(`Branching: Visually removing current active branch starting with ${activeChildIdToClear} from DOM.`);
+                removeMessageAndDescendantsFromDOM(activeChildIdToClear);
+            } else {
+                console.warn(`Branching: Could not determine active child to clear from DOM for parent ${parentMessageId}.`);
             }
         }
 
         assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
+        console.log(`%c[DEBUG BRANCH] Created placeholder row:`, 'color: orange; font-weight: bold;', {
+            placeholderId: assistantPlaceholderRow.dataset.messageId,
+            parentRowId: parentRow.dataset.messageId,
+            parentRowInDOM: parentRow.isConnected,
+            generationParentId: generationParentId
+        });
         parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
+        console.log(`%c[DEBUG BRANCH] After insertion:`, 'color: orange; font-weight: bold;', {
+            placeholderInDOM: assistantPlaceholderRow.isConnected,
+            placeholderParent: assistantPlaceholderRow.parentElement?.id || assistantPlaceholderRow.parentElement?.className,
+            messagesWrapperChildren: messagesWrapper.children.length
+        });
         const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
         if (!assistantContentDiv) {
             assistantPlaceholderRow?.remove();
             throw new Error("Failed to create assistant response placeholder element.");
         }
+        console.log(`%c[DEBUG BRANCH] assistantContentDiv found, calling generateAssistantResponse`, 'color: orange; font-weight: bold;');
 
         await generateAssistantResponse(
             generationParentId,
@@ -4377,84 +4368,32 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
     }
 }
 
-function scrollToBottom(behavior = 'auto') {
-    if (!state.autoscrollEnabled && behavior === 'smooth') {
-        requestAnimationFrame(updateScrollButtonVisibility);
+function requestAutoScroll(behavior = 'smooth') {
+    if (!state.autoscrollEnabled || !chatContainer) {
+        if (!chatContainer) requestAnimationFrame(updateScrollButtonVisibility);
         return;
     }
-    requestAnimationFrame(() => {
-        if (chatContainer) {
-            chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior: behavior });
-        }
+    if (autoScrollFrameId !== null) {
+        cancelAnimationFrame(autoScrollFrameId);
+    }
+    autoScrollFrameId = requestAnimationFrame(() => {
+        autoScrollFrameId = null;
+        chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior });
         updateScrollButtonVisibility();
     });
 }
 
-async function continueMessage(messageIdToContinue) {
-    if (!state.currentChatId || document.getElementById('send-button').disabled) {
-        addSystemMessage("Cannot continue while busy.", "warning");
+function scrollToBottom(behavior = 'auto') {
+    if (behavior === 'smooth' && state.autoscrollEnabled) {
+        requestAutoScroll(behavior);
         return;
     }
-
-    const groupInfo = resolveMessageGroupInfo(messageIdToContinue);
-    const messageToContinue = state.messages.find(m => m.message_id === groupInfo.finalMessageId);
-    if (!messageToContinue || messageToContinue.role !== 'llm') {
-        addSystemMessage("Can only continue assistant messages.", "error");
-        return;
-    }
-
-    const modelNameToUse = getActiveCharacterModel();
-    if (!modelNameToUse) {
-        try { await fetchCharacters(true); } catch(e) { /* ignore */ }
-        const retryModel = getActiveCharacterModel();
-        if (!retryModel) {
-            addSystemMessage('Active character has no preferred model (assign one before continuing).', 'error');
-            return;
+    requestAnimationFrame(() => {
+        if (chatContainer) {
+            chatContainer.scrollTo({ top: chatContainer.scrollHeight, behavior });
         }
-    }
-
-    const parentId = messageToContinue.parent_message_id;
-    const rawMessage = messageToContinue.message || '';
-    TOOL_TAG_REGEX.lastIndex = 0;
-    let endsWithToolTag = false;
-    let match;
-    let lastTagEnd = -1;
-    while ((match = TOOL_TAG_REGEX.exec(rawMessage)) !== null) {
-        lastTagEnd = match.index + match[0].length;
-    }
-    if (lastTagEnd > 0 && lastTagEnd >= rawMessage.trimEnd().length) endsWithToolTag = true;
-
-    if (endsWithToolTag) {
-         addSystemMessage("Cannot continue a message ending with a tool action. Please regenerate.", "warning");
-         return;
-    }
-    if (!parentId) {
-         addSystemMessage("Cannot continue message without a parent.", "error");
-         return;
-    }
-
-    console.log(`Continuing message ${messageIdToContinue} using model ${modelNameToUse}`);
-    const targetRow = groupInfo.row || findRowForMessageId(messageIdToContinue);
-    const targetContentDiv = targetRow?.querySelector('.message-content');
-    if (!targetContentDiv) {
-        addSystemMessage("Error: Could not find message content area.", "error");
-        return;
-    }
-
-    await generateAssistantResponse(
-        parentId,
-        targetContentDiv,
-        modelNameToUse,
-        defaultGenArgs,
-        state.toolsEnabled,
-        true,
-        messageToContinue.message || ''
-    );
-
-    cleanupAfterGeneration();
-    requestAnimationFrame(updateScrollButtonVisibility);
-
-    return;
+        updateScrollButtonVisibility();
+    });
 }
 
 async function stopStreaming() {
@@ -4511,9 +4450,6 @@ function startNewChat() {
     localStorage.removeItem('lastChatId');
     highlightCurrentChatInSidebar();
 
-    state.currentCharacterId = null;
-    state.activeSystemPrompt = null;
-    updateEffectiveSystemPrompt();
     state.currentImages = []; state.currentTextFiles = [];
     imagePreviewContainer.innerHTML = '';
     adjustTextareaHeight();
@@ -4524,9 +4460,7 @@ function startNewChat() {
     state.codeBlocksDefaultCollapsed = false;
     updateCodeblockToggleButton();
 
-    // Set autoscroll to OFF by default for new chats
-    state.autoscrollEnabled = false;
-    localStorage.setItem('autoscrollEnabled', 'false');
+    updateActiveCharacterUI();
     updateAutoscrollButton();
 
     if (chatContainer) chatContainer.style.paddingBottom = '0px';
@@ -4578,11 +4512,15 @@ function applyTheme(themeName) {
     });
 
     const highlightThemeLink = document.getElementById('highlight-theme');
-    if (themeName === 'white' || themeName === 'claude_white' || themeName === 'solarized') {
+    if (themeName === 'white' || themeName === 'claude_white' || themeName === 'solarized' || themeName === 'gruvbox_light') {
         highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css';
         if (themeName === 'solarized') {
             highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/base16/solarized-light.min.css';
+        } else if (themeName === 'gruvbox_light') {
+            highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/base16/gruvbox-light-medium.min.css';
         }
+    } else if (themeName === 'gruvbox_dark') {
+        highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/base16/gruvbox-dark-medium.min.css';
     } else {
        highlightThemeLink.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/stackoverflow-dark.css';
     }
