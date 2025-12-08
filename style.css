@@ -1017,21 +1017,22 @@ body.welcome-active .input-area .input-container {
 .message-content table { border-collapse: collapse; margin-bottom: 16px; width: 100%; }
 .message-content table th, .message-content table td { padding: 6px 13px; border: 1px solid var(--border-color); }
 .message-content table tr:nth-child(2n) { background-color: color-mix(in srgb, var(--bg-tertiary) 50%, transparent); } /* Slight background for even rows */
-.message-content code:not(pre code) {
-    font-family: 'JetBrains Mono', monospace;
-    background-color: color-mix(in srgb, var(--text-secondary) 20%, transparent);
+.message-content code:not(pre code) {    
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
     border-radius: var(--border-radius-sm);
-    padding: 1px 3px; /* Small horizontal padding */
-    transition: background-color 0.2s ease;
+    /*color: color-mix(in srgb, var(--accent-color) 90%, black);*/
+    padding: 1px 2px; /* Small horizontal padding */
+    margin: 2px;
 }
 
 /* Edit Mode */
 .message-content.editing textarea {
     width: 100%;
     min-height: 100px;
-    background-color: var(--bg-tertiary);
+    background-color: var(--border-color);
     color: var(--text-primary);
-    border: 1px solid var(--border-color);
+    border: 1px solid var(--bg-tertiary);
     border-radius: var(--border-radius-md);
     padding: 10px;
     font-size: 15px;
