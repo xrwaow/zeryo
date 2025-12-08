@@ -317,6 +317,9 @@ function openCharacterEditor(existing=null) {
     const cancelBtn = document.createElement('button'); cancelBtn.className='btn-secondary'; cancelBtn.textContent='Cancel'; cancelBtn.addEventListener('click', ()=>overlay.remove());
     const saveBtn = document.createElement('button'); saveBtn.className='btn-primary'; saveBtn.textContent='Save';
     saveBtn.addEventListener('click', async () => {
+        // For CoT tags: use trimmed value (can be empty string to clear)
+        const cotStartValue = cotStart.value.trim();
+        const cotEndValue = cotEnd.value.trim();
         const body = {
             character_name: nameInput.value.trim(),
             sysprompt: promptArea.value,
@@ -326,8 +329,8 @@ function openCharacterEditor(existing=null) {
             model_provider: modelProviderSelect.value || null,
             model_identifier: modelIdentifierInput.value.trim() || null,
             model_supports_images: supportsImagesCheckbox.checked,
-            cot_start_tag: cotStart.value.trim() || null,
-            cot_end_tag: cotEnd.value.trim() || null,
+            cot_start_tag: cotStartValue !== '' ? cotStartValue : null,
+            cot_end_tag: cotEndValue !== '' ? cotEndValue : null,
             settings: {}
         };
         try {
@@ -355,6 +358,11 @@ function openCharacterEditor(existing=null) {
                 if (state.currentCharacterId === existing.character_id) {
                     state.lastActivatedCharacterPreferredModel = body.model_name || body.preferred_model || null;
                     state.activeSystemPrompt = body.sysprompt || null;
+                    // Update persisted CoT tags to ensure they're picked up immediately
+                    setPersistedCotTags({
+                        start: body.cot_start_tag || null,
+                        end: body.cot_end_tag || null
+                    });
                     updateEffectiveSystemPrompt();
                     updateAttachmentButtonsForModel();
                 }
@@ -627,13 +635,13 @@ const THEMES_CONFIG = {
         '--tool-result-bg': 'rgba(147, 161, 161, 0.08)', '--tool-result-border': '#93a1a1',
     },
     dark: {
-        '--bg-primary': '#000000', '--bg-secondary': '#050505', '--bg-tertiary': '#0a0a0a',
-        '--text-primary': '#ffffff', '--text-secondary': '#cccccc', '--accent-color': '#b8860b',
-        '--accent-hover': '#daa520', '--accent-color-highlight': 'rgba(184, 134, 11, 0.3)', '--error-color': '#ff4444', '--error-hover': '#ff6666',
-        '--message-user': '#080808', '--scrollbar-bg': '#0f0f0f',
-        '--scrollbar-thumb': '#333333', '--border-color': '#1a1a1a',
-        '--tool-call-bg': 'rgba(184, 134, 11, 0.08)', '--tool-call-border': '#b8860b',
-        '--tool-result-bg': 'rgba(184, 134, 11, 0.05)', '--tool-result-border': '#9a6f09',
+        '--bg-primary': '#0d0d0d', '--bg-secondary': '#121212', '--bg-tertiary': '#1a1a1a',
+        '--text-primary': '#e8e8e8', '--text-secondary': '#9a9a9a', '--accent-color': '#7c9dd9',
+        '--accent-hover': '#a1b8e8', '--accent-color-highlight': 'rgba(124, 157, 217, 0.25)', '--error-color': '#e05555', '--error-hover': '#ff7070',
+        '--message-user': '#181818', '--scrollbar-bg': '#1a1a1a',
+        '--scrollbar-thumb': '#3a3a3a', '--border-color': '#2a2a2a',
+        '--tool-call-bg': 'rgba(124, 157, 217, 0.08)', '--tool-call-border': '#7c9dd9',
+        '--tool-result-bg': 'rgba(124, 157, 217, 0.05)', '--tool-result-border': '#5a7ab8',
     },
     claude_white: {
         '--bg-primary': '#ffffff',
@@ -697,22 +705,22 @@ const THEMES_CONFIG = {
     },
     gruvbox_light: {
         '--bg-primary': '#fbf1c7',
-        '--bg-secondary': '#f9f5d7',
+        '--bg-secondary': '#f2e5bc',
         '--bg-tertiary': '#ebdbb2',
-        '--text-primary': '#3c3836',
-        '--text-secondary': '#665c54',
-        '--accent-color': '#d79921',
-        '--accent-hover': '#b57614',
-        '--accent-color-highlight': 'rgba(215, 153, 33, 0.3)',
+        '--text-primary': '#282828',
+        '--text-secondary': '#504945',
+        '--accent-color': '#b16286',
+        '--accent-hover': '#8f3f71',
+        '--accent-color-highlight': 'rgba(177, 98, 134, 0.25)',
         '--error-color': '#cc241d',
         '--error-hover': '#9d0006',
-        '--message-user': '#f2e5bc',
-        '--scrollbar-bg': '#f2e5bc',
-        '--scrollbar-thumb': '#d5c4a1',
+        '--message-user': '#ebdbb2',
+        '--scrollbar-bg': '#ebdbb2',
+        '--scrollbar-thumb': '#bdae93',
         '--border-color': '#d5c4a1',
-        '--tool-call-bg': 'rgba(215, 153, 33, 0.1)',
-        '--tool-call-border': '#d79921',
-        '--tool-result-bg': 'rgba(102, 92, 84, 0.08)',
+        '--tool-call-bg': 'rgba(177, 98, 134, 0.1)',
+        '--tool-call-border': '#b16286',
+        '--tool-result-bg': 'rgba(80, 73, 69, 0.08)',
         '--tool-result-border': '#665c54',
     }
 };
@@ -980,7 +988,16 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
             }
         });
 
-        // 4. ENHANCE CODE BLOCKS as the final step.
+        // 4. ADD HEX COLOR PREVIEWS
+        // Match hex color codes and add color preview squares
+        htmlString = htmlString.replace(/(#(?:[0-9a-fA-F]{3}){1,2})\b/g, (match, color) => {
+            // Validate hex color
+            const isValidHex = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(color);
+            if (!isValidHex) return match;
+            return `<span class="hex-color-preview"><span class="hex-color-swatch" style="background-color:${color}"></span>${color}</span>`;
+        });
+
+        // 5. ENHANCE CODE BLOCKS as the final step.
         const tempContainer = document.createElement('div');
         tempContainer.innerHTML = htmlString;
         tempContainer.querySelectorAll('pre').forEach(enhanceCodeBlock);
@@ -3116,7 +3133,36 @@ function viewAttachmentPopup(attachment) {
               const match = attachment.content.match(/^.*:\n```[^\n]*\n([\s\S]*)\n```$/);
               if (match && match[1]) displayContent = match[1];
           }
-          contentElement.textContent = displayContent !== null ? displayContent : "Could not load file content.";
+          
+          // Try to determine language from filename for syntax highlighting
+          const filename = attachment.name || '';
+          const ext = filename.split('.').pop().toLowerCase();
+          const langMap = {
+              'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'jsx': 'javascript',
+              'tsx': 'typescript', 'json': 'json', 'html': 'html', 'css': 'css', 'scss': 'scss',
+              'md': 'markdown', 'yaml': 'yaml', 'yml': 'yaml', 'xml': 'xml', 'sql': 'sql',
+              'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'c': 'c', 'cpp': 'cpp', 'h': 'c',
+              'hpp': 'cpp', 'java': 'java', 'kt': 'kotlin', 'rs': 'rust', 'go': 'go',
+              'rb': 'ruby', 'php': 'php', 'swift': 'swift', 'r': 'r', 'lua': 'lua',
+              'toml': 'toml', 'ini': 'ini', 'dockerfile': 'dockerfile', 'makefile': 'makefile'
+          };
+          const lang = langMap[ext] || null;
+          
+          const codeElement = document.createElement('code');
+          codeElement.textContent = displayContent !== null ? displayContent : "Could not load file content.";
+          
+          // Apply syntax highlighting if we detected a language
+          if (lang && typeof hljs !== 'undefined') {
+              try {
+                  const highlighted = hljs.highlight(displayContent || '', { language: lang, ignoreIllegals: true });
+                  codeElement.innerHTML = highlighted.value;
+                  codeElement.className = `hljs language-${lang}`;
+              } catch (e) {
+                  console.warn('Syntax highlighting failed:', e);
+              }
+          }
+          
+          contentElement.appendChild(codeElement);
           contentElement.className = 'attachment-popup-text';
      } else {
           contentElement = document.createElement('div');
@@ -4794,7 +4840,7 @@ function addSystemMessage(text, type = "info", timeout = null) {
         messageRow.style.transform = 'translateY(0) scale(1)';
     });
 
-    const effectiveTimeout = (timeout && typeof timeout === 'number' && timeout > 0) ? timeout : (type === 'error' || type === 'warning' ? 5000 : 3000); // Longer default for errors/warnings
+    const effectiveTimeout = (timeout && typeof timeout === 'number' && timeout > 0) ? timeout : (type === 'error' || type === 'warning' ? 3000 : 2000); // Faster notifications
 
 
     setTimeout(() => {
@@ -4805,7 +4851,7 @@ function addSystemMessage(text, type = "info", timeout = null) {
             // if (toastContainer.children.length === 0) {
             //     toastContainer.remove(); // Optionally remove if you prefer
             // }
-        }, 300); // Must match CSS transition duration
+        }, 200); // Must match CSS transition duration
     }, effectiveTimeout);
 }
 

@@ -604,6 +604,7 @@ body.welcome-active .input-area .input-container {
     padding: 0px 0px 8px 0px; /* Adjust padding */
     transition: left 0.3s ease;
     pointer-events: none; /* Allow clicks to pass through gradient */
+    z-index: 20; /* Above sticky code-header (z-index: 10) */
 }
 
 .input-container {
@@ -1755,6 +1756,18 @@ body.welcome-active .input-area .input-container {
     overflow: auto;
     font-family: 'JetBrains Mono', monospace; /* Monospace for code/text */
     font-size: 14px;
+    line-height: 1.5;
+}
+
+.attachment-popup-text code {
+    font-family: inherit;
+    font-size: inherit;
+    display: block;
+}
+
+.attachment-popup-text code.hljs {
+    background: transparent;
+    padding: 0;
 }
 
 /* Branch Navigation */
@@ -2809,7 +2822,7 @@ body.welcome-active .input-area .input-container {
     box-shadow: 0 4px 12px rgba(0,0,0,0.15);
     opacity: 0;
     transform: translateY(-20px) scale(0.95);
-    transition: opacity 0.1s ease-in-out, transform 0.1s ease-in-out;
+    transition: opacity 0.15s ease-in-out, transform 0.15s ease-in-out;
     min-width: 280px;
     max-width: 100%;
     text-align: left;
@@ -2838,4 +2851,26 @@ body.welcome-active .input-area .input-container {
 }
 .system-toast-message span {
     word-break: break-word;
+}
+
+/* Hex Color Preview */
+.hex-color-preview {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background-color: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    padding: 1px 6px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.9em;
+}
+
+.hex-color-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border-radius: 3px;
+    border: 1px solid var(--border-color);
+    flex-shrink: 0;
 }

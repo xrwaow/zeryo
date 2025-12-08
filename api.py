@@ -1885,8 +1885,15 @@ async def update_character_v2(character_id: str, update: UpdateCharacterRequest)
     new_model_provider = update.model_provider if update.model_provider is not None else existing['model_provider']
     new_model_identifier = update.model_identifier if update.model_identifier is not None else existing['model_identifier']
     new_model_supports_images = existing['model_supports_images'] if update.model_supports_images is None else (1 if update.model_supports_images else 0)
+    # For CoT tags, allow clearing by sending empty string (treat as explicit clear) or update with new value
+    # If the field was not in the request JSON at all, it comes as None; if explicitly set to "" or a value, use that
     new_cot_start = update.cot_start_tag if update.cot_start_tag is not None else existing["cot_start_tag"]
     new_cot_end = update.cot_end_tag if update.cot_end_tag is not None else existing["cot_end_tag"]
+    # Handle explicit empty string as a clear
+    if new_cot_start == "":
+        new_cot_start = None
+    if new_cot_end == "":
+        new_cot_end = None
     existing_settings = json.loads(existing["settings"]) if existing["settings"] else {}
     if update.settings is not None:
         # Replace entirely; or could merge if desired
