@@ -1,4 +1,4 @@
-# search.py
+import json
 import os
 from typing import List, Dict, Union, Callable, Any
 
@@ -134,15 +134,82 @@ def scrape(url: str) -> str:
         return "Error: Unable to download the requested page."
 
     try:
-        result = trafilatura.extract(downloaded)
+        result = trafilatura.bare_extraction(downloaded)
     except Exception as exc:
         print(f"Error extracting content from '{url}': {exc}")
         return f"Error extracting content: {exc}"
 
-    if not result:
+    def _normalize_extraction(data: Any) -> tuple[str, str]:
+        text_value = ""
+        description_value = ""
+
+        if isinstance(data, dict):
+            text_value = (data.get("text") or "").strip()
+            description_value = (
+                data.get("description")
+                or data.get("title")
+                or ""
+            ).strip()
+        elif isinstance(data, str):
+            text_value = data.strip()
+        elif data is not None and hasattr(data, "text_content"):
+            try:
+                text_value = data.text_content().strip()
+            except Exception:
+                text_value = ""
+
+        return text_value, description_value
+
+    text, description = _normalize_extraction(result)
+
+    if not text:
+        try:
+            json_payload = trafilatura.extract(
+                downloaded,
+                output_format="json",
+                include_comments=False,
+                include_tables=False,
+            )
+        except Exception as exc:
+            print(f"Fallback JSON extraction failed for '{url}': {exc}")
+            json_payload = None
+
+        if json_payload:
+            try:
+                json_data = json.loads(json_payload)
+            except json.JSONDecodeError:
+                json_data = None
+
+            if isinstance(json_data, dict):
+                text, metadata_description = _normalize_extraction(json_data)
+                if metadata_description:
+                    description = description or metadata_description
+
+    if not text:
+        try:
+            fallback_text = trafilatura.extract(downloaded)
+            if isinstance(fallback_text, str):
+                text = fallback_text.strip()
+        except Exception as exc:
+            print(f"Fallback plain extraction failed for '{url}': {exc}")
+
+    if not text:
         return "No extractable content found at the provided URL."
 
-    return result.strip()
+    if len(text) <= 4096:
+        return text
+
+    # Provide a short summary when the content exceeds the maximum length.
+    excerpt = text[:100].strip()
+    summary_lines = [
+        "Summary (content truncated because it exceeded 4096 characters)."
+    ]
+    if description:
+        summary_lines.append(f"Description: {description}")
+    if excerpt:
+        summary_lines.append(f"Excerpt: {excerpt}...")
+
+    return "\n".join(summary_lines)
 
 
 def tool_add(a: Union[float, str], b: Union[float, str]) -> str:
