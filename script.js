@@ -145,7 +145,7 @@ async function activateCharacter(characterId) {
     }
 
     try {
-        const resp = await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_character`, {
+        const resp = await fetch(`${API_BASE}/c/${state.currentChatId}/set_active_character`, {
             method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({character_id: characterId})
         });
         if (!resp.ok) throw new Error(await resp.text());
@@ -551,6 +551,36 @@ function escapeRegExp(str) {
     return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// URL routing helpers for /chat/UUID pattern (page URLs use /chat/, API uses /c/)
+function getChatIdFromUrl() {
+    const path = window.location.pathname;
+    const match = path.match(/^\/chat\/([a-f0-9-]+)$/i);
+    return match ? match[1] : null;
+}
+
+function updateUrlForChat(chatId) {
+    if (chatId) {
+        const newUrl = `/chat/${chatId}`;
+        if (window.location.pathname !== newUrl) {
+            window.history.pushState({ chatId }, '', newUrl);
+        }
+    } else {
+        if (window.location.pathname !== '/') {
+            window.history.pushState({}, '', '/');
+        }
+    }
+}
+
+// Handle browser back/forward navigation
+window.addEventListener('popstate', async (event) => {
+    const chatId = getChatIdFromUrl();
+    if (chatId && chatId !== state.currentChatId) {
+        await loadChat(chatId);
+    } else if (!chatId && state.currentChatId) {
+        startNewChat();
+    }
+});
+
 // Display system prompt + character name (fallback if dedicated UI element not present)
 function displayActiveSystemPrompt(characterName, effectivePrompt) {
     const el = document.getElementById('active-system-prompt');
@@ -954,7 +984,12 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
         });
 
         // Handle $...$ inline LaTeX (single line, not empty)
+        // Skip currency patterns like $50, $100, $10 000, etc.
         textWithPlaceholders = textWithPlaceholders.replace(/(?<!\$)\$([^$\n]+?)\$(?!\$)/g, (match, latex) => {
+            // Skip if content looks like currency (starts with a number, optionally with spaces/commas)
+            if (/^\s*[\d,.\s]+\s*$/.test(latex) || /^\s*\d/.test(latex)) {
+                return match; // Keep as-is, not LaTeX
+            }
             const placeholder = `@@LATEX_INLINE_${katexInlines.length}@@`;
             katexInlines.push(latex.trim());
             return placeholder;
@@ -1242,8 +1277,14 @@ async function init() {
     setupToolToggle();
     setupCodeblockToggle();
     
-    // Always start a brand new chat (user request) ignoring any stored lastChatId
-    startNewChat();
+    // Handle URL-based chat routing
+    const chatIdFromUrl = getChatIdFromUrl();
+    if (chatIdFromUrl) {
+        await loadChat(chatIdFromUrl);
+    } else {
+        // Start a brand new chat if no chat ID in URL
+        startNewChat();
+    }
 }
 
 async function fetchProviderConfig() {
@@ -1330,7 +1371,7 @@ async function loadGenArgs() {
 
 async function fetchChats() {
     try {
-        const response = await fetch(`${API_BASE}/chat/get_chats?limit=100`);
+        const response = await fetch(`${API_BASE}/c/get_chats?limit=100`);
         if (!response.ok) throw new Error(`Failed to fetch chats: ${response.statusText}`);
         state.chats = await response.json();
     } catch (error) {
@@ -1416,7 +1457,7 @@ async function loadChat(chatId) {
     }
 
     try {
-        const response = await fetch(`${API_BASE}/chat/${chatId}`);
+        const response = await fetch(`${API_BASE}/c/${chatId}`);
         if (!response.ok) {
              if (response.status === 404) {
                  console.error(`Chat not found: ${chatId}. Removing from list.`);
@@ -1432,6 +1473,9 @@ async function loadChat(chatId) {
         state.messages = chat.messages || [];
         state.currentCharacterId = chat.character_id;
         state.activeSystemPrompt = null;
+        
+        // Update URL to reflect loaded chat
+        updateUrlForChat(chatId);
 
     localStorage.setItem('lastChatId', chatId);
     if (state.currentCharacterId) {
@@ -2429,7 +2473,7 @@ async function setActiveBranch(parentMessageId, newIndex) {
      if (!state.currentChatId) return;
 
      try {
-         const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/set_active_branch/${parentMessageId}`, {
+         const response = await fetch(`${API_BASE}/c/${state.currentChatId}/set_active_branch/${parentMessageId}`, {
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
              body: JSON.stringify({ child_index: newIndex })
@@ -2469,7 +2513,7 @@ async function deleteMessage(messageId) {
     console.log(`Deleting message ${messageId} and descendants.`);
 
     try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/delete_message/${messageId}`, {
+        const response = await fetch(`${API_BASE}/c/${state.currentChatId}/delete_message/${messageId}`, {
             method: 'POST'
         });
         if (!response.ok) {
@@ -2575,7 +2619,7 @@ async function saveEdit(messageId, newText, role, reloadChat = true) {
    const toolCallsForSave = originalMessage.tool_calls || null;
 
    try {
-       const response = await fetch(`${API_BASE}/chat/${state.currentChatId}/edit_message/${messageId}`, {
+       const response = await fetch(`${API_BASE}/c/${state.currentChatId}/edit_message/${messageId}`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({
@@ -3241,7 +3285,7 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
     }
     state.streamController = new AbortController();
 
-    const url = `${API_BASE}/chat/${chatId}/generate`;
+    const url = `${API_BASE}/c/${chatId}/generate`;
     const cotTags = getActiveCharacterCotTags ? getActiveCharacterCotTags() : { start: null, end: null };
     const body = {
         parent_message_id: parentMessageId,
@@ -3861,6 +3905,7 @@ async function sendMessage() {
             if (!currentChatId) throw new Error("Failed to create a new chat session.");
             state.currentChatId = currentChatId;
             localStorage.setItem('lastChatId', currentChatId);
+            updateUrlForChat(currentChatId); // Update URL for new chat
         }
 
         const parentId = findLastActiveMessageId(state.messages);
@@ -3915,7 +3960,7 @@ async function sendMessage() {
 
 async function createNewChatBackend() {
     try {
-        const response = await fetch(`${API_BASE}/chat/new_chat`, {
+        const response = await fetch(`${API_BASE}/c/new_chat`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ character_id: state.currentCharacterId })
         });
@@ -3931,7 +3976,7 @@ async function createNewChatBackend() {
 
 async function saveMessageToBackend(chatId, messageData) {
     try {
-        const url = `${API_BASE}/chat/${chatId}/add_message`;
+        const url = `${API_BASE}/c/${chatId}/add_message`;
         const response = await fetch(url, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(messageData)
@@ -4314,7 +4359,7 @@ function removeMessageAndDescendantsFromDOM(startMessageId) {
 
 async function deleteMessageFromBackend(chatId, messageId) {
     try {
-        const response = await fetch(`${API_BASE}/chat/${chatId}/delete_message/${messageId}`, { method: 'POST' });
+        const response = await fetch(`${API_BASE}/c/${chatId}/delete_message/${messageId}`, { method: 'POST' });
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({ detail: response.statusText }));
             throw new Error(`Failed to delete message: ${errorData.detail || response.statusText}`);
@@ -4518,7 +4563,7 @@ async function stopStreaming() {
             console.log(`Signaling backend to abort generation for chat ${state.currentChatId} and awaiting acknowledgement...`);
             try {
                 // Ensure the backend endpoint only returns success after the message is saved.
-                const abortResponse = await fetch(`${API_BASE}/chat/${state.currentChatId}/abort_generation`, { method: 'POST' });
+                const abortResponse = await fetch(`${API_BASE}/c/${state.currentChatId}/abort_generation`, { method: 'POST' });
                 if (!abortResponse.ok) {
                     const errorText = await abortResponse.text().catch(() => `Status: ${abortResponse.status}`);
                     console.error(`Backend abort request failed: ${errorText || '(empty response)'}`);
@@ -4561,6 +4606,7 @@ function startNewChat() {
     welcomeContainer.style.display = 'flex';
     document.body.classList.add('welcome-active');
     localStorage.removeItem('lastChatId');
+    updateUrlForChat(null); // Clear URL
     highlightCurrentChatInSidebar();
 
     state.currentImages = []; state.currentTextFiles = [];
@@ -4588,7 +4634,7 @@ async function deleteCurrentChat() {
     // Confirmation removed
     console.log(`Deleting chat: ${state.currentChatId}`);
     try {
-        const response = await fetch(`${API_BASE}/chat/${state.currentChatId}`, { method: 'DELETE' });
+        const response = await fetch(`${API_BASE}/c/${state.currentChatId}`, { method: 'DELETE' });
         if (!response.ok) { throw new Error(`Failed to delete chat: ${await response.text()}`); }
         console.log(`Chat ${state.currentChatId} deleted successfully.`);
         const deletedChatId = state.currentChatId;

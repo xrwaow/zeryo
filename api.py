@@ -1667,7 +1667,7 @@ async def get_config():
     return config_data
 
 # (NEW) API Endpoint
-@app.post("/chat/{chat_id}/generate")
+@app.post("/c/{chat_id}/generate")
 async def generate_response(chat_id: str, request: GenerateRequest):
     """
     Initiates server-side streaming generation for a chat.
@@ -1743,7 +1743,7 @@ async def generate_response(chat_id: str, request: GenerateRequest):
     return StreamingResponse(stream_generator, media_type="text/event-stream")
 
 # (NEW) API Endpoint
-@app.post("/chat/{chat_id}/abort_generation")
+@app.post("/c/{chat_id}/abort_generation")
 async def abort_generation(chat_id: str):
     """Signals the backend to abort the active generation task for a chat."""
     if chat_id not in ACTIVE_GENERATIONS:
@@ -1935,7 +1935,7 @@ async def delete_character_v2(character_id: str):
         conn.close()
     return {"status": "ok"}
 
-@app.post("/chat/new_chat", response_model=Dict[str, str])
+@app.post("/c/new_chat", response_model=Dict[str, str])
 async def new_chat(request: NewChatRequest):
     chat_id = str(uuid.uuid4()); timestamp = int(time.time() * 1000)
     conn = get_db_connection(); cursor = conn.cursor()
@@ -1950,7 +1950,7 @@ async def new_chat(request: NewChatRequest):
     finally: conn.close()
     return {"chat_id": chat_id}
 
-@app.get("/chat/get_chats", response_model=List[ChatListItem])
+@app.get("/c/get_chats", response_model=List[ChatListItem])
 async def get_chats(offset: int = 0, limit: int = 50):
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT chat_id, timestamp_updated FROM chats ORDER BY timestamp_updated DESC LIMIT ? OFFSET ?", (limit, offset))
@@ -1971,7 +1971,7 @@ async def get_chats(offset: int = 0, limit: int = 50):
         chat_list.append(ChatListItem(chat_id=chat_id, preview=preview_text, timestamp_updated=row["timestamp_updated"]))
     conn.close(); return chat_list
 
-@app.get("/chat/{chat_id}", response_model=Chat)
+@app.get("/c/{chat_id}", response_model=Chat)
 async def get_chat(chat_id: str):
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT * FROM chats WHERE chat_id = ?", (chat_id,))
@@ -1985,7 +1985,7 @@ async def get_chat(chat_id: str):
                 messages=validated_messages)
     conn.close(); return chat
 
-@app.delete("/chat/{chat_id}")
+@app.delete("/c/{chat_id}")
 async def delete_chat(chat_id: str):
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT chat_id FROM chats WHERE chat_id = ?", (chat_id,))
@@ -1995,7 +1995,7 @@ async def delete_chat(chat_id: str):
     finally: conn.close()
     return {"status": "ok"}
 
-@app.post("/chat/{chat_id}/set_active_character")
+@app.post("/c/{chat_id}/set_active_character")
 async def set_active_character(chat_id: str, request: SetActiveCharacterRequest):
     character_id = request.character_id
     conn = get_db_connection(); cursor = conn.cursor()
@@ -2013,7 +2013,7 @@ async def set_active_character(chat_id: str, request: SetActiveCharacterRequest)
     finally: conn.close()
     return {"status": "ok"}
 
-@app.post("/chat/{chat_id}/add_message", response_model=Dict[str, str])
+@app.post("/c/{chat_id}/add_message", response_model=Dict[str, str])
 async def add_message(chat_id: str, request: AddMessageRequest):
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT chat_id FROM chats WHERE chat_id = ?", (chat_id,))
@@ -2047,7 +2047,7 @@ async def add_message(chat_id: str, request: AddMessageRequest):
 
     return {"message_id": message_id}
 
-@app.post("/chat/{chat_id}/delete_message/{message_id}")
+@app.post("/c/{chat_id}/delete_message/{message_id}")
 async def delete_message(chat_id: str, message_id: str):
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT message_id, parent_message_id FROM messages WHERE message_id = ? AND chat_id = ?", (message_id, chat_id))
@@ -2069,7 +2069,7 @@ async def delete_message(chat_id: str, message_id: str):
     finally: conn.close()
     return {"status": "ok"}
 
-@app.post("/chat/{chat_id}/edit_message/{message_id}")
+@app.post("/c/{chat_id}/edit_message/{message_id}")
 async def edit_message(chat_id: str, message_id: str, request: EditMessageRequest):
     conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT role FROM messages WHERE message_id = ? AND chat_id = ?", (message_id, chat_id))
@@ -2092,7 +2092,7 @@ async def edit_message(chat_id: str, message_id: str, request: EditMessageReques
     finally: conn.close()
     return {"status": "ok"}
 
-@app.post("/chat/{chat_id}/set_active_branch/{parent_message_id}")
+@app.post("/c/{chat_id}/set_active_branch/{parent_message_id}")
 async def set_active_branch(chat_id: str, parent_message_id: str, request: SetActiveBranchRequest):
     new_index = request.child_index; conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT message_id FROM messages WHERE message_id = ? AND chat_id = ?", (parent_message_id, chat_id))
@@ -2152,7 +2152,22 @@ async def execute_tool(request: ExecuteToolRequest):
         print(f"Tool execution error: {e}")
         raise HTTPException(status_code=500, detail=f"Error executing tool '{tool_name}'.")
 
-app.mount("/", StaticFiles(directory=".", html = True), name="static")
+# Serve index.html for /chat/{uuid} routes (SPA routing - page URLs use /chat/, API uses /c/)
+from fastapi.responses import FileResponse
+
+@app.get("/chat/{chat_id}")
+async def serve_chat_page(chat_id: str):
+    """Serve the main SPA for chat URL routes."""
+    return FileResponse("index.html", media_type="text/html")
+
+# Serve root index
+@app.get("/")
+async def serve_index():
+    """Serve the main index page."""
+    return FileResponse("index.html", media_type="text/html")
+
+# Mount static files AFTER all API routes - without html=True so it won't catch API routes
+app.mount("/", StaticFiles(directory="."), name="static")
 
 if __name__ == "__main__":
     import uvicorn
