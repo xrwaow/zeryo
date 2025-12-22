@@ -54,6 +54,9 @@ Open http://localhost:8000 in a browser.
 - Autoscroll toggle
 - Collapsible codeblocks by default
 
-## Screenshot
+## Screenshots
 
-![screenshot](https://github.com/user-attachments/assets/b0506057-00da-4afb-8ecd-528e21792276)
+<img width="2339" height="1397" alt="Screenshot_20251208_120033" src="https://github.com/user-attachments/assets/0881e855-8a12-4523-9928-d794be169d79" />
+<img width="2335" height="1396" alt="Screenshot_20251208_120000" src="https://github.com/user-attachments/assets/14cb4611-0502-40a7-97a3-e792bd1cf9f4" />
+<img width="2334" height="1395" alt="Screenshot_20251208_120138" src="https://github.com/user-attachments/assets/ddb8fd75-c1d2-4476-82a7-fb3ff4a40a87" />
+<img width="2321" height="1393" alt="Screenshot_20251208_120226" src="https://github.com/user-attachments/assets/ff9a6b4e-b014-43d2-826c-3f974a8b5bba" />
