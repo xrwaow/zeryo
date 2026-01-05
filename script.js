@@ -7,7 +7,9 @@ let PROVIDER_CONFIG = {
     local_base_url: "http://127.0.0.1:8080",
     // Keys are ONLY stored in state.apiKeys, populated by fetchProviderConfig
 };
-let TOOLS_SYSTEM_PROMPT = ""; // Fetched from backend if needed
+// NOTE: With native OpenAI/MCP tool calling, TOOLS_SYSTEM_PROMPT is no longer used.
+// Tools are passed via the API's "tools" parameter. Kept for backward compatibility.
+let TOOLS_SYSTEM_PROMPT = ""; // Empty with native tool calling
 
 // DOM Elements
 const chatContainer = document.getElementById('chat-container');
@@ -858,10 +860,8 @@ function reconcileEnabledToolSelection() {
 }
 
 function updateToolsPromptPreviewDisplay() {
-    const previewEl = document.getElementById('tools-prompt-preview');
-    if (previewEl) {
-        previewEl.textContent = TOOLS_SYSTEM_PROMPT ? TOOLS_SYSTEM_PROMPT : 'No tools prompt loaded.';
-    }
+    // NOTE: Tools prompt preview removed - native tool calling doesn't use prompt instructions.
+    // This function is kept as a no-op for backward compatibility with existing callers.
 }
 
 function updateToolsCheckboxDisableState() {
@@ -896,15 +896,8 @@ function renderToolsCheckboxList(container) {
                 state.enabledToolNames.delete(tool.name);
             }
             persistEnabledToolNames();
-            try {
-                await fetchToolsSystemPrompt(getEnabledToolNamesArray());
-            } catch (err) {
-                console.error('Failed to refresh tools prompt after toggle:', err);
-                addSystemMessage('Failed to refresh tools prompt after toggling a tool.', 'warning');
-            } finally {
-                updateToolsPromptPreviewDisplay();
-                updateEffectiveSystemPrompt();
-            }
+            // NOTE: No need to fetch tools prompt with native tool calling
+            updateEffectiveSystemPrompt();
         });
 
         const infoWrapper = document.createElement('div');
@@ -1308,27 +1301,10 @@ async function fetchProviderConfig() {
 }
 
 async function fetchToolsSystemPrompt(enabledNames = null) {
-    try {
-        const params = new URLSearchParams();
-        if (Array.isArray(enabledNames)) {
-            const sanitizedNames = enabledNames.filter(name => typeof name === 'string' && name.trim());
-            if (sanitizedNames.length) {
-                sanitizedNames.forEach(name => params.append('names', name));
-            } else {
-                params.append('names', ''); // Explicitly request an empty tool subset
-            }
-        }
-        const url = params.toString() ? `${API_BASE}/tools/system_prompt?${params.toString()}` : `${API_BASE}/tools/system_prompt`;
-        const response = await fetch(url);
-        if (!response.ok) throw new Error(`Failed to fetch tools prompt: ${response.statusText}`);
-        const data = await response.json();
-        TOOLS_SYSTEM_PROMPT = data.prompt || "";
-        console.log("Fetched tools system prompt.");
-    } catch (error) {
-        console.error('Error fetching tools system prompt:', error);
-        TOOLS_SYSTEM_PROMPT = "";
-        addSystemMessage("Failed to fetch tool descriptions from backend.", "warning");
-    }
+    // NOTE: With native tool calling, no system prompt instructions are needed.
+    // Tools are passed via the API's "tools" parameter. This function is kept
+    // for backward compatibility but no longer fetches anything.
+    TOOLS_SYSTEM_PROMPT = "";
     updateToolsPromptPreviewDisplay();
     updateEffectiveSystemPrompt();
 }
@@ -1354,7 +1330,7 @@ async function fetchToolsMetadata() {
 
 async function initializeToolsCatalog() {
     await fetchToolsMetadata();
-    await fetchToolsSystemPrompt(getEnabledToolNamesArray());
+    // NOTE: fetchToolsSystemPrompt no longer needed with native tool calling
 }
 
 async function loadGenArgs() {
@@ -1917,7 +1893,13 @@ function enhanceCodeBlock(preElement) {
     preElement.replaceWith(wrapper);
 }
 
-function buildContentHtml(targetContentDiv, messageText) {
+/**
+ * Builds the HTML content for a message, handling tool calls and results.
+ * @param {HTMLElement} targetContentDiv - The content div to render into
+ * @param {string} messageText - The message text containing tool_call/tool_result tags
+ * @param {Array} externalToolResults - Optional array of tool results from child messages
+ */
+function buildContentHtml(targetContentDiv, messageText, externalToolResults = []) {
     if (!targetContentDiv) return;
 
     const textToParse = messageText || '';
@@ -1994,18 +1976,81 @@ function buildContentHtml(targetContentDiv, messageText) {
             segments.push({ type: 'text', data: remainingTextAfterTags });
         }
 
-        // Determine which tool calls have corresponding results
-        const toolCallsWithResults = new Set();
+        // Group tool calls with their corresponding results
+        // First, try to match with inline results, then fall back to external results
+        const processedResults = new Set();
+        const usedExternalResults = new Set();
+        const toolGroups = [];
+        
+        // First pass: count tool calls to enable order-based matching
+        const toolCallIndices = [];
+        for (let i = 0; i < segments.length; i++) {
+            if (segments[i].type === 'tool') {
+                toolCallIndices.push(i);
+            }
+        }
+        
         for (let i = 0; i < segments.length; i++) {
             if (segments[i].type === 'tool') {
                 const toolName = segments[i].data?.name;
-                // Check if there's a result for this tool call in subsequent segments
+                const toolId = segments[i].data?.id || segments[i].data?.payloadInfo?.inferredId;
+                const toolOrderIndex = toolCallIndices.indexOf(i); // 0-based index of this tool call
+                
+                // First try to find matching inline result
+                let matchingResult = null;
                 for (let j = i + 1; j < segments.length; j++) {
-                    if (segments[j].type === 'result' && segments[j].data?.name === toolName) {
-                        toolCallsWithResults.add(i);
-                        break;
+                    if (segments[j].type === 'result' && !processedResults.has(j)) {
+                        const resultName = segments[j].data?.name;
+                        if (resultName === toolName || !resultName) {
+                            matchingResult = { index: j, data: segments[j].data };
+                            processedResults.add(j);
+                            break;
+                        }
                     }
                 }
+                
+                // If no inline result, try to find from external tool results
+                if (!matchingResult && externalToolResults.length > 0) {
+                    // Try to match by tool_call_id first (most reliable)
+                    for (let k = 0; k < externalToolResults.length; k++) {
+                        if (!usedExternalResults.has(k)) {
+                            const extResult = externalToolResults[k];
+                            const extCallId = extResult.tool_call_id;
+                            if (extCallId && extCallId === toolId) {
+                                matchingResult = { 
+                                    index: -1, 
+                                    data: {
+                                        name: toolName,
+                                        status: extResult.status,
+                                        body: extResult.body || extResult.message || extResult.content || '',
+                                        raw: extResult.raw || ''
+                                    }
+                                };
+                                usedExternalResults.add(k);
+                                break;
+                            }
+                        }
+                    }
+                    
+                    // If still no match, use order-based matching (nth tool call -> nth external result)
+                    if (!matchingResult && toolOrderIndex < externalToolResults.length) {
+                        const extResult = externalToolResults[toolOrderIndex];
+                        if (!usedExternalResults.has(toolOrderIndex)) {
+                            matchingResult = { 
+                                index: -1, 
+                                data: {
+                                    name: toolName,
+                                    status: extResult.status,
+                                    body: extResult.body || extResult.message || extResult.content || '',
+                                    raw: extResult.raw || ''
+                                }
+                            };
+                            usedExternalResults.add(toolOrderIndex);
+                        }
+                    }
+                }
+                
+                toolGroups.push({ toolIndex: i, toolData: segments[i].data, result: matchingResult });
             }
         }
 
@@ -2013,11 +2058,16 @@ function buildContentHtml(targetContentDiv, messageText) {
             if (segment.type === 'text') {
                 targetContentDiv.insertAdjacentHTML('beforeend', renderMarkdown(segment.data));
             } else if (segment.type === 'tool') {
-                // Pass options to indicate if this tool was already executed
-                const wasExecuted = toolCallsWithResults.has(idx);
-                renderToolCallPlaceholder(targetContentDiv, segment.data, { executed: wasExecuted });
+                // Find the group for this tool
+                const group = toolGroups.find(g => g.toolIndex === idx);
+                if (group) {
+                    renderToolGroup(targetContentDiv, group.toolData, group.result?.data);
+                }
             } else if (segment.type === 'result') {
-                renderToolResult(targetContentDiv, segment.data);
+                // Only render standalone results that weren't grouped with a tool call
+                if (!processedResults.has(idx)) {
+                    renderToolGroup(targetContentDiv, null, segment.data);
+                }
             }
         });
     }
@@ -2050,7 +2100,7 @@ function captureCollapseStates(containerElement) {
         states.think.set('think_0', block.classList.contains('collapsed'));
     });
     
-    containerElement.querySelectorAll('.tool-call-block, .tool-result-block').forEach(block => {
+    containerElement.querySelectorAll('.tool-group, .tool-call-block, .tool-result-block').forEach(block => {
         if (block.dataset.userToggled !== 'true') return;
         const key = `${block.dataset.toolName || ''}_${block.dataset.callId || ''}`;
         states.tool.set(key, block.classList.contains('collapsed'));
@@ -2081,7 +2131,7 @@ function applyCollapseStates(containerElement, states) {
         }
     });
     
-    containerElement.querySelectorAll('.tool-call-block, .tool-result-block').forEach(block => {
+    containerElement.querySelectorAll('.tool-group, .tool-call-block, .tool-result-block').forEach(block => {
         const key = `${block.dataset.toolName || ''}_${block.dataset.callId || ''}`;
         if (states.tool?.has(key)) {
             block.dataset.userToggled = 'true';
@@ -2407,10 +2457,33 @@ function addMessage(message) {
     // Unified and simplified rendering logic for all message types.
     // renderMarkdown handles all necessary conversions, including code block enhancement.
     if (role === 'tool') {
-        // Tool results are special and don't use markdown.
-        renderToolResult(contentDiv, message.message || '[Empty Tool Result]');
+        // Check if this tool message's result was already rendered with its parent assistant message
+        const parentId = message.parent_message_id;
+        const parentMsg = parentId ? state.messages.find(m => m.message_id === parentId) : null;
+        if (parentMsg && (parentMsg.role === 'llm' || parentMsg.role === 'assistant')) {
+            // This tool result is grouped with parent - hide this row
+            messageRow.classList.add('tool-grouped');
+            messageRow.style.display = 'none';
+        } else {
+            // Standalone tool result (shouldn't normally happen, but handle gracefully)
+            renderToolResult(contentDiv, message.message || '[Empty Tool Result]');
+        }
     } else if (role === 'assistant') {
-        buildContentHtml(contentDiv, message.message || '');
+        // Find child tool messages to get their results
+        const childToolMessages = state.messages.filter(
+            m => m.parent_message_id === message.message_id && m.role === 'tool'
+        );
+        
+        // Extract tool results from child messages
+        const externalToolResults = childToolMessages.map(toolMsg => ({
+            message: toolMsg.message,
+            body: toolMsg.message,
+            name: toolMsg.tool_name || null,
+            tool_call_id: toolMsg.tool_call_id || null,
+            status: null
+        }));
+        
+        buildContentHtml(contentDiv, message.message || '', externalToolResults);
         finalizeStreamingCodeBlocks(contentDiv);
     } else {
         contentDiv.innerHTML = renderMarkdown(message.message || '');
@@ -2544,14 +2617,14 @@ function startEditing(messageId) {
          return;
     }
     const hasToolChild = state.messages.some(m => m.parent_message_id === messageId && m.role === 'tool');
-    if ((message.role === 'llm' || message.role === 'assistant') && (hasToolChild || contentDiv.querySelector('.tool-call-block'))) {
+    if ((message.role === 'llm' || message.role === 'assistant') && (hasToolChild || contentDiv.querySelector('.tool-group, .tool-call-block'))) {
         addSystemMessage("Editing messages that involve tool execution is not currently supported.", "warning");
         return;
     }
 
     const originalContentHTML = contentDiv.innerHTML;
     const originalActionsDisplay = actionsDiv ? actionsDiv.style.display : '';
-    const toolBlocks = messageRow.querySelectorAll('.tool-call-block, .tool-result-block');
+    const toolBlocks = messageRow.querySelectorAll('.tool-group, .tool-call-block, .tool-result-block');
 
     contentDiv.classList.add('editing');
     if (actionsDiv) actionsDiv.style.display = 'none';
@@ -2906,10 +2979,9 @@ function refreshSettingsModalState() {
         };
     }
 
-    // Tools prompt preview (read-only)
+    // Tools list
     renderToolsCheckboxList(toolsListContainer);
     updateToolsCheckboxDisableState();
-    updateToolsPromptPreviewDisplay();
 
     // Restore last active tab (fallback to first button)
     const lastTab = localStorage.getItem('settingsActiveTab');
@@ -3740,7 +3812,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 targetContentDiv.querySelector('.pulsing-cursor')?.remove();
                 
                 // Find the tool call block that was just rendered and ensure it shows confirmation UI
-                const toolBlocks = targetContentDiv.querySelectorAll('.tool-call-block');
+                const toolBlocks = targetContentDiv.querySelectorAll('.tool-group, .tool-call-block');
                 const lastToolBlock = toolBlocks[toolBlocks.length - 1];
                 if (lastToolBlock && lastToolBlock.dataset.toolName === name) {
                     // The block should already have the confirmation UI from renderToolCallPlaceholder
@@ -4059,214 +4131,215 @@ function cleanupAfterGeneration() {
     state.abortingForToolCall = false;
 }
 
-function renderToolCallPlaceholder(messageContentDiv, toolData, options = {}) {
-    if (!messageContentDiv) return;
-
-    const toolName = toolData?.name || 'tool';
-    const callId = toolData?.id || toolData?.payloadInfo?.inferredId || null;
-    const payloadInfo = toolData?.payloadInfo || { arguments: {}, raw: '', error: null };
-    const args = payloadInfo.arguments || {};
-    const rawPayload = payloadInfo.raw || '';
-    const parseError = payloadInfo.error;
-    
-    const toolCallBlock = document.createElement('div');
-    toolCallBlock.className = 'tool-call-block collapsed';
-    toolCallBlock.dataset.toolName = toolName;
-    if (callId) toolCallBlock.dataset.callId = callId;
-
-    // Get appropriate icon for the tool
-    const getToolIcon = (name) => {
-        const iconMap = {
-            'add': 'calculator',
-            'search': 'search',
-            'scrape': 'globe',
-            'python_interpreter': 'terminal-fill'
-        };
-        return iconMap[name] || 'tools';
+// Helper function to get appropriate icon for a tool
+function getToolIcon(name) {
+    const iconMap = {
+        'add': 'calculator',
+        'search': 'search',
+        'scrape': 'globe',
+        'python_interpreter': 'terminal-fill'
     };
+    return iconMap[name] || 'tools';
+}
 
-    const toolHeader = document.createElement('div');
-    toolHeader.className = 'tool-header';
-
-    const toolNameSpan = document.createElement('span');
-    toolNameSpan.className = 'tool-header-name';
-    const toolIcon = getToolIcon(toolName);
+/**
+ * Renders a unified tool group block containing both the tool call and its result.
+ * This creates a single, cohesive collapsible block instead of separate disconnected elements.
+ */
+function renderToolGroup(messageContentDiv, toolData, resultData) {
+    if (!messageContentDiv) return;
     
-    // Display format: icon + "Using tool_name"
-    const actionVerb = options.executed ? 'Ran' : 'Using';
-    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> <span class="tool-action-verb">${actionVerb}</span> <span class="tool-name-text">${escapeHtml(toolName)}</span>`;
-
-    const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'tool-header-actions';
+    const toolName = toolData?.name || resultData?.name || 'tool';
+    const callId = toolData?.id || toolData?.payloadInfo?.inferredId || null;
+    const hasCall = !!toolData;
+    const hasResult = !!resultData;
+    
+    // Determine result status
+    const resultText = typeof resultData?.body === 'string' ? resultData.body : (typeof resultData === 'string' ? resultData : '');
+    const lowerText = (resultText || '').toLowerCase();
+    const isError = lowerText.startsWith('[error:') || lowerText.startsWith('error:') || resultData?.status === 'error';
+    
+    // Create the unified group container
+    const toolGroup = document.createElement('div');
+    toolGroup.className = 'tool-group collapsed';
+    if (isError) toolGroup.classList.add('error');
+    else if (hasResult) toolGroup.classList.add('success');
+    toolGroup.dataset.toolName = toolName;
+    if (callId) toolGroup.dataset.callId = callId;
+    
+    // --- Group Header (main collapsible header) ---
+    const groupHeader = document.createElement('div');
+    groupHeader.className = 'tool-group-header';
+    
+    const headerLeft = document.createElement('div');
+    headerLeft.className = 'tool-group-header-left';
+    
+    const toolIcon = getToolIcon(toolName);
+    const statusIcon = hasResult ? (isError ? 'exclamation-circle-fill' : 'check-circle-fill') : 'hourglass-split';
+    const statusClass = hasResult ? (isError ? 'error' : 'success') : 'pending';
+    
+    headerLeft.innerHTML = `
+        <i class="bi bi-${toolIcon} tool-group-icon"></i>
+        <span class="tool-group-name">${escapeHtml(toolName)}</span>
+        <span class="tool-group-status ${statusClass}">
+            <i class="bi bi-${statusIcon}"></i>
+            ${hasResult ? (isError ? 'Error' : 'Completed') : 'Running...'}
+        </span>
+    `;
+    
+    const headerRight = document.createElement('div');
+    headerRight.className = 'tool-group-header-right';
     
     const collapseBtn = document.createElement('button');
     collapseBtn.className = 'tool-collapse-btn';
     collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>';
-    collapseBtn.title = 'Expand tool call details';
-    actionsDiv.appendChild(collapseBtn);
-
-    toolHeader.appendChild(toolNameSpan);
-    toolHeader.appendChild(actionsDiv);
-    toolCallBlock.appendChild(toolHeader);
-
-    const toolArgsDiv = document.createElement('div');
-    toolArgsDiv.className = 'tool-arguments';
+    collapseBtn.title = 'Expand details';
+    headerRight.appendChild(collapseBtn);
     
-    try {
-        const hasArgs = args && Object.keys(args).length > 0;
-        const displayObject = hasArgs ? args : (!parseError && rawPayload ? JSON.parse(rawPayload) : {});
+    groupHeader.appendChild(headerLeft);
+    groupHeader.appendChild(headerRight);
+    toolGroup.appendChild(groupHeader);
+    
+    // --- Collapsible Content Container ---
+    const groupContent = document.createElement('div');
+    groupContent.className = 'tool-group-content';
+    
+    // --- Tool Call Section (Input) ---
+    if (hasCall) {
+        const callSection = document.createElement('div');
+        callSection.className = 'tool-group-section tool-call-section';
         
-        // For python_interpreter, show code in a nice code block
-        if (toolName === 'python_interpreter' && displayObject.code) {
-            const codeContent = displayObject.code;
-            const wrapper = createCodeBlockWithContent(codeContent, 'python');
-            toolArgsDiv.appendChild(wrapper);
-        } else {
-            const argsString = JSON.stringify(displayObject, null, 2);
+        const callHeader = document.createElement('div');
+        callHeader.className = 'tool-section-header';
+        callHeader.innerHTML = '<i class="bi bi-box-arrow-in-right"></i> Input';
+        callSection.appendChild(callHeader);
+        
+        const payloadInfo = toolData?.payloadInfo || { arguments: {}, raw: '', error: null };
+        const args = payloadInfo.arguments || {};
+        const rawPayload = payloadInfo.raw || '';
+        const parseError = payloadInfo.error;
+        
+        const callContent = document.createElement('div');
+        callContent.className = 'tool-section-content';
+        
+        try {
+            const hasArgs = args && Object.keys(args).length > 0;
+            const displayObject = hasArgs ? args : (!parseError && rawPayload ? JSON.parse(rawPayload) : {});
+            
+            if (toolName === 'python_interpreter' && displayObject.code) {
+                const wrapper = createCodeBlockWithContent(displayObject.code, 'python');
+                callContent.appendChild(wrapper);
+            } else {
+                const argsString = JSON.stringify(displayObject, null, 2);
+                const pre = document.createElement('pre');
+                const code = document.createElement('code');
+                code.className = 'language-json';
+                code.textContent = argsString;
+                try { hljs.highlightElement(code); }
+                catch (e) { console.warn('Error highlighting tool args:', e); }
+                pre.appendChild(code);
+                callContent.appendChild(pre);
+            }
+        } catch (err) {
+            callContent.textContent = '[Invalid Arguments]';
+        }
+        
+        if (parseError) {
+            const errorBanner = document.createElement('div');
+            errorBanner.className = 'tool-parse-error';
+            errorBanner.innerHTML = `<i class="bi bi-exclamation-triangle-fill"></i> ${escapeHtml(parseError)}`;
+            callSection.appendChild(errorBanner);
+        }
+        
+        callSection.appendChild(callContent);
+        groupContent.appendChild(callSection);
+    }
+    
+    // --- Tool Result Section (Output) ---
+    if (hasResult) {
+        const resultSection = document.createElement('div');
+        resultSection.className = `tool-group-section tool-result-section ${isError ? 'error' : 'success'}`;
+        
+        const resultHeader = document.createElement('div');
+        resultHeader.className = 'tool-section-header';
+        resultHeader.innerHTML = `<i class="bi bi-box-arrow-right"></i> ${isError ? 'Error' : 'Output'}`;
+        resultSection.appendChild(resultHeader);
+        
+        const resultContent = document.createElement('div');
+        resultContent.className = 'tool-section-content';
+        
+        // Check for images in the result
+        const imageRegex = /\[IMAGE:base64:([A-Za-z0-9+/=]+)\]/g;
+        const hasImages = imageRegex.test(resultText);
+        imageRegex.lastIndex = 0;
+        
+        if (hasImages) {
+            let lastIndex = 0;
+            let match;
+            while ((match = imageRegex.exec(resultText)) !== null) {
+                const textBefore = resultText.substring(lastIndex, match.index).trim();
+                if (textBefore) {
+                    const pre = document.createElement('pre');
+                    const code = document.createElement('code');
+                    code.textContent = textBefore;
+                    pre.appendChild(code);
+                    resultContent.appendChild(pre);
+                }
+                const imgContainer = document.createElement('div');
+                imgContainer.className = 'tool-result-image';
+                const img = document.createElement('img');
+                img.src = `data:image/png;base64,${match[1]}`;
+                img.alt = 'Python output image';
+                imgContainer.appendChild(img);
+                resultContent.appendChild(imgContainer);
+                lastIndex = imageRegex.lastIndex;
+            }
+            const textAfter = resultText.substring(lastIndex).trim();
+            if (textAfter) {
+                const pre = document.createElement('pre');
+                const code = document.createElement('code');
+                code.textContent = textAfter;
+                pre.appendChild(code);
+                resultContent.appendChild(pre);
+            }
+        } else if (toolName === 'python_interpreter' || resultText.includes('\n')) {
             const pre = document.createElement('pre');
             const code = document.createElement('code');
-            code.className = 'language-json';
-            code.textContent = argsString;
-            try { hljs.highlightElement(code); }
-            catch (e) { console.warn('Error highlighting tool args:', e); }
+            code.textContent = resultText || '[Empty Result]';
             pre.appendChild(code);
-            toolArgsDiv.appendChild(pre);
+            resultContent.appendChild(pre);
+        } else {
+            resultContent.innerHTML = renderMarkdown(resultText || '[Empty Result]');
         }
-    } catch (err) {
-        toolArgsDiv.textContent = '[Invalid Arguments]';
+        
+        resultSection.appendChild(resultContent);
+        groupContent.appendChild(resultSection);
     }
-
-    if (parseError) {
-        const errorBanner = document.createElement('div');
-        errorBanner.className = 'tool-parse-error';
-        errorBanner.innerHTML = `<i class="bi bi-exclamation-triangle-fill"></i> ${escapeHtml(parseError)}`;
-        toolCallBlock.appendChild(errorBanner);
-    }
-    toolCallBlock.appendChild(toolArgsDiv);
-    messageContentDiv.appendChild(toolCallBlock);
     
-    return toolCallBlock;
+    toolGroup.appendChild(groupContent);
+    messageContentDiv.appendChild(toolGroup);
+    
+    return toolGroup;
+}
+
+// Legacy function kept for backward compatibility with tool messages stored separately
+function renderToolCallPlaceholder(messageContentDiv, toolData, options = {}) {
+    if (!messageContentDiv) return;
+    // Delegate to the unified group renderer without a result
+    return renderToolGroup(messageContentDiv, toolData, null);
 }
 
 function renderToolResult(messageContentDiv, resultData) {
     if (!messageContentDiv) return;
-
-    const toolName = resultData?.name || null;
-    const status = resultData?.status || null;
-    const resultText = typeof resultData?.body === 'string' ? resultData.body : (typeof resultData === 'string' ? resultData : '');
-
-    const toolResultBlock = document.createElement('div');
-    toolResultBlock.className = 'tool-result-block collapsed';
-
-    const toolHeader = document.createElement('div');
-    toolHeader.className = 'tool-header';
-
-    const toolNameSpan = document.createElement('span');
-    toolNameSpan.className = 'tool-header-name';
-    const lowerText = (resultText || '').toLowerCase();
-    
-    // Detect error or success status
-    const isError = lowerText.startsWith('[error:') || lowerText.startsWith('error:') || status === 'error';
-    
-    // Get tool-specific icon
-    const getToolIcon = (name) => {
-        const iconMap = {
-            'add': 'calculator',
-            'search': 'search',
-            'scrape': 'globe',
-            'python_interpreter': 'terminal-fill'
-        };
-        return iconMap[name] || 'tools';
-    };
-    
-    const toolIcon = toolName ? getToolIcon(toolName) : (isError ? 'exclamation-circle-fill' : 'check-circle-fill');
-    const statusClass = isError ? 'error' : 'success';
-    const statusLabel = isError ? 'Error' : 'Output';
-    toolResultBlock.classList.add(statusClass);
-    
-    toolNameSpan.innerHTML = `<i class="bi bi-${toolIcon}"></i> <span class="tool-result-status ${statusClass}">${statusLabel}</span>${toolName ? ` <span class="tool-name-text">${escapeHtml(toolName)}</span>` : ''}`;
-
-    const actionsDiv = document.createElement('div');
-    actionsDiv.className = 'tool-header-actions';
-    const collapseBtn = document.createElement('button');
-    collapseBtn.className = 'tool-collapse-btn';
-    collapseBtn.innerHTML = '<i class="bi bi-chevron-down"></i>';
-    collapseBtn.title = 'Expand tool result';
-    actionsDiv.appendChild(collapseBtn);
-
-    toolHeader.appendChild(toolNameSpan);
-    toolHeader.appendChild(actionsDiv);
-    toolResultBlock.appendChild(toolHeader);
-
-    const toolResultContent = document.createElement('div');
-    toolResultContent.className = 'tool-result-content';
-    
-    // Check for images in the result (format: [IMAGE:base64:...])
-    const imageRegex = /\[IMAGE:base64:([A-Za-z0-9+/=]+)\]/g;
-    const hasImages = imageRegex.test(resultText);
-    imageRegex.lastIndex = 0; // Reset regex
-    
-    if (hasImages) {
-        // Split text by images and render each part
-        let lastIndex = 0;
-        let match;
-        
-        while ((match = imageRegex.exec(resultText)) !== null) {
-            // Add text before the image
-            const textBefore = resultText.substring(lastIndex, match.index).trim();
-            if (textBefore) {
-                const pre = document.createElement('pre');
-                const code = document.createElement('code');
-                code.textContent = textBefore;
-                pre.appendChild(code);
-                toolResultContent.appendChild(pre);
-            }
-            
-            // Add the image
-            const imgContainer = document.createElement('div');
-            imgContainer.className = 'tool-result-image';
-            const img = document.createElement('img');
-            img.src = `data:image/png;base64,${match[1]}`;
-            img.alt = 'Python output image';
-            img.style.maxWidth = '100%';
-            img.style.borderRadius = '4px';
-            img.style.marginTop = '8px';
-            imgContainer.appendChild(img);
-            toolResultContent.appendChild(imgContainer);
-            
-            lastIndex = imageRegex.lastIndex;
-        }
-        
-        // Add any remaining text after the last image
-        const textAfter = resultText.substring(lastIndex).trim();
-        if (textAfter) {
-            const pre = document.createElement('pre');
-            const code = document.createElement('code');
-            code.textContent = textAfter;
-            pre.appendChild(code);
-            toolResultContent.appendChild(pre);
-        }
-    } else if (toolName === 'python_interpreter' || resultText.includes('\n')) {
-        // For code output, wrap in a pre/code block
-        const pre = document.createElement('pre');
-        const code = document.createElement('code');
-        code.textContent = resultText || '[Empty Result]';
-        pre.appendChild(code);
-        toolResultContent.appendChild(pre);
-    } else {
-        toolResultContent.innerHTML = renderMarkdown(resultText || '[Empty Result]');
-    }
-
-    toolResultBlock.appendChild(toolResultContent);
-    messageContentDiv.appendChild(toolResultBlock);
-    
-    return toolResultBlock;
+    // Delegate to the unified group renderer with just the result (for standalone tool messages)
+    return renderToolGroup(messageContentDiv, null, resultData);
 }
 
 function handleToolBlockToggle(e) {
     const toggleBtn = e.target.closest('.tool-collapse-btn');
     if (toggleBtn) {
-        const block = toggleBtn.closest('.tool-call-block, .tool-result-block');
+        // Support both new .tool-group and legacy .tool-call-block/.tool-result-block
+        const block = toggleBtn.closest('.tool-group, .tool-call-block, .tool-result-block');
         if (block) {
             block.dataset.userToggled = 'true';
             const isCollapsed = block.classList.toggle('collapsed');
@@ -4429,13 +4502,61 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
     const messageIdToDelete = primaryMessage.message_id;
 
     try {
-        const parentRow = parentMessageId ? findClosestMessageRow(parentMessageId) : findClosestMessageRow(messageIdToDelete);
-        if (!parentRow) {
+        // Find the parent row - walk up if needed to find a row actually in the DOM
+        let parentRow = null;
+        let insertAfterMessageId = parentMessageId;
+        
+        // First try to find the direct parent row
+        if (parentMessageId) {
+            parentRow = findClosestMessageRow(parentMessageId);
+        }
+        
+        // If parent row is not in the DOM (could be a grouped tool message), walk up to find a visible row
+        if (parentRow && !document.contains(parentRow)) {
+            console.log(`[REGEN] Parent row found but not in DOM, walking up chain...`);
+            let currentMsgId = parentMessageId;
+            const visited = new Set();
+            while (currentMsgId && !visited.has(currentMsgId)) {
+                visited.add(currentMsgId);
+                const row = messagesWrapper?.querySelector(`.message-row[data-message-id="${currentMsgId}"]`);
+                if (row && document.contains(row)) {
+                    parentRow = row;
+                    insertAfterMessageId = currentMsgId;
+                    console.log(`[REGEN] Found visible ancestor row: ${currentMsgId}`);
+                    break;
+                }
+                const msg = state.messages.find(m => m.message_id === currentMsgId);
+                currentMsgId = msg?.parent_message_id || null;
+            }
+        }
+        
+        // Final fallback: if still no valid parent row, try to find the row for the message we're regenerating
+        if (!parentRow || !document.contains(parentRow)) {
+            const messageRow = findClosestMessageRow(messageIdToDelete);
+            if (messageRow && document.contains(messageRow)) {
+                // We'll insert the placeholder before removing this row, then remove it
+                parentRow = messageRow;
+                console.log(`[REGEN] Using message row itself as reference: ${messageIdToDelete}`);
+            }
+        }
+        
+        if (!parentRow || !document.contains(parentRow)) {
             console.error(`Parent row ${parentMessageId ?? messageIdToDelete} not found in DOM. Cannot place placeholder correctly.`);
             addSystemMessage("Error: Parent message UI not found. Aborting regeneration.", "error");
             await loadChat(currentChatId);
             cleanupAfterGeneration();
             return;
+        }
+
+        // Flag to track if we're using the message row itself as reference (needs special handling)
+        const usingMessageRowAsReference = parentRow.dataset?.messageId === messageIdToDelete;
+        
+        // If using the message row itself, create placeholder BEFORE removing
+        if (usingMessageRowAsReference) {
+            assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
+            console.log(`[REGEN DEBUG] Created placeholder row (before removal):`, assistantPlaceholderRow);
+            parentRow.insertAdjacentElement('beforebegin', assistantPlaceholderRow);
+            console.log(`[REGEN DEBUG] Placeholder inserted before message row, now in DOM:`, document.contains(assistantPlaceholderRow));
         }
 
         if (!newBranch) {
@@ -4495,14 +4616,22 @@ async function regenerateMessage(messageIdToRegen, newBranch = false) {
             }
         }
 
-        assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
-        parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
+        // Create placeholder if not already created (in the fallback case it was created before removal)
+        if (!assistantPlaceholderRow) {
+            assistantPlaceholderRow = createPlaceholderMessageRow(`temp_assistant_${Date.now()}`, generationParentId);
+            console.log(`[REGEN DEBUG] Created placeholder row:`, assistantPlaceholderRow);
+            console.log(`[REGEN DEBUG] Parent row still in DOM:`, document.contains(parentRow));
+            parentRow.insertAdjacentElement('afterend', assistantPlaceholderRow);
+            console.log(`[REGEN DEBUG] Placeholder inserted, now in DOM:`, document.contains(assistantPlaceholderRow));
+        }
+        
         const assistantContentDiv = assistantPlaceholderRow.querySelector('.message-content');
         if (!assistantContentDiv) {
             assistantPlaceholderRow?.remove();
             throw new Error("Failed to create assistant response placeholder element.");
         }
 
+        console.log(`[REGEN DEBUG] Calling generateAssistantResponse...`);
         await generateAssistantResponse(
             generationParentId,
             assistantContentDiv,

@@ -5,10 +5,8 @@ from typing import List, Dict, Union, Callable, Any
 import requests
 import yaml
 
-try:
-    import trafilatura
-except ImportError:  # pragma: no cover - graceful degradation if optional dep missing
-    trafilatura = None
+from bs4 import BeautifulSoup
+import trafilatura
 
 
 def _load_yaml_file(path: str) -> Dict[str, Any]:
@@ -210,6 +208,44 @@ def scrape(url: str) -> str:
         summary_lines.append(f"Excerpt: {excerpt}...")
 
     return "\n".join(summary_lines)
+
+
+def get_lesswrong_post(url: str) -> str:
+    """Fetch the main LessWrong post content (title and body) without comments or sidebar."""
+    if not url or not isinstance(url, str):
+        return "Error: URL must be a non-empty string."
+
+    if BeautifulSoup is None:
+        return "Error: BeautifulSoup (bs4) is not installed."
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    }
+
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        print(f"Error fetching LessWrong post '{url}': {exc}")
+        return f"Error fetching LessWrong post: {exc}"
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    title_elem = soup.find("h1", class_="PostsPageTitle-title")
+    title = title_elem.get_text(strip=True) if title_elem else ""
+
+    post_content = soup.find("div", class_=lambda value: value and "PostsPage-postContent" in value)
+    if not post_content:
+        post_content = soup.find("div", class_="PostsPage-postBody")
+
+    if not post_content:
+        return "Error: Could not find post content on the LessWrong page."
+
+    body = post_content.get_text(separator="\n\n", strip=True)
+
+    if title:
+        return f"{title}\n\n{body}" if body else title
+    return body or "Error: Post content was empty."
 
 
 def tool_add(a: Union[float, str], b: Union[float, str]) -> str:
@@ -483,6 +519,14 @@ TOOL_SPECS: List[Dict[str, Any]] = [
         "handler": scrape,
     },
     {
+        "name": "get_lesswrong_post",
+        "description": "Retrieves the title and main body content from a LessWrong post (no comments).",
+        "parameters": {
+            "url": {"type": "string", "description": "Fully qualified LessWrong post URL."}
+        },
+        "handler": get_lesswrong_post,
+    },
+    {
         "name": "python_interpreter",
         "description": """Execute Python code in a REPL-like environment. 
 The last expression is automatically returned (like Jupyter/REPL). 
@@ -523,6 +567,84 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     }
     for spec in TOOL_SPECS
 ]
+
+
+def convert_tools_to_openai_format(tool_definitions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Converts internal TOOL_DEFINITIONS format to OpenAI/MCP-compatible tools array.
+    
+    Input format (internal):
+    {
+        "name": "add",
+        "description": "Calculates the sum of two numbers.",
+        "parameters": {
+            "a": {"type": "number", "description": "First addend."},
+            "b": {"type": "number", "description": "Second addend."}
+        }
+    }
+    
+    Output format (OpenAI/MCP):
+    {
+        "type": "function",
+        "function": {
+            "name": "add",
+            "description": "Calculates the sum of two numbers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number", "description": "First addend."},
+                    "b": {"type": "number", "description": "Second addend."}
+                },
+                "required": ["a", "b"]
+            }
+        }
+    }
+    """
+    openai_tools = []
+    
+    for tool_def in tool_definitions:
+        name = tool_def.get("name", "")
+        description = tool_def.get("description", "")
+        params = tool_def.get("parameters", {})
+        
+        # Build OpenAI-style parameters schema
+        properties = {}
+        required = []
+        
+        for param_name, param_info in params.items():
+            param_type = param_info.get("type", "string")
+            param_desc = param_info.get("description", "")
+            
+            properties[param_name] = {
+                "type": param_type,
+                "description": param_desc
+            }
+            
+            # Assume all parameters are required unless marked optional
+            if not param_info.get("optional", False):
+                required.append(param_name)
+        
+        openai_tool = {
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required
+                }
+            }
+        }
+        
+        openai_tools.append(openai_tool)
+    
+    return openai_tools
+
+
+# Pre-computed OpenAI format tools for efficiency
+TOOLS_OPENAI_FORMAT: List[Dict[str, Any]] = convert_tools_to_openai_format(TOOL_DEFINITIONS)
+
 
 # Example usage (optional, for testing)
 if __name__ == "__main__":

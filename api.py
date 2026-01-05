@@ -271,7 +271,7 @@ class GenerateRequest(BaseModel):
     enabled_tool_names: Optional[List[str]] = None
     resolve_local_runtime_model: bool = False
 
-from tools import TOOL_REGISTRY, TOOL_DEFINITIONS
+from tools import TOOL_REGISTRY, TOOL_DEFINITIONS, convert_tools_to_openai_format, TOOLS_OPENAI_FORMAT
 # --- Tool Registry and Descriptions ---
 
 TOOLS_AVAILABLE: List[ToolDefinition] = [
@@ -279,57 +279,41 @@ TOOLS_AVAILABLE: List[ToolDefinition] = [
 ]
 
 
-def resolve_tools_subset(tool_names: Optional[List[str]]) -> Tuple[List[ToolDefinition], Dict[str, Callable[..., Any]]]:
+def resolve_tools_subset(tool_names: Optional[List[str]]) -> Tuple[List[ToolDefinition], Dict[str, Callable[..., Any]], List[Dict[str, Any]]]:
+    """
+    Resolves a subset of tools based on provided names.
+    
+    Returns:
+        - subset: List of ToolDefinition objects
+        - registry: Dict mapping tool names to handler functions
+        - openai_tools: List of tools in OpenAI/MCP format for API requests
+    """
     if tool_names is None:
         subset = TOOLS_AVAILABLE
+        openai_tools = TOOLS_OPENAI_FORMAT
     else:
         names_lower = {name.lower() for name in tool_names}
         subset = [tool for tool in TOOLS_AVAILABLE if tool.name.lower() in names_lower]
+        # Convert subset to OpenAI format
+        subset_defs = [{"name": t.name, "description": t.description, "parameters": t.parameters} for t in subset]
+        openai_tools = convert_tools_to_openai_format(subset_defs)
 
     registry = {tool.name: TOOL_REGISTRY[tool.name] for tool in subset if tool.name in TOOL_REGISTRY}
-    return subset, registry
+    return subset, registry, openai_tools
 
 def format_tools_for_prompt(tools: List[ToolDefinition]) -> str:
-    """ Formats tool definitions into a MCP-compatible string for the system prompt. """
-    if not tools:
-        return ""
-
-    lines = [
-        "Model Context Protocol Tool Instructions:",
-        #"- To invoke a tool, respond with a message that contains only a single <tool_call> block.",
-        #"- To invoke a tool, respond with a <tool_call> block.",
-        "- To invoke a tool you *must* respond with a <tool_call> block, following the exact tool calling format below.",
-        "- The block must wrap a JSON object with the arguments you intend to send.",
-        #"- Do not include natural language before or after the block.",
-        "Tool calling format:",
-        "<tool_call name=\"tool_name\">",
-        "{",
-        "  \"arguments\": { ... }",
-        "}",
-        "</tool_call>",
-    "",
-    "Available tools:"
-    ]
-
-    for tool in tools:
-        lines.append(f"- {tool.name}: {tool.description}")
-        if tool.parameters:
-            lines.append("  Arguments:")
-            for param_name, param_info in tool.parameters.items():
-                arg_type = param_info.get("type", "any")
-                arg_desc = param_info.get("description", "")
-                lines.append(f"    - {param_name} ({arg_type}): {arg_desc}")
-        example_args = {param: f"<{param}>" for param in tool.parameters.keys()}
-        example_payload = json.dumps({"arguments": example_args}, indent=4)
-        lines.append(f"  Example call:")
-        lines.append(f"    <tool_call name=\"{tool.name}\">")
-        for example_line in example_payload.splitlines():
-            lines.append(f"      {example_line}")
-        lines.append("    </tool_call>")
-        lines.append("")
-
-    lines.append("Always provide valid JSON inside the tool_call block and include every required argument.")
-    return "\n".join(lines).strip()
+    """
+    Formats tool definitions for the system prompt.
+    
+    NOTE: With native OpenAI/MCP tool calling, no special prompt instructions are needed.
+    The API handles tool calling natively when the "tools" parameter is passed.
+    This function now returns an empty string - tools are passed via the API's tools parameter instead.
+    
+    Legacy XML-based tool calling has been replaced with native function calling.
+    """
+    # Native tool calling doesn't require prompt-based instructions
+    # Tools are passed via the API's "tools" parameter instead
+    return ""
 
 
 # Database Helper Functions
@@ -708,10 +692,12 @@ def format_messages_for_provider(messages: List[Dict[str, Any]], provider: str) 
     last_role = None
     for i, msg in enumerate(formatted):
         current_role = msg.get("role")
-        is_tool_assistant_sequence = (last_role == 'assistant' and current_role == 'tool') or \
-                                     (last_role == 'tool' and current_role == 'assistant')
+        # Tool messages can follow assistant or other tool messages in multi-tool call scenarios
+        is_tool_related_sequence = (last_role == 'assistant' and current_role == 'tool') or \
+                                   (last_role == 'tool' and current_role == 'assistant') or \
+                                   (last_role == 'tool' and current_role == 'tool')  # Multiple tool results
 
-        if i > 0 and current_role == last_role and not is_tool_assistant_sequence:
+        if i > 0 and current_role == last_role and not is_tool_related_sequence:
              if provider_lower == 'google' and current_role in ['user', 'model']:
                  # Google strictly requires user/model alternation.
                  # If this happens, it's an issue with the input message history construction.
@@ -805,8 +791,9 @@ async def _perform_generation_stream(
                 system_prompt_text = ""
 
         tool_system_prompt_text = ""
+        openai_format_tools: List[Dict[str, Any]] = []  # Tools in OpenAI/MCP format for API
         if tools_enabled:
-            active_tool_defs, active_tool_registry = resolve_tools_subset(enabled_tool_names)
+            active_tool_defs, active_tool_registry, openai_format_tools = resolve_tools_subset(enabled_tool_names)
             if enabled_tool_names and not active_tool_defs:
                 print(f"[Gen Tools] Warning: No registered tools match requested names: {enabled_tool_names}")
             if not active_tool_registry:
@@ -904,6 +891,11 @@ async def _perform_generation_stream(
             else: # OpenAI / OpenRouter / Local
                 request_url = f"{api_details['base_url'].rstrip('/')}/chat/completions"
                 llm_body = {"model": model_identifier, "messages": llm_messages_for_api, "stream": True, **gen_args}
+                # Include native tools in API request if enabled
+                if tools_enabled and openai_format_tools:
+                    llm_body["tools"] = openai_format_tools
+                    # Optional: set tool_choice to "auto" (default behavior)
+                    # llm_body["tool_choice"] = "auto"
                 headers = {'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
                 if api_details['api_key']: headers['Authorization'] = f"Bearer {api_details['api_key']}"
             
@@ -1039,25 +1031,35 @@ async def _perform_generation_stream(
                                     reasoning_chunk = delta.get("reasoning") if isinstance(delta, dict) else None # OpenRouter specific
                                     potential_tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else None # OpenAI native
                                     if potential_tool_calls and isinstance(potential_tool_calls, list):
-                                        for idx_tc, tool_delta in enumerate(potential_tool_calls):
+                                        for tool_delta in potential_tool_calls:
                                             if not isinstance(tool_delta, dict):
                                                 continue
-                                            call_id = tool_delta.get("id") or f"tool_native_{len(native_tool_call_order) + idx_tc}"
+                                            # OpenAI uses 'index' to identify tool calls in streaming
+                                            # The 'id' only appears in the first chunk for each tool call
+                                            tool_index = tool_delta.get("index", 0)
+                                            tool_id = tool_delta.get("id")  # Only present in first chunk
                                             function_info = tool_delta.get("function") or {}
                                             if tool_delta.get("type") and tool_delta.get("type") != "function":
                                                 continue
-                                            accumulator = native_tool_call_accumulators.setdefault(call_id, {
+                                            
+                                            # Use index as key for accumulation
+                                            index_key = f"tool_idx_{tool_index}"
+                                            accumulator = native_tool_call_accumulators.setdefault(index_key, {
+                                                "id": None,
                                                 "name": None,
                                                 "arguments_chunks": []
                                             })
+                                            # Store the id when we first receive it
+                                            if tool_id:
+                                                accumulator["id"] = tool_id
                                             call_name = function_info.get("name")
                                             if call_name:
                                                 accumulator["name"] = call_name
                                             arguments_fragment = function_info.get("arguments")
                                             if arguments_fragment:
                                                 accumulator["arguments_chunks"].append(arguments_fragment)
-                                            if call_id not in native_tool_call_order:
-                                                native_tool_call_order.append(call_id)
+                                            if index_key not in native_tool_call_order:
+                                                native_tool_call_order.append(index_key)
                                     elif potential_tool_calls is not None and not isinstance(potential_tool_calls, list):
                                         print(f"[Gen Tool] Warning: Unexpected tool_calls payload type: {type(potential_tool_calls)}")
 
@@ -1084,8 +1086,10 @@ async def _perform_generation_stream(
                                         full_response_content_for_frontend += processed_yield_openai
                                         current_turn_content_accumulated += processed_save_openai
                                     
-                                    # --- Manual Tool Call Detection (for non-Google, if tools_enabled and no native calls) ---
-                                    if not potential_tool_calls and tools_enabled and '</tool_call>' in current_turn_content_accumulated:
+                                    # --- Legacy Manual Tool Call Detection (fallback for XML-based tool calls) ---
+                                    # This is only used when no native tool_calls are being streamed.
+                                    # Native tool calling via the API's "tools" parameter is the preferred method.
+                                    if not potential_tool_calls and not native_tool_call_order and tools_enabled and '</tool_call>' in current_turn_content_accumulated:
                                         matches = list(TOOL_CALL_REGEX.finditer(current_turn_content_accumulated))
                                         if matches:
                                             pre_tool_text = current_turn_content_accumulated[:matches[0].start()]
@@ -1148,40 +1152,47 @@ async def _perform_generation_stream(
                                             }
                                             break # Break from aiter_lines to process these tool calls
                                     
-                                    # --- TODO: Handle Native OpenAI Tool Calls (potential_tool_calls) ---
-                                    # if potential_tool_calls:
-                                    #   ... populate detected_tool_call_info ...
-                                    #   ... possibly yield tool_call events to frontend ...
-                                    #   ... break to process tool call ...
+                                    # --- Native OpenAI/MCP Tool Calls Handling ---
+                                    # When finish_reason is "tool_calls", process accumulated native tool calls
 
                                     if finish_reason == "tool_calls" and detected_tool_call_info is None and native_tool_call_order:
+                                        print(f"[Gen Tool] Processing {len(native_tool_call_order)} native tool calls: {native_tool_call_order}")
                                         native_calls_info = []
                                         raw_tag_fragments: List[str] = []
-                                        for queued_call_id in native_tool_call_order:
-                                            accumulator = native_tool_call_accumulators.get(queued_call_id)
+                                        for index_key in native_tool_call_order:
+                                            accumulator = native_tool_call_accumulators.get(index_key)
                                             if not accumulator:
+                                                print(f"[Gen Tool] Warning: No accumulator for {index_key}")
                                                 continue
+                                            # Get the actual call ID (stored from first chunk) or generate one
+                                            call_id = accumulator.get("id") or f"tool_{uuid.uuid4().hex[:8]}"
                                             name = accumulator.get("name") or "unknown_tool"
+                                            if name == "unknown_tool":
+                                                print(f"[Gen Tool] Warning: Tool call missing name for {index_key}, accumulator: {accumulator}")
+                                                continue  # Skip tool calls without names
                                             arguments_text = "".join(accumulator.get("arguments_chunks", []))
+                                            print(f"[Gen Tool] Native tool call: name={name}, id={call_id}, args_len={len(arguments_text)}")
                                             parsed_args: Dict[str, Any] = {}
                                             payload_for_raw = arguments_text
                                             parse_error: Optional[Exception] = None
                                             if arguments_text:
                                                 try:
+                                                    # Native OpenAI tool calls: arguments is already the direct args object
                                                     parsed_payload_obj = json.loads(arguments_text)
                                                     if isinstance(parsed_payload_obj, dict):
-                                                        candidate_args = parsed_payload_obj.get("arguments", parsed_payload_obj)
-                                                        parsed_args = candidate_args if isinstance(candidate_args, dict) else {"value": candidate_args}
+                                                        # For native calls, arguments ARE the payload directly (not wrapped)
+                                                        parsed_args = parsed_payload_obj
                                                     else:
                                                         parsed_args = {"value": parsed_payload_obj}
                                                 except Exception as parse_err_native:
                                                     parse_error = parse_err_native
                                                     parsed_args = {}
-                                            raw_tag_native = f'<tool_call name="{name}" id="{queued_call_id}">{payload_for_raw}</tool_call>'
+                                            # Generate a display tag for frontend (for compatibility with existing UI)
+                                            raw_tag_native = f'<tool_call name="{name}" id="{call_id}">{json.dumps(parsed_args)}</tool_call>'
                                             raw_tag_fragments.append(raw_tag_native)
                                             native_calls_info.append({
                                                 "name": name,
-                                                "id": queued_call_id,
+                                                "id": call_id,
                                                 "arguments": parsed_args,
                                                 "raw_payload": payload_for_raw,
                                                 "raw_tag": raw_tag_native,
@@ -2113,9 +2124,15 @@ async def set_active_branch(chat_id: str, parent_message_id: str, request: SetAc
 
 @app.get("/tools/system_prompt")
 async def get_tools_system_prompt(names: Optional[List[str]] = Query(default=None)):
-    """ Returns the formatted system prompt describing available tools. """
-    subset, _ = resolve_tools_subset(names)
-    prompt = format_tools_for_prompt(subset)
+    """
+    Returns the formatted system prompt describing available tools.
+    
+    NOTE: With native OpenAI/MCP tool calling, no system prompt instructions are needed.
+    Tools are passed via the API's "tools" parameter. This endpoint now returns an empty
+    prompt string but is kept for backward compatibility.
+    """
+    subset, _, _ = resolve_tools_subset(names)
+    prompt = format_tools_for_prompt(subset)  # Returns empty string for native tool calling
     return {"prompt": prompt}
 
 
@@ -2123,6 +2140,18 @@ async def get_tools_system_prompt(names: Optional[List[str]] = Query(default=Non
 async def list_tools():
     """Returns metadata for all registered tools."""
     return {"tools": [tool.dict() for tool in TOOLS_AVAILABLE]}
+
+
+@app.get("/tools/openai_format")
+async def list_tools_openai_format(names: Optional[List[str]] = Query(default=None)):
+    """
+    Returns tools in OpenAI/MCP-compatible format for API requests.
+    
+    This is the format used for native function calling with OpenRouter, OpenAI, and llama.cpp.
+    """
+    _, _, openai_tools = resolve_tools_subset(names)
+    return {"tools": openai_tools}
+
 
 @app.post("/tools/execute")
 async def execute_tool(request: ExecuteToolRequest):

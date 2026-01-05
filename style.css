@@ -382,6 +382,11 @@ body.welcome-active .input-area .input-container {
     padding: 2px 0;
 }
 
+/* Hide tool messages that are grouped with their parent assistant message */
+.message-row.tool-grouped {
+    display: none !important;
+}
+
 .message-row.assistant-row.has-tool-followup {
     padding-bottom: 0;
 }
@@ -1833,7 +1838,181 @@ body.welcome-active .input-area .input-container {
     border: 1px solid #f6ad55;
 }
 
-/* --- Tool Call/Result Styling --- */
+/* --- Unified Tool Group Styling --- */
+.tool-group {
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--border-color);
+    background: var(--bg-tertiary);
+    margin: 12px 0;
+    overflow: hidden;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.tool-group:hover {
+    border-color: color-mix(in srgb, var(--accent-color) 50%, var(--border-color));
+}
+
+.tool-group.success {
+    border-color: color-mix(in srgb, var(--accent-color) 40%, var(--border-color));
+}
+
+.tool-group.error {
+    border-color: color-mix(in srgb, var(--error-color) 40%, var(--border-color));
+}
+
+/* Tool Group Header */
+.tool-group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: color-mix(in srgb, var(--accent-color) 8%, var(--bg-tertiary));
+    cursor: pointer;
+    transition: background 0.2s ease;
+    user-select: none;
+}
+
+.tool-group.success .tool-group-header {
+    background: color-mix(in srgb, var(--accent-color) 12%, var(--bg-tertiary));
+}
+
+.tool-group.error .tool-group-header {
+    background: color-mix(in srgb, var(--error-color) 10%, var(--bg-tertiary));
+}
+
+.tool-group-header:hover {
+    background: color-mix(in srgb, var(--accent-color) 15%, var(--bg-tertiary));
+}
+
+.tool-group-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+}
+
+.tool-group-icon {
+    font-size: 15px;
+    color: var(--accent-color);
+    flex-shrink: 0;
+}
+
+.tool-group-name {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.tool-group-status {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 10px;
+    flex-shrink: 0;
+}
+
+.tool-group-status.success {
+    background: color-mix(in srgb, var(--accent-color) 20%, transparent);
+    color: var(--accent-color);
+}
+
+.tool-group-status.error {
+    background: color-mix(in srgb, var(--error-color) 20%, transparent);
+    color: var(--error-color);
+}
+
+.tool-group-status.pending {
+    background: color-mix(in srgb, var(--text-secondary) 15%, transparent);
+    color: var(--text-secondary);
+}
+
+.tool-group-status i {
+    font-size: 11px;
+}
+
+.tool-group-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+/* Tool Group Content (collapsible) */
+.tool-group-content {
+    border-top: 1px solid var(--border-color);
+}
+
+.tool-group.collapsed .tool-group-content {
+    display: none;
+}
+
+/* Tool Section (Input/Output) */
+.tool-group-section {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.tool-group-section:last-child {
+    border-bottom: none;
+}
+
+.tool-section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 14px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--bg-primary) 50%, transparent);
+}
+
+.tool-section-header i {
+    font-size: 12px;
+}
+
+.tool-call-section .tool-section-header {
+    color: var(--accent-color);
+}
+
+.tool-result-section.success .tool-section-header {
+    color: var(--accent-color);
+}
+
+.tool-result-section.error .tool-section-header {
+    color: var(--error-color);
+}
+
+.tool-section-content {
+    padding: 12px 14px;
+    font-size: 13px;
+    color: var(--text-primary);
+    overflow-x: auto;
+    background: var(--bg-secondary);
+}
+
+.tool-section-content pre {
+    margin: 0;
+    background: transparent;
+    border: none;
+    padding: 0;
+}
+
+.tool-section-content code {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+}
+
+/* Legacy Tool Call/Result Styling (kept for backward compatibility) */
 .tool-call-block, .tool-result-block {
     border-radius: var(--border-radius-sm);
     border: 1px solid; /* Border color set below */
@@ -1968,7 +2147,6 @@ body.welcome-active .input-area .input-container {
 .settings-hint { display:block; margin-top:8px; font-size:12px; color: var(--text-secondary); opacity:0.85; }
 .inline-theme-options { flex-wrap:wrap; }
 .inline-theme-options .theme-option { flex:1 1 100px; }
-.tools-prompt-preview { background: var(--bg-tertiary); padding:12px; border:1px solid var(--border-color); border-radius: var(--border-radius-md); font-size:12px; max-height:240px; overflow:auto; white-space:pre-wrap; }
 .tools-checkbox-list { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
 .tool-item { display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border:1px solid var(--border-color); border-radius:var(--border-radius-md); background:var(--bg-secondary); cursor:pointer; transition:background 0.2s ease; }
 .tool-item:hover { background:var(--bg-tertiary); }
