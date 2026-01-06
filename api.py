@@ -83,6 +83,7 @@ def init_db():
         active_child_index INTEGER DEFAULT 0,
         tool_call_id TEXT, -- Optional: Store ID if this is a tool result message OR the ID of the call made by an assistant msg
         tool_calls TEXT, -- Optional: Store LLM's requested tool calls (JSON) for assistant messages
+        thinking_content TEXT, -- Optional: Store CoT/reasoning content separately from main message
         FOREIGN KEY (chat_id) REFERENCES chats (chat_id) ON DELETE CASCADE,
         FOREIGN KEY (parent_message_id) REFERENCES messages (message_id) ON DELETE CASCADE
     )
@@ -91,6 +92,8 @@ def init_db():
     try: cursor.execute("ALTER TABLE messages ADD COLUMN tool_call_id TEXT")
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE messages ADD COLUMN tool_calls TEXT") # Ensure this is added
+    except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE messages ADD COLUMN thinking_content TEXT")
     except sqlite3.OperationalError: pass
 
     cursor.execute('''
@@ -181,6 +184,7 @@ class Message(BaseModel):
     child_message_ids: List[str] = []
     tool_call_id: Optional[str] = None
     tool_calls: Optional[Any] = None
+    thinking_content: Optional[str] = None
 
 
 class AddMessageRequest(BaseModel):
@@ -270,6 +274,8 @@ class GenerateRequest(BaseModel):
     cot_end_tag: Optional[str] = None
     enabled_tool_names: Optional[List[str]] = None
     resolve_local_runtime_model: bool = False
+    preserve_thinking: bool = False  # If True, include thinking content in LLM context
+    max_tool_calls: int = 10  # Maximum number of tool calls per generation (-1 for unlimited)
 
 from tools import TOOL_REGISTRY, TOOL_DEFINITIONS, convert_tools_to_openai_format, TOOLS_OPENAI_FORMAT
 # --- Tool Registry and Descriptions ---
@@ -301,20 +307,6 @@ def resolve_tools_subset(tool_names: Optional[List[str]]) -> Tuple[List[ToolDefi
     registry = {tool.name: TOOL_REGISTRY[tool.name] for tool in subset if tool.name in TOOL_REGISTRY}
     return subset, registry, openai_tools
 
-def format_tools_for_prompt(tools: List[ToolDefinition]) -> str:
-    """
-    Formats tool definitions for the system prompt.
-    
-    NOTE: With native OpenAI/MCP tool calling, no special prompt instructions are needed.
-    The API handles tool calling natively when the "tools" parameter is passed.
-    This function now returns an empty string - tools are passed via the API's tools parameter instead.
-    
-    Legacy XML-based tool calling has been replaced with native function calling.
-    """
-    # Native tool calling doesn't require prompt-based instructions
-    # Tools are passed via the API's "tools" parameter instead
-    return ""
-
 
 # Database Helper Functions
 
@@ -325,12 +317,14 @@ def build_context_from_db(
     stop_at_message_id: str, # This is the ID of the *last message to include*
     system_prompt: Optional[str] = None,
     cot_start_tag: Optional[str] = None,
-    cot_end_tag: Optional[str] = None
+    cot_end_tag: Optional[str] = None,
+    preserve_thinking: bool = False
 ) -> List[Dict[str, Any]]:
     """
     Fetches message history from DB up to and including the stop_at_message_id,
-    formats it for LLM context, including attachments, tool calls/results,
-    and excluding <think> blocks from final output.
+    formats it for LLM context, including attachments, tool calls/results.
+    If preserve_thinking is True, includes thinking_content in assistant messages.
+    Otherwise, thinking content is excluded from the context.
     """
     context = []
     messages_map = {} # message_id -> {data, attachments, children_ids, active_child_index}
@@ -378,23 +372,6 @@ def build_context_from_db(
 
     processed_ids = set()
 
-    sanitized_start = (cot_start_tag or "").strip() or None
-    sanitized_end = (cot_end_tag or "").strip() or None
-    cot_tag_pairs: List[Tuple[str, str]] = []
-    seen_pairs: Set[Tuple[str, str]] = set()
-    for candidate in ((sanitized_start, sanitized_end), ("<think>", "</think>")):
-        start_tag, end_tag = candidate
-        if start_tag and end_tag:
-            key = (start_tag, end_tag)
-            if key not in seen_pairs:
-                seen_pairs.add(key)
-                cot_tag_pairs.append(key)
-
-    cot_strip_patterns: List[Tuple[str, str, re.Pattern[str]]] = [
-        (start_tag, end_tag, re.compile(rf"{re.escape(start_tag)}.*?{re.escape(end_tag)}\\s*", re.DOTALL))
-        for start_tag, end_tag in cot_tag_pairs
-    ]
-
     def traverse_active(message_id: str) -> bool:
         """Recursively traverses the active branch, adding messages to context."""
         if not message_id or message_id not in messages_map or message_id in processed_ids:
@@ -405,25 +382,17 @@ def build_context_from_db(
         msg_attachments = node["attachments"]
         msg_tool_calls = node["tool_calls_deserialized"] # Use deserialized
         msg_tool_call_id = node["tool_call_id"] # Get the ID
+        msg_thinking_content = msg.get("thinking_content") # Get thinking content if exists
         processed_ids.add(message_id)
 
         role_for_context = msg["role"] # user, llm, tool
         content_for_context = msg["message"] or ''
 
-        # Strip CoT blocks from LLM messages before adding to context
+        # For LLM messages: optionally prepend thinking content if preserve_thinking is True
         is_llm = role_for_context == 'llm'
-        if is_llm and cot_strip_patterns:
-            cleaned_content = content_for_context or ''
-            content_changed = False
-            for start_tag, end_tag, pattern in cot_strip_patterns:
-                if start_tag in cleaned_content and end_tag in cleaned_content:
-                    updated = pattern.sub("", cleaned_content)
-                    if updated != cleaned_content:
-                        content_changed = True
-                        cleaned_content = updated
-            if content_changed:
-                cleaned_content = cleaned_content.strip()
-            content_for_context = cleaned_content
+        if is_llm and preserve_thinking and msg_thinking_content:
+            # Prepend thinking content wrapped in tags for the LLM to see
+            content_for_context = f"<think>{msg_thinking_content}</think>\n{content_for_context}"
 
         # Map internal roles to standard API roles ('llm' -> 'assistant')
         context_role = "assistant" if role_for_context == "llm" else role_for_context
@@ -734,12 +703,15 @@ async def _perform_generation_stream(
     abort_event: asyncio.Event,
     cot_start_tag: Optional[str] = None,
     cot_end_tag: Optional[str] = None,
-    enabled_tool_names: Optional[List[str]] = None
+    enabled_tool_names: Optional[List[str]] = None,
+    preserve_thinking: bool = False,
+    max_tool_calls: int = 10
 ) -> AsyncGenerator[str, None]:
     """
     Performs LLM generation, handles streaming, tool calls, saving distinct messages, and abortion.
     Yields Server-Sent Events (SSE) formatted strings targeting a *single* frontend message bubble.
     Saves partial content if aborted by the user.
+    Now emits thinking content as separate JSON events instead of inline tags.
     """
     conn_check = None
     full_response_content_for_frontend = "" # For display logging, not directly used by frontend from here
@@ -749,14 +721,12 @@ async def _perform_generation_stream(
     last_saved_message_id = parent_message_id
     provider = None
     backend_is_streaming_reasoning = False # Specific to OpenRouter/OpenAI CoT tags (customizable)
-    current_turn_content_accumulated = "" # Accumulates all text from current LLM turn (segment)
-    # Custom CoT tag handling
+    reasoning_from_api = False  # True if reasoning came from delta.reasoning (API), False if from inline <think> tags
+    current_turn_content_accumulated = "" # Accumulates all text from current LLM turn (segment) - main content only
+    current_turn_thinking_accumulated = "" # Accumulates thinking/reasoning content separately
+    # Custom CoT tag handling (still used for stripping from context if not preserving)
     effective_cot_start = (cot_start_tag or "").strip() or None
     effective_cot_end = (cot_end_tag or "").strip() or None
-    think_open_tag = effective_cot_start or "<think>"
-    base_close_tag = effective_cot_end or "</think>"
-    newline_suffix = "" if base_close_tag.endswith("\n") else "\n"
-    think_close_tag = base_close_tag + newline_suffix
 
     active_tool_defs: List[ToolDefinition] = []
     active_tool_registry: Dict[str, Callable[..., Any]] = {}
@@ -799,10 +769,8 @@ async def _perform_generation_stream(
             if not active_tool_registry:
                 print("[Gen Tools] No active tools after filtering; disabling tool usage for this generation.")
                 tools_enabled = False
-            else:
-                tool_system_prompt_text = format_tools_for_prompt(active_tool_defs)
 
-        effective_system_prompt = (system_prompt_text + ("\n\n" + tool_system_prompt_text if tool_system_prompt_text else "")).strip()
+        effective_system_prompt = system_prompt_text.strip()
         
         model_config = get_model_config(model_name)
         if not model_config and char_info:
@@ -856,15 +824,16 @@ async def _perform_generation_stream(
             last_saved_message_id,
             _system_prompt_for_context_build,
             cot_start_tag=effective_cot_start,
-            cot_end_tag=effective_cot_end
+            cot_end_tag=effective_cot_end,
+            preserve_thinking=preserve_thinking
         )
 
         conn_check.close(); conn_check = None; cursor_check = None
 
         tool_call_count = 0 # For manual tool loop (currently only for non-Google)
-        max_tool_calls = 10
+        # max_tool_calls passed from request, -1 means unlimited
 
-        while tool_call_count < max_tool_calls:
+        while max_tool_calls < 0 or tool_call_count < max_tool_calls:
             if abort_event.is_set():
                 stream_error = asyncio.CancelledError("Aborted before LLM call")
                 break
@@ -1016,9 +985,8 @@ async def _perform_generation_stream(
                                 if data_str == "[DONE]":
                                     is_done_signal_from_llm = True
                                     if backend_is_streaming_reasoning:
-                                        yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
-                                        full_response_content_for_frontend += think_close_tag
-                                        current_turn_content_accumulated += think_close_tag
+                                        # Emit thinking_end event instead of inline tag
+                                        yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
                                         backend_is_streaming_reasoning = False
                                     break # Exit aiter_lines loop
 
@@ -1026,9 +994,17 @@ async def _perform_generation_stream(
                                     data = json.loads(data_str)
                                     choice = data.get("choices", [{}])[0]
                                     delta = choice.get("delta", {}) if isinstance(choice, dict) else {}
+                                    # Some providers use 'message' instead of 'delta' in streaming
+                                    message = choice.get("message", {}) if isinstance(choice, dict) else {}
                                     finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
                                     content_chunk = delta.get("content") if isinstance(delta, dict) else None
-                                    reasoning_chunk = delta.get("reasoning") if isinstance(delta, dict) else None # OpenRouter specific
+                                    # Support both 'reasoning' (OpenRouter) and 'reasoning_content' (DeepSeek/others) fields
+                                    # Check both delta and message level for reasoning content
+                                    reasoning_chunk = None
+                                    if isinstance(delta, dict):
+                                        reasoning_chunk = delta.get("reasoning") or delta.get("reasoning_content")
+                                    if not reasoning_chunk and isinstance(message, dict):
+                                        reasoning_chunk = message.get("reasoning") or message.get("reasoning_content")
                                     potential_tool_calls = delta.get("tool_calls") if isinstance(delta, dict) else None # OpenAI native
                                     if potential_tool_calls and isinstance(potential_tool_calls, list):
                                         for tool_delta in potential_tool_calls:
@@ -1063,28 +1039,83 @@ async def _perform_generation_stream(
                                     elif potential_tool_calls is not None and not isinstance(potential_tool_calls, list):
                                         print(f"[Gen Tool] Warning: Unexpected tool_calls payload type: {type(potential_tool_calls)}")
 
-                                    processed_yield_openai = ""; processed_save_openai = ""
+                                    # Handle reasoning/thinking chunks as separate JSON events
+                                    # For OpenRouter/OpenAI, reasoning comes in delta.reasoning or delta.reasoning_content
                                     if reasoning_chunk:
                                         if not backend_is_streaming_reasoning:
-                                            processed_yield_openai = think_open_tag + reasoning_chunk; processed_save_openai = think_open_tag + reasoning_chunk
+                                            # Emit thinking_start event
+                                            print(f"[Gen Reasoning] Starting reasoning stream, first chunk len: {len(reasoning_chunk)}")
+                                            yield f"data: {json.dumps({'type': 'thinking_start'})}\n\n"
                                             backend_is_streaming_reasoning = True
-                                        else:
-                                            processed_yield_openai = reasoning_chunk; processed_save_openai = reasoning_chunk
-                                        yield f"data: {json.dumps({'type': 'chunk', 'data': processed_yield_openai})}\n\n"
-                                        full_response_content_for_frontend += processed_yield_openai
-                                        current_turn_content_accumulated += processed_save_openai
+                                            reasoning_from_api = True  # Mark that reasoning is from API
+                                        # Emit thinking_chunk event with the reasoning content
+                                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'data': reasoning_chunk})}\n\n"
+                                        current_turn_thinking_accumulated += reasoning_chunk
 
                                     if content_chunk:
+                                        # If we were receiving API reasoning and now we're getting content,
+                                        # emit thinking_end first (API reasoning is done)
+                                        if backend_is_streaming_reasoning and reasoning_from_api:
+                                            yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
+                                            backend_is_streaming_reasoning = False
+                                            reasoning_from_api = False
+                                        
                                         content_chunk_stripped = content_chunk.lstrip() if isinstance(content_chunk, str) else ""
                                         chunk_is_tool_markup = content_chunk_stripped.startswith("<tool_call") or content_chunk_stripped.startswith("<tool_result")
-                                        if backend_is_streaming_reasoning and not chunk_is_tool_markup:
-                                            processed_yield_openai = think_close_tag + content_chunk; processed_save_openai = think_close_tag + content_chunk
-                                            backend_is_streaming_reasoning = False
-                                        else:
-                                            processed_yield_openai = content_chunk; processed_save_openai = content_chunk
-                                        yield f"data: {json.dumps({'type': 'chunk', 'data': processed_yield_openai})}\n\n"
-                                        full_response_content_for_frontend += processed_yield_openai
-                                        current_turn_content_accumulated += processed_save_openai
+                                        
+                                        # For local models: detect inline <think> tags in content
+                                        # and emit them as thinking events instead of regular content
+                                        effective_think_start = effective_cot_start or "<think>"
+                                        effective_think_end = effective_cot_end or "</think>"
+                                        
+                                        # Process content that may contain multiple thinking blocks
+                                        remaining_to_process = content_chunk
+                                        while remaining_to_process:
+                                            if not backend_is_streaming_reasoning:
+                                                # Not in thinking mode - check for start tag
+                                                if effective_think_start in remaining_to_process:
+                                                    before_think, _, after_think = remaining_to_process.partition(effective_think_start)
+                                                    if before_think:
+                                                        yield f"data: {json.dumps({'type': 'chunk', 'data': before_think})}\n\n"
+                                                        full_response_content_for_frontend += before_think
+                                                        current_turn_content_accumulated += before_think
+                                                    yield f"data: {json.dumps({'type': 'thinking_start'})}\n\n"
+                                                    backend_is_streaming_reasoning = True
+                                                    remaining_to_process = after_think
+                                                else:
+                                                    # No thinking tag, emit as regular content
+                                                    if not chunk_is_tool_markup or not remaining_to_process.strip().startswith("<tool"):
+                                                        yield f"data: {json.dumps({'type': 'chunk', 'data': remaining_to_process})}\n\n"
+                                                        full_response_content_for_frontend += remaining_to_process
+                                                        current_turn_content_accumulated += remaining_to_process
+                                                    else:
+                                                        yield f"data: {json.dumps({'type': 'chunk', 'data': remaining_to_process})}\n\n"
+                                                        full_response_content_for_frontend += remaining_to_process
+                                                        current_turn_content_accumulated += remaining_to_process
+                                                    break
+                                            else:
+                                                # In thinking mode - check for end tag
+                                                if effective_think_end in remaining_to_process:
+                                                    think_content, _, after_think = remaining_to_process.partition(effective_think_end)
+                                                    if think_content:
+                                                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'data': think_content})}\n\n"
+                                                        current_turn_thinking_accumulated += think_content
+                                                    yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
+                                                    backend_is_streaming_reasoning = False
+                                                    remaining_to_process = after_think
+                                                elif chunk_is_tool_markup and remaining_to_process.strip().startswith("<tool"):
+                                                    # Tool markup ends thinking
+                                                    yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
+                                                    backend_is_streaming_reasoning = False
+                                                    yield f"data: {json.dumps({'type': 'chunk', 'data': remaining_to_process})}\n\n"
+                                                    full_response_content_for_frontend += remaining_to_process
+                                                    current_turn_content_accumulated += remaining_to_process
+                                                    break
+                                                else:
+                                                    # Still thinking, no end tag
+                                                    yield f"data: {json.dumps({'type': 'thinking_chunk', 'data': remaining_to_process})}\n\n"
+                                                    current_turn_thinking_accumulated += remaining_to_process
+                                                    break
                                     
                                     # --- Legacy Manual Tool Call Detection (fallback for XML-based tool calls) ---
                                     # This is only used when no native tool_calls are being streamed.
@@ -1201,18 +1232,17 @@ async def _perform_generation_stream(
                                             })
 
                                         if native_calls_info:
-                                            combined_raw_tags = "".join(raw_tag_fragments)
+                                            # Emit each tool call as a JSON event (not XML)
                                             if not native_tool_call_chunk_emitted:
-                                                try:
-                                                    yield f"data: {json.dumps({'type': 'chunk', 'data': combined_raw_tags})}\n\n"
-                                                    full_response_content_for_frontend += combined_raw_tags
-                                                except Exception as emit_err:
-                                                    print(f"[Gen Tool] Warning: Failed to stream native tool_call chunk: {emit_err}")
+                                                for call_info in native_calls_info:
+                                                    try:
+                                                        yield f"data: {json.dumps({'type': 'tool_call', 'name': call_info['name'], 'id': call_info['id'], 'arguments': call_info['arguments']})}\n\n"
+                                                    except Exception as emit_err:
+                                                        print(f"[Gen Tool] Warning: Failed to stream native tool_call event: {emit_err}")
                                                 native_tool_call_chunk_emitted = True
                                             detected_tool_call_info = {
                                                 "name": native_calls_info[0]["name"],
                                                 "arguments": native_calls_info[0]["arguments"],
-                                                "raw_tag": combined_raw_tags,
                                                 "id": native_calls_info[0]["id"],
                                                 "type": "native",
                                                 "payload_raw": native_calls_info[0]["raw_payload"],
@@ -1229,10 +1259,8 @@ async def _perform_generation_stream(
 
                             # After OpenAI/OpenRouter/Local aiter_lines loop
                             if stream_error: pass # Handled below
-                            elif backend_is_streaming_reasoning and not is_done_signal_from_llm : # Stream ended naturally (not [DONE]) but think tag open
-                                yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
-                                full_response_content_for_frontend += think_close_tag
-                                current_turn_content_accumulated += think_close_tag
+                            elif backend_is_streaming_reasoning and not is_done_signal_from_llm : # Stream ended naturally (not [DONE]) but thinking still open
+                                yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
                                 backend_is_streaming_reasoning = False
                         
                         # Common error check after specific provider stream handling
@@ -1241,12 +1269,11 @@ async def _perform_generation_stream(
             except (httpx.RequestError, HTTPException, asyncio.CancelledError, Exception) as e:
                 # This catches errors from client.stream setup, or propagated stream_error
                 stream_error = e  # Ensure it's set for the finally block logic
-                if backend_is_streaming_reasoning:  # Close think tag on any error during stream
+                if backend_is_streaming_reasoning:  # Close thinking on any error during stream
                     try:
-                        yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
+                        yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
                     except Exception:
                         pass
-                    current_turn_content_accumulated += think_close_tag  # Ensure saved part includes closing tag
                     backend_is_streaming_reasoning = False
 
                 error_message_for_frontend = f"Streaming Error: {getattr(e, 'detail', str(e))}"
@@ -1268,16 +1295,19 @@ async def _perform_generation_stream(
 
             # --- Process after stream (either completed or tool detected) ---
             if not detected_tool_call_info: # No tool call, this is the final segment from LLM for this turn
-                if current_turn_content_accumulated:
+                if current_turn_content_accumulated or current_turn_thinking_accumulated:
                     # Save the entire accumulated content for this turn (segment)
+                    # Thinking content is now stored separately
                     message_id_final = create_message(
                         chat_id=chat_id, role=MessageRole.LLM,
                         content=current_turn_content_accumulated,
                         parent_message_id=last_saved_message_id,
-                        model_name=model_name, commit=True
+                        model_name=model_name,
+                        thinking_content=current_turn_thinking_accumulated if current_turn_thinking_accumulated else None,
+                        commit=True
                     )
                     last_saved_message_id = message_id_final
-                    print(f"Saved final LLM message segment: {message_id_final} (Length: {len(current_turn_content_accumulated)})")
+                    print(f"Saved final LLM message segment: {message_id_final} (Content: {len(current_turn_content_accumulated)}, Thinking: {len(current_turn_thinking_accumulated)})")
                 else:
                     print("[Gen Info] Final LLM segment empty after full processing, not saving.")
                 generation_completed_normally = True
@@ -1297,7 +1327,8 @@ async def _perform_generation_stream(
 
                 combined_raw_tags = "".join(call.get("raw_tag", "") for call in tool_calls_info if call)
                 pre_text = detected_tool_call_info.get("pre_text", current_turn_content_accumulated)
-                content_for_assistant_msg_with_call = (pre_text or "") + combined_raw_tags
+                # Store only the pre_text content, tool calls are stored separately in tool_calls column
+                content_for_assistant_msg_with_call = pre_text or ""
 
                 db_tool_calls_data = []
                 for call in tool_calls_info:
@@ -1320,6 +1351,7 @@ async def _perform_generation_stream(
                 message_id_A = create_message(
                     chat_id=chat_id, role=MessageRole.LLM, content=content_for_assistant_msg_with_call,
                     parent_message_id=last_saved_message_id, model_name=model_name,
+                    thinking_content=current_turn_thinking_accumulated if current_turn_thinking_accumulated else None,
                     tool_calls=db_tool_calls_data, commit=True
                 )
                 last_saved_message_id = message_id_A
@@ -1383,10 +1415,8 @@ async def _perform_generation_stream(
                     tool_msg_for_history = {"role": "tool", "message": result_for_llm, "tool_call_id": tool_call_id}
                     current_llm_history.append(tool_msg_for_history)
 
-                    escaped_result_text = html.escape(result_for_storage or "")
-                    status_attr = ' status="error"' if tool_error_str else ''
-                    result_tag_for_frontend = f'<tool_result name="{tool_name}"{status_attr}>{escaped_result_text}</tool_result>'
-                    yield f"data: {json.dumps({'type': 'chunk', 'data': result_tag_for_frontend})}\n\n"
+                    # Emit tool result as JSON event (not XML)
+                    yield f"data: {json.dumps({'type': 'tool_result', 'name': tool_name, 'id': tool_call_id, 'result': result_for_storage, 'error': tool_error_str})}\n\n"
                     yield f"data: {json.dumps({'type': 'tool_end', 'name': tool_name, 'result': tool_result_content_str, 'error': tool_error_str})}\n\n"
 
                 tool_call_count += len(tool_calls_info)
@@ -1412,21 +1442,26 @@ async def _perform_generation_stream(
     finally:
         print(f"[Gen Finally] Chat {chat_id}. Abort: {abort_event.is_set()}, StreamError: {type(stream_error).__name__ if stream_error else 'None'}, Completed Loop: {generation_completed_normally}")
 
-        if backend_is_streaming_reasoning: # Final safety net for streamed CoT tags
+        if backend_is_streaming_reasoning: # Final safety net for thinking end event
             try:
-                yield f"data: {json.dumps({'type': 'chunk', 'data': think_close_tag})}\n\n"
+                yield f"data: {json.dumps({'type': 'thinking_end'})}\n\n"
             except Exception:
                 pass
-            if not stream_error or isinstance(stream_error, asyncio.CancelledError): # Only add to save if not a hard error mid-think
-                current_turn_content_accumulated += think_close_tag
+            backend_is_streaming_reasoning = False
 
-        if isinstance(stream_error, asyncio.CancelledError) and current_turn_content_accumulated:
-            print(f"[Gen Finally - Abort Save] Saving partial: {len(current_turn_content_accumulated)} chars.")
+        # Save partial content on abort (including any accumulated thinking)
+        # Check both stream_error being CancelledError AND abort_event being set
+        is_aborted = isinstance(stream_error, asyncio.CancelledError) or abort_event.is_set()
+        has_content_to_save = current_turn_content_accumulated or current_turn_thinking_accumulated
+        if is_aborted and has_content_to_save and not generation_completed_normally:
+            print(f"[Gen Finally - Abort Save] Saving partial: Content={len(current_turn_content_accumulated)}, Thinking={len(current_turn_thinking_accumulated)} chars.")
             try:
                 aborted_message_id = create_message(
                     chat_id=chat_id, role=MessageRole.LLM,
-                    content=current_turn_content_accumulated, # This is content from the segment being aborted
-                    parent_message_id=last_saved_message_id, model_name=model_name, commit=True
+                    content=current_turn_content_accumulated,
+                    parent_message_id=last_saved_message_id, model_name=model_name,
+                    thinking_content=current_turn_thinking_accumulated if current_turn_thinking_accumulated else None,
+                    commit=True
                 )
                 print(f"[Gen Finally - Abort Save] Saved partial message ID: {aborted_message_id}")
             except Exception as save_err: print(f"[Gen Finally - Abort Save Error] Failed to save partial: {save_err}")
@@ -1453,10 +1488,11 @@ def create_message(
     model_name: Optional[str] = None,
     tool_call_id: Optional[str] = None, # ID *of the tool call* if this is a tool response msg, or ID *for the tool call* if assistant msg
     tool_calls: Optional[List[Dict[str, Any]]] = None, # The actual tool calls requested by an assistant
+    thinking_content: Optional[str] = None, # CoT/reasoning content stored separately
     commit: bool = True
 ) -> str:
     """
-    Creates a message in the database. Handles attachments and tool call data.
+    Creates a message in the database. Handles attachments, tool call data, and thinking content.
     """
     if attachments is None: attachments = []
     message_id = str(uuid.uuid4())
@@ -1469,9 +1505,9 @@ def create_message(
     try:
         cursor.execute(
             """INSERT INTO messages
-               (message_id, chat_id, role, message, model_name, timestamp, parent_message_id, tool_call_id, tool_calls)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (message_id, chat_id, role.value, content, model_name, timestamp, parent_message_id, tool_call_id, tool_calls_str)
+               (message_id, chat_id, role, message, model_name, timestamp, parent_message_id, tool_call_id, tool_calls, thinking_content)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (message_id, chat_id, role.value, content, model_name, timestamp, parent_message_id, tool_call_id, tool_calls_str, thinking_content)
         )
         for attachment in attachments:
             attachment_id = str(uuid.uuid4())
@@ -1748,7 +1784,9 @@ async def generate_response(chat_id: str, request: GenerateRequest):
         abort_event=abort_event,
         cot_start_tag=request.cot_start_tag,
         cot_end_tag=request.cot_end_tag,
-        enabled_tool_names=request.enabled_tool_names
+        enabled_tool_names=request.enabled_tool_names,
+        preserve_thinking=request.preserve_thinking,
+        max_tool_calls=request.max_tool_calls
     )
 
     return StreamingResponse(stream_generator, media_type="text/event-stream")
@@ -2120,21 +2158,7 @@ async def set_active_branch(chat_id: str, parent_message_id: str, request: SetAc
     finally: conn.close()
     return {"status": "ok"}
 
-# --- NEW Tool Endpoints ---
-
-@app.get("/tools/system_prompt")
-async def get_tools_system_prompt(names: Optional[List[str]] = Query(default=None)):
-    """
-    Returns the formatted system prompt describing available tools.
-    
-    NOTE: With native OpenAI/MCP tool calling, no system prompt instructions are needed.
-    Tools are passed via the API's "tools" parameter. This endpoint now returns an empty
-    prompt string but is kept for backward compatibility.
-    """
-    subset, _, _ = resolve_tools_subset(names)
-    prompt = format_tools_for_prompt(subset)  # Returns empty string for native tool calling
-    return {"prompt": prompt}
-
+# --- Tool Endpoints ---
 
 @app.get("/tools")
 async def list_tools():

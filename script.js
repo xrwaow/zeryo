@@ -7,9 +7,6 @@ let PROVIDER_CONFIG = {
     local_base_url: "http://127.0.0.1:8080",
     // Keys are ONLY stored in state.apiKeys, populated by fetchProviderConfig
 };
-// NOTE: With native OpenAI/MCP tool calling, TOOLS_SYSTEM_PROMPT is no longer used.
-// Tools are passed via the API's "tools" parameter. Kept for backward compatibility.
-let TOOLS_SYSTEM_PROMPT = ""; // Empty with native tool calling
 
 // DOM Elements
 const chatContainer = document.getElementById('chat-container');
@@ -36,9 +33,7 @@ const toggleToolsBtn = document.getElementById('toggle-tools-btn');
 const toggleAutoscrollBtn = document.getElementById('toggle-autoscroll-btn');
 
 const settingsBtn = document.getElementById('settings-btn');
-const mainSettingsPopup = document.getElementById('main-settings-popup');
-const closeSettingsPopupBtn = document.getElementById('close-settings-popup-btn');
-// New centered modal (expected id)
+// Settings modal (centered modal)
 const settingsModal = document.getElementById('settings-modal');
 const settingsModalClose = document.getElementById('settings-modal-close');
 
@@ -46,7 +41,7 @@ const settingsModalClose = document.getElementById('settings-modal-close');
 // The HTML uses:
 //  - Tab buttons: .settings-tab-btn  with data-tab="<name>"
 //  - Panels: .settings-tab-panel with data-panel="<name>"
-//  - Main checkboxes: #main-toggle-tools, #main-toggle-autoscroll, #main-toggle-codeblocks
+//  - Main checkboxes: #main-toggle-tools, #main-toggle-autoscroll, #main-toggle-codeblocks, #main-toggle-preserve-thinking
 // We'll resolve/query these lazily each time the modal opens to avoid stale NodeLists.
 function querySettingsModalElements() {
     if (!settingsModal) return {};
@@ -56,6 +51,8 @@ function querySettingsModalElements() {
         cbTools: document.getElementById('main-toggle-tools'),
         cbAutoscroll: document.getElementById('main-toggle-autoscroll'),
         cbCodeblocks: document.getElementById('main-toggle-codeblocks'),
+        cbPreserveThinking: document.getElementById('main-toggle-preserve-thinking'),
+        inputMaxToolCalls: document.getElementById('main-max-tool-calls'),
         toolsPromptPreview: document.getElementById('tools-prompt-preview'),
         toolsListContainer: document.getElementById('tools-checkbox-list')
     };
@@ -859,11 +856,6 @@ function reconcileEnabledToolSelection() {
     persistEnabledToolNames();
 }
 
-function updateToolsPromptPreviewDisplay() {
-    // NOTE: Tools prompt preview removed - native tool calling doesn't use prompt instructions.
-    // This function is kept as a no-op for backward compatibility with existing callers.
-}
-
 function updateToolsCheckboxDisableState() {
     document.querySelectorAll('#tools-checkbox-list input[type="checkbox"]').forEach(cb => {
         cb.disabled = !state.toolsEnabled;
@@ -1157,11 +1149,7 @@ function handleThinkBlockToggle(e) {
 
 function updateEffectiveSystemPrompt() {
     let basePrompt = state.activeSystemPrompt || "";
-    let toolsPrompt = "";
-    if (state.toolsEnabled && TOOLS_SYSTEM_PROMPT) {
-        toolsPrompt = `\n\n${TOOLS_SYSTEM_PROMPT}`;
-    }
-    state.effectiveSystemPrompt = (basePrompt + toolsPrompt).trim() || null;
+    state.effectiveSystemPrompt = basePrompt.trim() || null;
     
     let characterNameToDisplay = null;
 
@@ -1300,15 +1288,6 @@ async function fetchProviderConfig() {
     }
 }
 
-async function fetchToolsSystemPrompt(enabledNames = null) {
-    // NOTE: With native tool calling, no system prompt instructions are needed.
-    // Tools are passed via the API's "tools" parameter. This function is kept
-    // for backward compatibility but no longer fetches anything.
-    TOOLS_SYSTEM_PROMPT = "";
-    updateToolsPromptPreviewDisplay();
-    updateEffectiveSystemPrompt();
-}
-
 async function fetchToolsMetadata() {
     try {
         const response = await fetch(`${API_BASE}/tools`);
@@ -1330,7 +1309,6 @@ async function fetchToolsMetadata() {
 
 async function initializeToolsCatalog() {
     await fetchToolsMetadata();
-    // NOTE: fetchToolsSystemPrompt no longer needed with native tool calling
 }
 
 async function loadGenArgs() {
@@ -2474,16 +2452,92 @@ function addMessage(message) {
             m => m.parent_message_id === message.message_id && m.role === 'tool'
         );
         
-        // Extract tool results from child messages
-        const externalToolResults = childToolMessages.map(toolMsg => ({
-            message: toolMsg.message,
-            body: toolMsg.message,
-            name: toolMsg.tool_name || null,
-            tool_call_id: toolMsg.tool_call_id || null,
-            status: null
-        }));
+        // Extract tool results from child messages, indexed by tool_call_id
+        const toolResultsById = {};
+        childToolMessages.forEach(toolMsg => {
+            if (toolMsg.tool_call_id) {
+                toolResultsById[toolMsg.tool_call_id] = {
+                    message: toolMsg.message,
+                    body: toolMsg.message,
+                    name: toolMsg.tool_name || null,
+                    tool_call_id: toolMsg.tool_call_id,
+                    status: null
+                };
+            }
+        });
         
-        buildContentHtml(contentDiv, message.message || '', externalToolResults);
+        // Render thinking block first if present
+        if (message.thinking_content) {
+            const thinkBlockWrapper = document.createElement('div');
+            thinkBlockWrapper.className = 'think-block collapsed';
+            
+            const header = document.createElement('div');
+            header.className = 'think-header';
+            header.innerHTML = `
+                <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+                <span class="think-timer"></span>
+                <div class="think-header-actions">
+                    <button class="think-block-toggle" title="Expand thought process">
+                        <i class="bi bi-chevron-down"></i>
+                    </button>
+                </div>`;
+            thinkBlockWrapper.appendChild(header);
+            
+            const thinkContentDiv = document.createElement('div');
+            thinkContentDiv.className = 'think-content';
+            thinkContentDiv.innerHTML = renderMarkdown(message.thinking_content);
+            thinkBlockWrapper.appendChild(thinkContentDiv);
+            
+            contentDiv.appendChild(thinkBlockWrapper);
+        }
+        
+        // Render main content
+        if (message.message) {
+            const contentWrapper = document.createElement('div');
+            contentWrapper.innerHTML = renderMarkdown(message.message);
+            while (contentWrapper.firstChild) {
+                contentDiv.appendChild(contentWrapper.firstChild);
+            }
+        }
+        
+        // Render tool calls from the tool_calls array (not from XML in message text)
+        if (message.tool_calls && Array.isArray(message.tool_calls)) {
+            message.tool_calls.forEach(toolCall => {
+                const toolName = toolCall.function?.name || toolCall.name || 'unknown';
+                const toolId = toolCall.id;
+                let toolArgs = {};
+                
+                // Parse arguments from function.arguments (JSON string) or arguments object
+                if (toolCall.function?.arguments) {
+                    try {
+                        toolArgs = typeof toolCall.function.arguments === 'string' 
+                            ? JSON.parse(toolCall.function.arguments) 
+                            : toolCall.function.arguments;
+                    } catch (e) {
+                        console.warn('Failed to parse tool arguments:', e);
+                    }
+                } else if (toolCall.arguments) {
+                    toolArgs = toolCall.arguments;
+                }
+                
+                const toolData = { 
+                    name: toolName, 
+                    id: toolId, 
+                    payloadInfo: { arguments: toolArgs, raw: JSON.stringify(toolArgs) } 
+                };
+                
+                // Find matching result
+                const matchingResult = toolResultsById[toolId];
+                const resultData = matchingResult ? {
+                    name: toolName,
+                    body: matchingResult.body || '',
+                    status: matchingResult.status
+                } : null;
+                
+                renderToolGroup(contentDiv, toolData, resultData);
+            });
+        }
+        
         finalizeStreamingCodeBlocks(contentDiv);
     } else {
         contentDiv.innerHTML = renderMarkdown(message.message || '');
@@ -2859,50 +2913,17 @@ function setupEventListeners() {
         if (collapseBtn) { handleCodeCollapse(collapseBtn); return; }
     });
 
-    if (settingsBtn && mainSettingsPopup) {
-        settingsBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const isPopupVisible = mainSettingsPopup.style.display === 'block';
-            mainSettingsPopup.style.display = isPopupVisible ? 'none' : 'block';
-            if (!isPopupVisible) {
-                updateAutoscrollButton();
-                updateCodeblockToggleButton();
-                toggleToolsBtn.classList.toggle('active', state.toolsEnabled);
-            }
-        });
-    }
-    if (closeSettingsPopupBtn && mainSettingsPopup) {
-        closeSettingsPopupBtn.addEventListener('click', () => {
-            mainSettingsPopup.style.display = 'none';
-        });
-    }
-
     document.querySelectorAll('.theme-option[data-theme]').forEach(button => {
         button.addEventListener('click', () => {
             applyTheme(button.dataset.theme);
         });
     });
 
-    document.addEventListener('click', (e) => {
-        if (mainSettingsPopup && mainSettingsPopup.style.display === 'block') {
-            if (!mainSettingsPopup.contains(e.target) && !settingsBtn.contains(e.target)) {
-                mainSettingsPopup.style.display = 'none';
-            }
-        }
-    });
-
     // Settings modal open/close
-    if (settingsBtn) {
+    if (settingsBtn && settingsModal) {
         settingsBtn.addEventListener('click', () => {
-            if (settingsModal) {
-                settingsModal.style.display = 'flex';
-                refreshSettingsModalState();
-            } else if (mainSettingsPopup) {
-                // Fallback to legacy popup if new modal absent
-                mainSettingsPopup.style.display = 'block';
-            } else {
-                console.warn('No settings modal or popup found.');
-            }
+            settingsModal.style.display = 'flex';
+            refreshSettingsModalState();
         });
     }
     if (settingsModal) {
@@ -2939,6 +2960,8 @@ function refreshSettingsModalState() {
         cbTools,
         cbAutoscroll,
         cbCodeblocks,
+        cbPreserveThinking,
+        inputMaxToolCalls,
         toolsPromptPreview,
         toolsListContainer
     } = querySettingsModalElements();
@@ -2976,6 +2999,24 @@ function refreshSettingsModalState() {
             localStorage.setItem('codeBlocksDefaultCollapsed', state.codeBlocksDefaultCollapsed);
             updateCodeblockToggleButton();
             document.querySelectorAll('.code-block-wrapper').forEach(block => setCodeBlockCollapsedState(block, state.codeBlocksDefaultCollapsed));
+        };
+    }
+    if (cbPreserveThinking) {
+        cbPreserveThinking.checked = localStorage.getItem('preserveThinking') === 'true';
+        cbPreserveThinking.onchange = () => {
+            localStorage.setItem('preserveThinking', cbPreserveThinking.checked);
+            addSystemMessage(`Preserve Thinking ${cbPreserveThinking.checked ? 'enabled' : 'disabled'}.`, 'info', 1500);
+        };
+    }
+    if (inputMaxToolCalls) {
+        const savedMaxToolCalls = localStorage.getItem('maxToolCalls');
+        inputMaxToolCalls.value = savedMaxToolCalls !== null ? savedMaxToolCalls : '10';
+        inputMaxToolCalls.onchange = () => {
+            const val = parseInt(inputMaxToolCalls.value, 10);
+            if (!isNaN(val) && (val >= -1)) {
+                localStorage.setItem('maxToolCalls', val.toString());
+                addSystemMessage(`Max Tool Calls set to ${val === -1 ? 'unlimited' : val}.`, 'info', 1500);
+            }
         };
     }
 
@@ -3348,7 +3389,7 @@ function getApiKey(provider) {
     return key;
 }
 
-async function streamFromBackend(chatId, parentMessageId, modelName, generationArgs, toolsEnabled, onChunk, onToolStart, onToolEnd, onComplete, onError, onToolPendingConfirmation) {
+async function streamFromBackend(chatId, parentMessageId, modelName, generationArgs, toolsEnabled, onChunk, onToolStart, onToolEnd, onComplete, onError, onToolPendingConfirmation, onThinkingStart, onThinkingChunk, onThinkingEnd, onToolCall, onToolResult) {
     console.log(`streamFromBackend called for chat: ${chatId}, parent: ${parentMessageId}, model: ${modelName}, toolsEnabled: ${toolsEnabled}`);
 
     if (state.streamController && !state.streamController.signal.aborted) {
@@ -3359,6 +3400,9 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
 
     const url = `${API_BASE}/c/${chatId}/generate`;
     const cotTags = getActiveCharacterCotTags ? getActiveCharacterCotTags() : { start: null, end: null };
+    const preserveThinking = localStorage.getItem('preserveThinking') === 'true';
+    const savedMaxToolCalls = localStorage.getItem('maxToolCalls');
+    const maxToolCalls = savedMaxToolCalls !== null ? parseInt(savedMaxToolCalls, 10) : 10;
     const body = {
         parent_message_id: parentMessageId,
         model_name: modelName,
@@ -3368,7 +3412,9 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
         cot_start_tag: cotTags.start,
         cot_end_tag: cotTags.end,
         enabled_tool_names: toolsEnabled ? getEnabledToolNamesArray() : [],
-        resolve_local_runtime_model: true // hint backend to fetch runtime local model name now
+        resolve_local_runtime_model: true, // hint backend to fetch runtime local model name now
+        preserve_thinking: preserveThinking,
+        max_tool_calls: isNaN(maxToolCalls) ? 10 : maxToolCalls
     };
 
     try {
@@ -3433,6 +3479,27 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
                                 case 'chunk':
                                     if (typeof onChunk !== 'function') throw new Error("Internal error: Invalid onChunk callback.");
                                     if (eventData.data) onChunk(eventData.data);
+                                    break;
+                                case 'tool_call':
+                                    // New JSON-based tool call event
+                                    if (typeof onToolCall === 'function') {
+                                        onToolCall(eventData.name, eventData.id, eventData.arguments);
+                                    }
+                                    break;
+                                case 'tool_result':
+                                    // New JSON-based tool result event
+                                    if (typeof onToolResult === 'function') {
+                                        onToolResult(eventData.name, eventData.id, eventData.result, eventData.error);
+                                    }
+                                    break;
+                                case 'thinking_start':
+                                    if (typeof onThinkingStart === 'function') onThinkingStart();
+                                    break;
+                                case 'thinking_chunk':
+                                    if (typeof onThinkingChunk === 'function' && eventData.data) onThinkingChunk(eventData.data);
+                                    break;
+                                case 'thinking_end':
+                                    if (typeof onThinkingEnd === 'function') onThinkingEnd();
                                     break;
                                 case 'tool_start':
                                     if (typeof onToolStart !== 'function') throw new Error("Internal error: Invalid onToolStart callback.");
@@ -3520,10 +3587,21 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
-    let fullRenderedContent = initialText;
+    // Track streaming content as ordered segments (thinking blocks and content blocks interspersed)
+    // Each segment is { type: 'thinking' | 'content', text: string }
+    let streamingSegments = initialText ? [{ type: 'content', text: initialText }] : [];
+    let isCurrentlyThinking = false;    // Whether we're currently receiving thinking chunks
     let lastRenderTime = 0;
     let pendingRenderTimeout = null;
     const RENDER_THROTTLE_MS = 50; // Only re-render every 50ms max
+
+    // Helper to get/create the current segment of expected type
+    const getCurrentSegment = (type) => {
+        if (streamingSegments.length === 0 || streamingSegments[streamingSegments.length - 1].type !== type) {
+            streamingSegments.push({ type, text: '' });
+        }
+        return streamingSegments[streamingSegments.length - 1];
+    };
 
     const updateStreamingMinHeight = () => {
         if (targetContentDiv) {
@@ -3545,6 +3623,158 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         updateScrollButtonVisibility();
     });
 
+    // Helper to build combined content for rendering (all segments in order)
+    // Returns an object with { text: string, blocks: array } for hybrid rendering
+    const buildCombinedContent = () => {
+        // We now return the segments directly for the new rendering approach
+        return streamingSegments;
+    };
+
+    // Get all thinking content combined (for timer display and rendering)
+    const getAllThinkingContent = () => {
+        return streamingSegments.filter(s => s.type === 'thinking').map(s => s.text).join('\n\n');
+    };
+
+    // Get all content (non-thinking, non-tool) combined
+    const getAllContent = () => {
+        return streamingSegments.filter(s => s.type === 'content').map(s => s.text).join('');
+    };
+
+    // Get all tool segments for rendering
+    const getToolSegments = () => {
+        return streamingSegments.filter(s => s.type === 'tool_call' || s.type === 'tool_result');
+    };
+
+    const hasAnyThinking = () => streamingSegments.some(s => s.type === 'thinking' && s.text.length > 0);
+    const hasAnyToolCalls = () => streamingSegments.some(s => s.type === 'tool_call' || s.type === 'tool_result');
+
+    // Unified render function for streaming content (handles thinking, content, tool_call, tool_result)
+    const doRender = () => {
+        if (!targetContentDiv || state.streamController?.signal.aborted) return;
+        
+        const segments = buildCombinedContent();
+        const hasThinking = hasAnyThinking();
+        const allThinkingContent = getAllThinkingContent();
+        const allContent = getAllContent();
+        const hasTools = hasAnyToolCalls();
+
+        // Timer logic for think blocks
+        if (hasThinking && isCurrentlyThinking && state.streamingThinkTimer.intervalId === null) {
+            state.streamingThinkTimer.startTime = Date.now();
+            state.streamingThinkTimer.intervalId = setInterval(() => {
+                if (state.streamingThinkTimer.intervalId && state.currentAssistantMessageDiv) {
+                    const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
+                    if (timerEl) {
+                        const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
+                        timerEl.textContent = `${elapsed}s`;
+                    }
+                } else if (state.streamingThinkTimer.intervalId) {
+                    clearInterval(state.streamingThinkTimer.intervalId);
+                }
+            }, 100);
+        } else if (hasThinking && !isCurrentlyThinking && state.streamingThinkTimer.intervalId !== null) {
+            clearInterval(state.streamingThinkTimer.intervalId);
+            if (state.currentAssistantMessageDiv) {
+                const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
+                if (timerEl && state.streamingThinkTimer.startTime) {
+                    const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
+                    timerEl.textContent = `${elapsed}s`;
+                }
+            }
+            state.streamingThinkTimer = { intervalId: null, startTime: null };
+        }
+
+        // Clear and rebuild the content div with segments
+        const savedCursor = targetContentDiv.querySelector('.pulsing-cursor');
+        targetContentDiv.innerHTML = '';
+        
+        // Render each segment in order
+        for (const seg of segments) {
+            if (seg.type === 'thinking') {
+                // Render thinking block
+                const isLastThinkingSegment = segments.filter(s => s.type === 'thinking').indexOf(seg) === segments.filter(s => s.type === 'thinking').length - 1;
+                const thinkBlockWrapper = document.createElement('div');
+                thinkBlockWrapper.className = `think-block ${isCurrentlyThinking && isLastThinkingSegment ? '' : ''}`;
+                thinkBlockWrapper.dataset.tempId = 'streaming-think-block';
+
+                const header = document.createElement('div');
+                header.className = 'think-header';
+                header.innerHTML = `
+                    <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+                    <span class="think-timer"></span>
+                    <div class="think-header-actions">
+                        <button class="think-block-toggle" title="Collapse thought process">
+                            <i class="bi bi-chevron-up"></i>
+                        </button>
+                    </div>`;
+                thinkBlockWrapper.appendChild(header);
+
+                const thinkContentDiv = document.createElement('div');
+                thinkContentDiv.className = 'think-content';
+                thinkContentDiv.innerHTML = marked.parse(seg.text || '');
+                thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
+                thinkBlockWrapper.appendChild(thinkContentDiv);
+                
+                targetContentDiv.appendChild(thinkBlockWrapper);
+            } else if (seg.type === 'content') {
+                // Render content block
+                if (seg.text) {
+                    const contentWrapper = document.createElement('div');
+                    contentWrapper.innerHTML = renderMarkdown(seg.text);
+                    while (contentWrapper.firstChild) {
+                        targetContentDiv.appendChild(contentWrapper.firstChild);
+                    }
+                }
+            } else if (seg.type === 'tool_call') {
+                // Render tool call using the unified tool group renderer
+                // First, find matching result if exists
+                const matchingResult = segments.find(s => 
+                    s.type === 'tool_result' && 
+                    (s.id === seg.id || (s.name === seg.name && !s.rendered))
+                );
+                if (matchingResult) {
+                    matchingResult.rendered = true;
+                }
+                const toolData = { name: seg.name, id: seg.id, payloadInfo: { arguments: seg.arguments, raw: JSON.stringify(seg.arguments) } };
+                const resultData = matchingResult ? { name: matchingResult.name, body: matchingResult.result || '', status: matchingResult.error ? 'error' : null } : null;
+                renderToolGroup(targetContentDiv, toolData, resultData);
+            } else if (seg.type === 'tool_result' && !seg.rendered) {
+                // Render orphan tool result (shouldn't normally happen)
+                const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
+                renderToolGroup(targetContentDiv, null, resultData);
+            }
+        }
+        
+        applyCodeBlockDefaults(targetContentDiv);
+        finalizeStreamingCodeBlocks(targetContentDiv);
+        
+        targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+        if (!state.streamController?.signal.aborted) {
+            targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
+        }
+        updateStreamingMinHeight();
+        if (state.autoscrollEnabled) requestAutoScroll();
+        
+        lastRenderTime = Date.now();
+    };
+
+    // Throttled render trigger
+    const triggerRender = () => {
+        const now = Date.now();
+        const timeSinceLastRender = now - lastRenderTime;
+        
+        if (pendingRenderTimeout) {
+            clearTimeout(pendingRenderTimeout);
+            pendingRenderTimeout = null;
+        }
+        
+        if (timeSinceLastRender >= RENDER_THROTTLE_MS) {
+            doRender();
+        } else {
+            pendingRenderTimeout = setTimeout(doRender, RENDER_THROTTLE_MS - timeSinceLastRender);
+        }
+    };
+
     try {
         await streamFromBackend(
             state.currentChatId,
@@ -3552,136 +3782,26 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             effectiveModelName,
             generationArgs,
             toolsEnabled,
-            // onChunk - throttled to reduce DOM thrashing
+            // onChunk - main content (not thinking)
             (textChunk) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) {
                     return;
                 }
-                fullRenderedContent += textChunk;
-                
-                const now = Date.now();
-                const timeSinceLastRender = now - lastRenderTime;
-                
-                // Clear any pending render since we have new content
-                if (pendingRenderTimeout) {
-                    clearTimeout(pendingRenderTimeout);
-                    pendingRenderTimeout = null;
-                }
-                
-                const doRender = () => {
-                    if (!targetContentDiv || state.streamController?.signal.aborted) return;
-                    
-                    const cotTagPairs = getCotTagPairs();
-                    const hasThinkStart = startsWithCotBlock(fullRenderedContent, cotTagPairs);
-                    const hasThinkEnd = cotTagPairs.some(({ end }) => end && fullRenderedContent.includes(end));
-
-                    // Timer logic for think blocks
-                    if (hasThinkStart && !hasThinkEnd && state.streamingThinkTimer.intervalId === null) {
-                        state.streamingThinkTimer.startTime = Date.now();
-                        state.streamingThinkTimer.intervalId = setInterval(() => {
-                            if (state.streamingThinkTimer.intervalId && state.currentAssistantMessageDiv) {
-                                const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                                if (timerEl) {
-                                    const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
-                                    timerEl.textContent = `${elapsed}s`;
-                                }
-                            } else if (state.streamingThinkTimer.intervalId) {
-                                clearInterval(state.streamingThinkTimer.intervalId);
-                            }
-                        }, 100);
-                    } else if (hasThinkStart && hasThinkEnd && state.streamingThinkTimer.intervalId !== null) {
-                        clearInterval(state.streamingThinkTimer.intervalId);
-                        if (state.currentAssistantMessageDiv) {
-                            const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                            if (timerEl && state.streamingThinkTimer.startTime) {
-                                const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
-                                timerEl.textContent = `${elapsed}s`;
-                            }
-                        }
-                        state.streamingThinkTimer = { intervalId: null, startTime: null };
-                    }
-
-                    const thinkBlockTempId = 'streaming-think-block';
-                    const remainingContentTempId = 'streaming-remaining-content';
-                    let existingThinkBlockInTarget = targetContentDiv.querySelector(`.think-block[data-temp-id="${thinkBlockTempId}"]`);
-
-                    if (hasThinkStart) {
-                        const { thinkContent, remainingText } = parseThinkContent(fullRenderedContent, cotTagPairs);
-                        if (existingThinkBlockInTarget) {
-                            const thinkContentDiv = existingThinkBlockInTarget.querySelector('.think-content');
-                            if (thinkContentDiv) {
-                                thinkContentDiv.innerHTML = marked.parse(thinkContent || '');
-                                thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
-                                applyCodeBlockDefaults(thinkContentDiv);
-                                finalizeStreamingCodeBlocks(thinkContentDiv);
-                            }
-                            let existingRemainingDiv = targetContentDiv.querySelector(`div[data-temp-id="${remainingContentTempId}"]`);
-                            if (remainingText) {
-                                const remainingHtml = renderMarkdown(remainingText, true, null);
-                                if (existingRemainingDiv) {
-                                    existingRemainingDiv.innerHTML = remainingHtml;
-                                } else {
-                                    existingRemainingDiv = document.createElement('div');
-                                    existingRemainingDiv.dataset.tempId = remainingContentTempId;
-                                    existingRemainingDiv.innerHTML = remainingHtml;
-                                    existingThinkBlockInTarget.insertAdjacentElement('afterend', existingRemainingDiv);
-                                }
-                                finalizeStreamingCodeBlocks(existingRemainingDiv);
-                            } else if (existingRemainingDiv) {
-                                existingRemainingDiv.remove();
-                            }
-                        } else {
-                            buildContentHtml(targetContentDiv, fullRenderedContent);
-                            finalizeStreamingCodeBlocks(targetContentDiv);
-                        }
-                    } else {
-                        buildContentHtml(targetContentDiv, fullRenderedContent);
-                        finalizeStreamingCodeBlocks(targetContentDiv);
-                    }
-                    
-                    targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                    if (!state.streamController?.signal.aborted) {
-                        targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
-                    }
-                    updateStreamingMinHeight();
-                    if (state.autoscrollEnabled) requestAutoScroll();
-                    
-                    lastRenderTime = Date.now();
-                };
-                
-                // Throttle: only render if enough time has passed, otherwise schedule
-                if (timeSinceLastRender >= RENDER_THROTTLE_MS) {
-                    doRender();
-                } else {
-                    // Schedule a render for when throttle period ends
-                    pendingRenderTimeout = setTimeout(doRender, RENDER_THROTTLE_MS - timeSinceLastRender);
-                }
+                const seg = getCurrentSegment('content');
+                seg.text += textChunk;
+                triggerRender();
             },
             // onToolStart
             (name, args) => {
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-                buildContentHtml(targetContentDiv, fullRenderedContent);
-                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                if (!state.streamController?.signal.aborted) {
-                    targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
-                }
-                finalizeStreamingCodeBlocks(targetContentDiv);
-                updateStreamingMinHeight();
-                if (state.autoscrollEnabled) requestAutoScroll();
+                doRender();
             },
             // onToolEnd
             (name, result, error) => {
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-                buildContentHtml(targetContentDiv, fullRenderedContent);
-                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                if (!state.streamController?.signal.aborted) {
-                    targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
-                }
-                 finalizeStreamingCodeBlocks(targetContentDiv);
-                 updateStreamingMinHeight();
-                if (state.autoscrollEnabled) requestAutoScroll();
+                doRender();
             },
             // onComplete
             async () => {
@@ -3696,8 +3816,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 if (targetContentDiv) {
                     targetContentDiv.classList.remove('streaming');
                     targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                    buildContentHtml(targetContentDiv, fullRenderedContent); 
-                    finalizeStreamingCodeBlocks(targetContentDiv);
+                    // Final render with all segments
+                    doRender();
+                    targetContentDiv.querySelector('.pulsing-cursor')?.remove(); // Remove cursor after final render
                 }
 
                 if (state.autoscrollEnabled) requestAutoScroll();
@@ -3808,23 +3929,56 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 console.log(`Tool pending confirmation: ${name}`, args);
                 
                 // Render accumulated content first
-                buildContentHtml(targetContentDiv, fullRenderedContent);
-                targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+                doRender();
                 
                 // Find the tool call block that was just rendered and ensure it shows confirmation UI
                 const toolBlocks = targetContentDiv.querySelectorAll('.tool-group, .tool-call-block');
                 const lastToolBlock = toolBlocks[toolBlocks.length - 1];
                 if (lastToolBlock && lastToolBlock.dataset.toolName === name) {
-                    // The block should already have the confirmation UI from renderToolCallPlaceholder
                     // Just make sure it's not collapsed
                     lastToolBlock.classList.remove('collapsed');
                     const collapseIcon = lastToolBlock.querySelector('.tool-collapse-btn i');
                     if (collapseIcon) collapseIcon.className = 'bi bi-chevron-up';
                 }
-                
-                finalizeStreamingCodeBlocks(targetContentDiv);
-                updateStreamingMinHeight();
-                if (state.autoscrollEnabled) requestAutoScroll();
+            },
+            // onThinkingStart
+            () => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                isCurrentlyThinking = true;
+                // Start a new thinking segment
+                getCurrentSegment('thinking');
+                triggerRender();
+            },
+            // onThinkingChunk
+            (thinkingChunk) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                const seg = getCurrentSegment('thinking');
+                seg.text += thinkingChunk;
+                triggerRender();
+            },
+            // onThinkingEnd
+            () => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                isCurrentlyThinking = false;
+                triggerRender();
+            },
+            // onToolCall - new JSON-based tool call event
+            (name, id, args) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                console.log(`Tool call received: ${name} (${id})`, args);
+                // Add tool call as a segment for rendering
+                streamingSegments.push({ type: 'tool_call', name, id, arguments: args });
+                if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
+                doRender();
+            },
+            // onToolResult - new JSON-based tool result event
+            (name, id, result, error) => {
+                if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
+                console.log(`Tool result received: ${name} (${id})`, { result: result?.substring?.(0, 100), error });
+                // Add tool result as a segment for rendering
+                streamingSegments.push({ type: 'tool_result', name, id, result, error });
+                if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
+                doRender();
             }
         );
     } catch (error) { // Catch errors from streamFromBackend setup itself (e.g. network error before stream starts)
@@ -4320,13 +4474,6 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
     messageContentDiv.appendChild(toolGroup);
     
     return toolGroup;
-}
-
-// Legacy function kept for backward compatibility with tool messages stored separately
-function renderToolCallPlaceholder(messageContentDiv, toolData, options = {}) {
-    if (!messageContentDiv) return;
-    // Delegate to the unified group renderer without a result
-    return renderToolGroup(messageContentDiv, toolData, null);
 }
 
 function renderToolResult(messageContentDiv, resultData) {
@@ -4841,11 +4988,10 @@ function setupGenerationSettings() {
     const applyBtn = document.getElementById('apply-gen-settings');
     const cancelBtn = document.getElementById('cancel-gen-settings');
 
-    if (genSettingsBtnInPopup && modal && mainSettingsPopup) {
+    if (genSettingsBtnInPopup && modal) {
         genSettingsBtnInPopup.addEventListener('click', () => {
             updateSlidersUI();
             modal.style.display = 'flex';
-            mainSettingsPopup.style.display = 'none';
         });
     }
 
