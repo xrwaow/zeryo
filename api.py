@@ -1357,9 +1357,17 @@ async def _perform_generation_stream(
                 last_saved_message_id = message_id_A
                 print(f"Saved Assistant Message (Tool Call Detected): {message_id_A}")
 
+                thinking_for_history = current_turn_thinking_accumulated or ""
+                history_message_text = pre_text or ""
+                if thinking_for_history:
+                    think_start_tag = (effective_cot_start or "").strip() or "<think>"
+                    think_end_tag = (effective_cot_end or "").strip() or "</think>"
+                    think_block = f"{think_start_tag}{thinking_for_history}{think_end_tag}"
+                    history_message_text = f"{think_block}\n{history_message_text}" if history_message_text else think_block
+
                 assistant_msg_for_history = {
                     "role": "assistant",
-                    "message": pre_text if pre_text else "",
+                    "message": history_message_text,
                     "tool_calls": db_tool_calls_data
                 }
                 current_llm_history.append(assistant_msg_for_history)
@@ -1421,6 +1429,8 @@ async def _perform_generation_stream(
 
                 tool_call_count += len(tool_calls_info)
                 current_turn_content_accumulated = ""
+                current_turn_thinking_accumulated = ""
+                reasoning_from_api = False
                 detected_tool_call_info = None
                 continue  # Continue outer while loop for next LLM call
         # --- End of Outer Generation (tool call) Loop ---
