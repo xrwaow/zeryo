@@ -704,7 +704,6 @@ body.welcome-active .input-area .input-container {
     overflow-y: auto;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
     line-height: 1.5;
-    margin-bottom: 10px; /* Space below textarea */
 }
 
 ::placeholder { /* Make sure placeholder uses original color */
@@ -716,14 +715,20 @@ body.welcome-active .input-area .input-container {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 0 8px; /* Padding inside row */
+    padding: 0;
+    margin-top: 4px;
 }
 
 .input-controls-left,
 .input-controls-right {
     display: flex;
     align-items: center;
-    gap: 6px; /* Reduced gap */
+    gap: 8px;
+}
+
+.input-controls-left {
+    flex: 1;
+    justify-content: flex-start;
 }
 
 /* General Input Buttons (Attach, File, Stop) */
@@ -752,6 +757,7 @@ body.welcome-active .input-area .input-container {
 .send-button {
     background-color: var(--accent-color);
     color: white;
+    border-radius: var(--border-radius-lg);
 }
 
 .send-button:hover {
@@ -772,6 +778,11 @@ body.welcome-active .input-area .input-container {
     animation: spin 1s ease-in-out infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* Tools Toggle Button */
+.tools-toggle-button.active {
+    color: var(--accent-color);
+}
 
 
 /* Scrollbar */
@@ -1029,6 +1040,7 @@ body.welcome-active .input-area .input-container {
     /*color: color-mix(in srgb, var(--accent-color) 90%, black);*/
     padding: 1px 2px; /* Small horizontal padding */
     margin: 2px;
+    font-size: 14px;
 }
 
 /* Edit Mode */
@@ -1214,11 +1226,12 @@ body.welcome-active .input-area .input-container {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 6px 12px;
+    padding: 4px 8px;
     font-size: 12px;
     font-weight: 500;
     background-color: var(--think-block-header-bg);
     color: var(--think-block-header-text);
+    cursor: pointer;
 }
 
 .think-header-title {
@@ -1261,12 +1274,6 @@ body.welcome-active .input-area .input-container {
     justify-content: center;
     width: 20px;
     height: 20px;
-}
-
-.think-block-toggle:hover {
-    background-color: var(--accent-color);
-    color: white;
-    border-color: var(--accent-color);
 }
 
 .think-content {
@@ -1753,9 +1760,8 @@ body.welcome-active .input-area .input-container {
 .attachment-popup-text {
     background-color: var(--bg-primary); /* Background for text */
     color: var(--text-primary);
-    padding: 15px;
-    border-radius: var(--border-radius-md);
-    margin-top: 30px; /* Space below close button */
+    border-radius: var(--border-radius-lg);
+    margin-top: 32px; /* Space below close button */
     white-space: pre-wrap; /* Preserve whitespace */
     word-wrap: break-word; /* Wrap long lines */
     max-height: calc(90vh - 80px); /* Scrollable */
@@ -1773,7 +1779,7 @@ body.welcome-active .input-area .input-container {
 
 .attachment-popup-text code.hljs {
     background: transparent;
-    padding: 0;
+    padding: 8px;
 }
 
 /* Branch Navigation */
@@ -1865,7 +1871,7 @@ body.welcome-active .input-area .input-container {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 10px 14px;
+    padding: 4px 8px;
     background: color-mix(in srgb, var(--accent-color) 8%, var(--bg-tertiary));
     cursor: pointer;
     transition: background 0.2s ease;
@@ -2143,10 +2149,40 @@ body.welcome-active .input-area .input-container {
 .settings-row label { font-size:14px; color: var(--text-primary); flex:1; }
 .settings-row input[type="checkbox"], .settings-row input[type="text"] { flex:0; }
 .settings-row input[type="text"] { background: var(--bg-tertiary); border:1px solid var(--border-color); border-radius: var(--border-radius-sm); color: var(--text-primary); padding:6px 8px; width:200px; }
+.settings-number-input { 
+    background: var(--bg-tertiary); 
+    border: 1px solid var(--border-color); 
+    border-radius: var(--border-radius-sm); 
+    color: var(--text-primary); 
+    padding: 6px 10px; 
+    width: 70px; 
+    text-align: center;
+    font-size: 14px;
+    appearance: textfield;
+    -moz-appearance: textfield;
+}
+.settings-number-input::-webkit-outer-spin-button,
+.settings-number-input::-webkit-inner-spin-button {
+    appearance: none;
+    -webkit-appearance: none;
+    margin: 0;
+}
+.settings-number-input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+}
 .settings-section-title { font-size:14px; font-weight:600; text-transform:uppercase; letter-spacing:.5px; color: var(--text-secondary); margin:8px 0 12px 0; }
 .settings-hint { display:block; margin-top:8px; font-size:12px; color: var(--text-secondary); opacity:0.85; }
-.inline-theme-options { flex-wrap:wrap; }
-.inline-theme-options .theme-option { flex:1 1 100px; }
+.inline-theme-options { flex-wrap:wrap; gap: 10px; }
+.inline-theme-options .theme-option { 
+    width: 100px; 
+    height: 50px; 
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+}
 .tools-checkbox-list { display:flex; flex-direction:column; gap:8px; margin-bottom:12px; }
 .tool-item { display:flex; align-items:flex-start; gap:10px; padding:8px 10px; border:1px solid var(--border-color); border-radius:var(--border-radius-md); background:var(--bg-secondary); cursor:pointer; transition:background 0.2s ease; }
 .tool-item:hover { background:var(--bg-tertiary); }
@@ -2414,18 +2450,28 @@ body.welcome-active .input-area .input-container {
 
 .character-select-button {
     width: auto;
-    min-width: 32px;
-    padding: 0 12px;
-    gap: 6px;
+    min-width: 120px;
+    padding: 8px 12px;
+    gap: 8px;
+    background: transparent;
+    border: none;
+    justify-content: flex-start;
+    transition: opacity 0.2s ease;
+}
+
+.character-select-button i {
+    display: none;
 }
 
 .character-select-name {
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     white-space: nowrap;
-    max-width: 150px;
+    max-width: 200px;
     overflow: hidden;
     text-overflow: ellipsis;
+    color: var(--text-secondary);
+    line-height: 1.2;
 }
 
 
@@ -2651,11 +2697,6 @@ body.welcome-active .input-area .input-container {
     height: 22px;
 }
 
-.tool-collapse-btn:hover {
-    background-color: color-mix(in srgb, var(--accent-color) 20%, transparent);
-    color: var(--accent-color);
-}
-
 /* Actions container within tool header */
 .tool-header-actions {
     display: flex;
@@ -2703,7 +2744,7 @@ body.welcome-active .input-area .input-container {
 /* Snap to Bottom Button */
 .scroll-bottom-button {
     position: fixed; /* Position relative to viewport */
-    bottom: 32px; /* Adjust distance from bottom (consider input area height) */
+    bottom: 32px; /* Adjusted to be above input area */
     right: 32px; /* Adjust distance from right */
     background-color: var(--bg-tertiary);
     color: var(--text-secondary);
@@ -2715,7 +2756,7 @@ body.welcome-active .input-area .input-container {
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    z-index: 10; /* Ensure it's above messages */
+    z-index: 100; /* Ensure it's above messages and input area */
     box-shadow: 0 2px 5px rgba(0,0,0,0.2);
     transition: background-color 0.2s ease, color 0.2s ease, opacity 0.3s ease, transform 0.2s ease;
     opacity: 0.8; /* Slightly transparent */
@@ -2857,7 +2898,7 @@ body.welcome-active .input-area .input-container {
 
     /* --- Scroll to Bottom Button --- */
     .scroll-bottom-button {
-        bottom: 50px; /* Adjust position */
+        bottom: 100px; /* Adjusted for mobile - above input area */
         right: 15px;
         width: 36px;
         height: 36px;
@@ -3052,4 +3093,49 @@ body.welcome-active .input-area .input-container {
     border-radius: 3px;
     border: 1px solid var(--border-color);
     flex-shrink: 0;
+}
+
+/* Checkbox Styling */
+input[type="checkbox"] {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--border-color);
+    border-radius: var(--border-radius-sm);
+    background-color: var(--bg-tertiary);
+    cursor: pointer;
+    position: relative;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+input[type="checkbox"]:hover {
+    border-color: var(--accent-color);
+}
+
+input[type="checkbox"]:checked {
+    background-color: var(--accent-color);
+    border-color: var(--accent-color);
+}
+
+input[type="checkbox"]:checked::after {
+    content: '';
+    position: absolute;
+    left: 5px;
+    top: 2px;
+    width: 4px;
+    height: 8px;
+    border: solid white;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+}
+
+input[type="checkbox"]:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+input[type="checkbox"]:disabled:hover {
+    border-color: var(--border-color);
 }

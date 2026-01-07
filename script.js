@@ -15,8 +15,7 @@ const welcomeContainer = document.getElementById('welcome-container');
 const messageInput = document.getElementById('message-input');
 const sendButton = document.getElementById('send-button');
 // (modelSelect removed)
-const imageButton = document.getElementById('image-button');
-const fileButton = document.getElementById('file-button');
+// (imageButton and fileButton removed - attachments now via drag-drop/paste)
 const stopButton = document.getElementById('stop-button');
 const characterSelectButton = document.getElementById('character-select-button');
 const inputContainer = document.querySelector('.input-container');
@@ -53,6 +52,7 @@ function querySettingsModalElements() {
         cbCodeblocks: document.getElementById('main-toggle-codeblocks'),
         cbPreserveThinking: document.getElementById('main-toggle-preserve-thinking'),
         inputMaxToolCalls: document.getElementById('main-max-tool-calls'),
+        inputPasteAsFileLines: document.getElementById('main-paste-as-file-lines'),
         toolsPromptPreview: document.getElementById('tools-prompt-preview'),
         toolsListContainer: document.getElementById('tools-checkbox-list')
     };
@@ -109,11 +109,11 @@ function refreshCharactersUI(preserveScroll = true) {
             row.className = 'character-row';
             row.dataset.characterId = char.character_id;
             const active = (state.currentCharacterId === char.character_id);
+            const modelDisplay = char.model_identifier || char.model_name || char.preferred_model || '—';
             row.innerHTML = `
                 <div class="character-main">
                     <div class="character-name ${active ? 'active' : ''}">${escapeHtml(char.character_name)}</div>
-                    <div class="character-model" title="Preferred Model">${escapeHtml(char.preferred_model || '—')}</div>
-                    <div class="character-cot" title="CoT Tags">${char.cot_start_tag || ''}${char.cot_end_tag ? '…' : ''}</div>
+                    <div class="character-model" title="Model">${escapeHtml(modelDisplay)}</div>
                 </div>
                 <div class="character-actions">
                     <button class="character-activate-btn" title="Activate">${active ? '<i class="bi bi-check2-circle"></i>' : '<i class="bi bi-play-circle"></i>'}</button>
@@ -277,8 +277,7 @@ function openCharacterEditor(existing=null) {
     const nameInput = document.createElement('input'); nameInput.type='text'; nameInput.placeholder='Enter character name'; nameInput.value=existing?.character_name||''; if (existing) nameInput.disabled = true;
     const promptArea = document.createElement('textarea'); promptArea.placeholder='Enter the system prompt for this character...'; promptArea.value=existing?.sysprompt||'';
     
-    // Model fields
-    const modelNameInput = document.createElement('input'); modelNameInput.type='text'; modelNameInput.placeholder='e.g., claude-3-opus'; modelNameInput.value = existing?.model_name || existing?.preferred_model || '';
+    // Model fields - simplified: just model identifier and provider
     const modelProviderSelect = document.createElement('select');
     ['openrouter', 'google', 'local'].forEach(provider => {
         const opt = document.createElement('option');
@@ -287,7 +286,7 @@ function openCharacterEditor(existing=null) {
         if ((existing?.model_provider || 'openrouter') === provider) opt.selected = true;
         modelProviderSelect.appendChild(opt);
     });
-    const modelIdentifierInput = document.createElement('input'); modelIdentifierInput.type='text'; modelIdentifierInput.placeholder='e.g., anthropic/claude-3-opus'; modelIdentifierInput.value = existing?.model_identifier || '';
+    const modelIdentifierInput = document.createElement('input'); modelIdentifierInput.type='text'; modelIdentifierInput.placeholder='e.g., anthropic/claude-3-opus'; modelIdentifierInput.value = existing?.model_identifier || existing?.model_name || existing?.preferred_model || '';
     
     // Checkbox for image support
     const supportsImagesLabel = document.createElement('label'); supportsImagesLabel.className='checkbox-inline';
@@ -295,41 +294,30 @@ function openCharacterEditor(existing=null) {
     supportsImagesLabel.appendChild(supportsImagesCheckbox);
     supportsImagesLabel.appendChild(document.createTextNode(' Supports Images'));
     
-    // CoT tags in a row
-    const cotStart = document.createElement('input'); cotStart.type='text'; cotStart.placeholder='<think>'; cotStart.value = existing?.cot_start_tag || '';
-    const cotEnd = document.createElement('input'); cotEnd.type='text'; cotEnd.placeholder='</think>'; cotEnd.value = existing?.cot_end_tag || '';
-    const cotRow = document.createElement('div'); cotRow.className='form-row';
-    cotRow.appendChild(createFormGroup('CoT Start Tag', cotStart));
-    cotRow.appendChild(createFormGroup('CoT End Tag', cotEnd));
-    
     // Assemble body
     body.appendChild(createFormGroup('Character Name', nameInput));
     body.appendChild(createFormGroup('System Prompt', promptArea));
-    body.appendChild(createFormGroup('Model Name', modelNameInput));
     body.appendChild(createFormGroup('Provider', modelProviderSelect));
-    body.appendChild(createFormGroup('Model Identifier (API)', modelIdentifierInput));
+    body.appendChild(createFormGroup('Model Identifier', modelIdentifierInput));
     body.appendChild(supportsImagesLabel);
-    body.appendChild(cotRow);
     
     // Actions footer
     const actions = document.createElement('div'); actions.className='form-actions';
     const cancelBtn = document.createElement('button'); cancelBtn.className='btn-secondary'; cancelBtn.textContent='Cancel'; cancelBtn.addEventListener('click', ()=>overlay.remove());
     const saveBtn = document.createElement('button'); saveBtn.className='btn-primary'; saveBtn.textContent='Save';
     saveBtn.addEventListener('click', async () => {
-        // For CoT tags: use trimmed value (can be empty string to clear)
-        const cotStartValue = cotStart.value.trim();
-        const cotEndValue = cotEnd.value.trim();
+        const modelIdValue = modelIdentifierInput.value.trim();
         const body = {
             character_name: nameInput.value.trim(),
             sysprompt: promptArea.value,
-            preferred_model: modelNameInput.value.trim() || null,
+            preferred_model: modelIdValue || null,
             preferred_model_supports_images: supportsImagesCheckbox.checked,
-            model_name: modelNameInput.value.trim() || null,
+            model_name: modelIdValue || null,
             model_provider: modelProviderSelect.value || null,
-            model_identifier: modelIdentifierInput.value.trim() || null,
+            model_identifier: modelIdValue || null,
             model_supports_images: supportsImagesCheckbox.checked,
-            cot_start_tag: cotStartValue !== '' ? cotStartValue : null,
-            cot_end_tag: cotEndValue !== '' ? cotEndValue : null,
+            cot_start_tag: null,
+            cot_end_tag: null,
             settings: {}
         };
         try {
@@ -349,19 +337,12 @@ function openCharacterEditor(existing=null) {
                         model_provider: body.model_provider,
                         model_identifier: body.model_identifier,
                         model_supports_images: body.model_supports_images,
-                        cot_start_tag: body.cot_start_tag,
-                        cot_end_tag: body.cot_end_tag,
                         settings: body.settings
                     };
                 }
                 if (state.currentCharacterId === existing.character_id) {
                     state.lastActivatedCharacterPreferredModel = body.model_name || body.preferred_model || null;
                     state.activeSystemPrompt = body.sysprompt || null;
-                    // Update persisted CoT tags to ensure they're picked up immediately
-                    setPersistedCotTags({
-                        start: body.cot_start_tag || null,
-                        end: body.cot_end_tag || null
-                    });
                     updateEffectiveSystemPrompt();
                     updateAttachmentButtonsForModel();
                 }
@@ -382,8 +363,6 @@ function openCharacterEditor(existing=null) {
                     model_provider: body.model_provider,
                     model_identifier: body.model_identifier,
                     model_supports_images: body.model_supports_images,
-                    cot_start_tag: body.cot_start_tag,
-                    cot_end_tag: body.cot_end_tag,
                     settings: body.settings
                 };
                 state.charactersCache.push(newChar);
@@ -1127,24 +1106,25 @@ function handleCodeCollapse(collapseBtn) {
     persistCollapseState(wrapper, 'code', isCollapsed);
 }
 
-function handleThinkBlockToggle(e) {
-    const toggleBtn = e.target.closest('.think-block-toggle');
-    if (toggleBtn) {
-        const block = toggleBtn.closest('.think-block');
-        if (block) {
-            block.dataset.userToggled = 'true';
-            const isCollapsed = block.classList.toggle('collapsed');
-            const icon = toggleBtn.querySelector('i');
-            if (isCollapsed) {
-                icon.className = 'bi bi-chevron-down';
-                toggleBtn.title = 'Expand thought process';
-            } else {
-                icon.className = 'bi bi-chevron-up';
-                toggleBtn.title = 'Collapse thought process';
-            }
-            persistCollapseState(block, 'think', isCollapsed);
-        }
+function handleThinkBlockToggle(targetElement) {
+    if (!targetElement) return;
+
+    const block = targetElement.closest('.think-block');
+    if (!block) return;
+
+    block.dataset.userToggled = 'true';
+    const isCollapsed = block.classList.toggle('collapsed');
+
+    const toggleBtn = block.querySelector('.think-block-toggle');
+    const icon = toggleBtn?.querySelector('i');
+    if (icon) {
+        icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
     }
+    if (toggleBtn) {
+        toggleBtn.title = isCollapsed ? 'Expand thought process' : 'Collapse thought process';
+    }
+
+    persistCollapseState(block, 'think', isCollapsed);
 }
 
 function updateEffectiveSystemPrompt() {
@@ -1471,9 +1451,9 @@ async function loadChat(chatId) {
              document.body.classList.remove('welcome-active');
              renderActiveMessages();
              adjustTextareaHeight();
-             //requestAnimationFrame(() => {
-             //   scrollToBottom('auto');
-             //});
+             requestAnimationFrame(() => {
+                scrollToBottom('auto');
+             });
         }
     } catch (error) {
         console.error('Error loading chat:', error);
@@ -2815,8 +2795,7 @@ function setupEventListeners() {
     clearChatBtn.title = 'Delete current chat';
     clearChatBtn.onclick = deleteCurrentChat;
     newChatBtn.addEventListener('click', startNewChat);
-    imageButton.addEventListener('click', () => openFileSelector('image/*'));
-    fileButton.addEventListener('click', () => openFileSelector('.txt,.py,.js,.ts,.html,.css,.json,.md,.yaml,.sql,.java,.c,.cpp,.cs,.go,.php,.rb,.swift,.kt,.rs,.toml'));
+    // File/image buttons removed - now handled via drag-drop and paste on input area
     
     // Character dropdown toggle
     if (characterSelectButton && characterDropdown) {
@@ -2903,10 +2882,28 @@ function setupEventListeners() {
     }
 
     messagesWrapper.addEventListener('click', (event) => {
+        const thinkHeader = event.target.closest('.think-header');
+        if (thinkHeader) {
+            handleThinkBlockToggle(thinkHeader);
+            return;
+        }
+
         const thinkToggle = event.target.closest('.think-block-toggle');
-        if (thinkToggle) { handleThinkBlockToggle(event); return; }
-        const toolToggle = event.target.closest('.tool-collapse-btn');
-        if (toolToggle) { handleToolBlockToggle(event); return; }
+        if (thinkToggle) {
+            handleThinkBlockToggle(thinkToggle);
+            return;
+        }
+        const toolHeader = event.target.closest('.tool-group-header');
+        if (toolHeader) {
+            handleToolBlockToggle(toolHeader);
+            return;
+        }
+
+        const legacyToolToggle = event.target.closest('.tool-collapse-btn');
+        if (legacyToolToggle) {
+            handleToolBlockToggle(legacyToolToggle);
+            return;
+        }
         const copyBtn = event.target.closest('.code-header-btn.copy-btn');
         if (copyBtn) { handleCodeCopy(copyBtn); return; }
         const collapseBtn = event.target.closest('.code-header-btn.collapse-btn');
@@ -2952,6 +2949,19 @@ function activateSettingsTab(tabName) {
     localStorage.setItem('settingsActiveTab', tabName);
 }
 
+function updateToolsTabVisibility() {
+    // Hide/show the Tools tab button based on whether tools are enabled
+    const toolsTabBtn = document.querySelector('.settings-tab-btn[data-tab="tools"]');
+    if (toolsTabBtn) {
+        toolsTabBtn.style.display = state.toolsEnabled ? '' : 'none';
+    }
+    // If tools are disabled and we're on the tools tab, switch to main
+    const lastTab = localStorage.getItem('settingsActiveTab');
+    if (!state.toolsEnabled && lastTab === 'tools') {
+        activateSettingsTab('main');
+    }
+}
+
 function refreshSettingsModalState() {
     if (!settingsModal) return;
     const {
@@ -2962,6 +2972,7 @@ function refreshSettingsModalState() {
         cbCodeblocks,
         cbPreserveThinking,
         inputMaxToolCalls,
+        inputPasteAsFileLines,
         toolsPromptPreview,
         toolsListContainer
     } = querySettingsModalElements();
@@ -2979,7 +2990,8 @@ function refreshSettingsModalState() {
             localStorage.setItem('toolsEnabled', state.toolsEnabled);
             updateEffectiveSystemPrompt();
             updateToolsCheckboxDisableState();
-            addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
+            updateToolsTabVisibility();
+            addSystemMessage(`Tools ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
         };
     }
     if (cbAutoscroll) {
@@ -3010,7 +3022,7 @@ function refreshSettingsModalState() {
     }
     if (inputMaxToolCalls) {
         const savedMaxToolCalls = localStorage.getItem('maxToolCalls');
-        inputMaxToolCalls.value = savedMaxToolCalls !== null ? savedMaxToolCalls : '10';
+        inputMaxToolCalls.value = savedMaxToolCalls !== null ? savedMaxToolCalls : '-1';
         inputMaxToolCalls.onchange = () => {
             const val = parseInt(inputMaxToolCalls.value, 10);
             if (!isNaN(val) && (val >= -1)) {
@@ -3019,10 +3031,22 @@ function refreshSettingsModalState() {
             }
         };
     }
+    if (inputPasteAsFileLines) {
+        const savedPasteAsFileLines = localStorage.getItem('pasteAsFileLines');
+        inputPasteAsFileLines.value = savedPasteAsFileLines !== null ? savedPasteAsFileLines : '0';
+        inputPasteAsFileLines.onchange = () => {
+            const val = parseInt(inputPasteAsFileLines.value, 10);
+            if (!isNaN(val) && val >= 0) {
+                localStorage.setItem('pasteAsFileLines', val.toString());
+                addSystemMessage(`Paste as file threshold set to ${val === 0 ? 'disabled' : val + ' lines'}.`, 'info', 1500);
+            }
+        };
+    }
 
     // Tools list
     renderToolsCheckboxList(toolsListContainer);
     updateToolsCheckboxDisableState();
+    updateToolsTabVisibility();
 
     // Restore last active tab (fallback to first button)
     const lastTab = localStorage.getItem('settingsActiveTab');
@@ -3046,7 +3070,8 @@ function setupToolToggle() {
             const settingsCheckbox = document.getElementById('main-toggle-tools');
             if (settingsCheckbox) settingsCheckbox.checked = state.toolsEnabled;
             updateToolsCheckboxDisableState();
-            addSystemMessage(`Tool calls ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
+            updateToolsTabVisibility();
+            addSystemMessage(`Tools ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
         });
     } else {
         console.warn("Tools toggle button not found; using saved toolsEnabled state only.");
@@ -3055,6 +3080,7 @@ function setupToolToggle() {
     const settingsCheckbox = document.getElementById('main-toggle-tools');
     if (settingsCheckbox) settingsCheckbox.checked = state.toolsEnabled;
     updateToolsCheckboxDisableState();
+    updateToolsTabVisibility();
     updateEffectiveSystemPrompt();
 }
 
@@ -3127,13 +3153,8 @@ function activeCharacterSupportsImages() {
 }
 
 function updateAttachmentButtonsForModel() {
-    const supports = activeCharacterSupportsImages();
-    if (imageButton) {
-        // Hide the image button entirely when model doesn't support images
-        imageButton.style.display = supports ? '' : 'none';
-        imageButton.title = supports ? 'Attach image' : 'Model does not support images';
-    }
-    if (fileButton) fileButton.disabled = false; // Always allow text file attachments
+    // Previously managed image/file buttons, now attachments are via drag-drop/paste only
+    // This function is kept for compatibility but no longer needs to manage buttons
 }
 
 
@@ -3157,7 +3178,7 @@ function handleFiles(files) {
     Array.from(files).forEach(file => {
         if (file.type.startsWith('image/') && supportsImages) {
             processImageFile(file);
-        } else if (file.type.startsWith('text/') || /\.(txt|py|js|ts|html|css|json|md|yaml|sql|java|c|cpp|cs|go|php|rb|swift|kt|rs|toml)$/i.test(file.name)) {
+        } else if (file.type.startsWith('text/') || /\.(txt|py|js|ts|html|css|json|md|yaml|sql|java|c|cpp|cs|go|php|rb|swift|kt|rs|toml|sh)$/i.test(file.name)) {
             if (file.size > 1 * 1024 * 1024) {
                  addSystemMessage(`File "${file.name}" is too large (max 1MB).`, "warning");
                  return;
@@ -3333,17 +3354,58 @@ function viewAttachmentPopup(attachment) {
 }
 
 function handlePaste(e) {
-    if (!activeCharacterSupportsImages()) return;
-
-    const items = e.clipboardData.items;
+    const items = e.clipboardData?.items;
     if (!items) return;
 
+    const supportsImages = activeCharacterSupportsImages();
+    let handledImage = false;
+    let handledFile = false;
+
+    // First pass: check for images and files
     for (let i = 0; i < items.length; i++) {
-        if (items[i].type.indexOf('image') !== -1) {
-            const blob = items[i].getAsFile();
+        const item = items[i];
+        
+        // Handle images (if model supports them)
+        if (item.type.indexOf('image') !== -1 && supportsImages) {
+            const blob = item.getAsFile();
             if (blob) {
                 processImageFile(blob);
+                handledImage = true;
+            }
+        }
+        // Handle file drops from file manager
+        else if (item.kind === 'file' && !item.type.startsWith('image/')) {
+            const file = item.getAsFile();
+            if (file) {
+                handleFiles([file]);
+                handledFile = true;
+            }
+        }
+    }
+
+    // If we handled an image or file, prevent default
+    if (handledImage || handledFile) {
+        e.preventDefault();
+        return;
+    }
+
+    // Handle pasted text - check if it should be converted to a file attachment
+    const pastedText = e.clipboardData?.getData('text');
+    if (pastedText) {
+        const pasteAsFileLinesThreshold = parseInt(localStorage.getItem('pasteAsFileLines') || '0', 10);
+        if (pasteAsFileLinesThreshold > 0) {
+            const lineCount = pastedText.split('\n').length;
+            if (lineCount > pasteAsFileLinesThreshold) {
                 e.preventDefault();
+                // Convert pasted text to a file attachment
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const filename = `pasted-text-${timestamp}.txt`;
+                const formattedContent = `${filename}:\n\`\`\`\n${pastedText}\n\`\`\``;
+                const fileData = { name: filename, content: formattedContent, type: 'file', rawContent: pastedText };
+                state.currentTextFiles.push(fileData);
+                addFilePreview(fileData);
+                addSystemMessage(`Pasted ${lineCount} lines as file attachment.`, 'info', 2000);
+                return;
             }
         }
     }
@@ -3402,7 +3464,7 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
     const cotTags = getActiveCharacterCotTags ? getActiveCharacterCotTags() : { start: null, end: null };
     const preserveThinking = localStorage.getItem('preserveThinking') === 'true';
     const savedMaxToolCalls = localStorage.getItem('maxToolCalls');
-    const maxToolCalls = savedMaxToolCalls !== null ? parseInt(savedMaxToolCalls, 10) : 10;
+    const maxToolCalls = savedMaxToolCalls !== null ? parseInt(savedMaxToolCalls, 10) : -1;
     const body = {
         parent_message_id: parentMessageId,
         model_name: modelName,
@@ -3414,7 +3476,7 @@ async function streamFromBackend(chatId, parentMessageId, modelName, generationA
         enabled_tool_names: toolsEnabled ? getEnabledToolNamesArray() : [],
         resolve_local_runtime_model: true, // hint backend to fetch runtime local model name now
         preserve_thinking: preserveThinking,
-        max_tool_calls: isNaN(maxToolCalls) ? 10 : maxToolCalls
+        max_tool_calls: isNaN(maxToolCalls) ? -1 : maxToolCalls
     };
 
     try {
@@ -4329,16 +4391,19 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
     headerLeft.className = 'tool-group-header-left';
     
     const toolIcon = getToolIcon(toolName);
+    // Only show status badge for pending or error states, not for success
+    const showStatus = !hasResult || isError;
     const statusIcon = hasResult ? (isError ? 'exclamation-circle-fill' : 'check-circle-fill') : 'hourglass-split';
     const statusClass = hasResult ? (isError ? 'error' : 'success') : 'pending';
+    const statusText = hasResult ? (isError ? 'Error' : 'Completed') : 'Running...';
     
     headerLeft.innerHTML = `
         <i class="bi bi-${toolIcon} tool-group-icon"></i>
         <span class="tool-group-name">${escapeHtml(toolName)}</span>
-        <span class="tool-group-status ${statusClass}">
+        ${showStatus ? `<span class="tool-group-status ${statusClass}">
             <i class="bi bi-${statusIcon}"></i>
-            ${hasResult ? (isError ? 'Error' : 'Completed') : 'Running...'}
-        </span>
+            ${statusText}
+        </span>` : ''}
     `;
     
     const headerRight = document.createElement('div');
@@ -4482,20 +4547,27 @@ function renderToolResult(messageContentDiv, resultData) {
     return renderToolGroup(messageContentDiv, null, resultData);
 }
 
-function handleToolBlockToggle(e) {
-    const toggleBtn = e.target.closest('.tool-collapse-btn');
-    if (toggleBtn) {
-        // Support both new .tool-group and legacy .tool-call-block/.tool-result-block
-        const block = toggleBtn.closest('.tool-group, .tool-call-block, .tool-result-block');
-        if (block) {
-            block.dataset.userToggled = 'true';
-            const isCollapsed = block.classList.toggle('collapsed');
-            const icon = toggleBtn.querySelector('i');
-            icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
-            toggleBtn.title = isCollapsed ? 'Expand details' : 'Collapse details';
-            persistCollapseState(block, 'tool', isCollapsed);
-        }
+function handleToolBlockToggle(targetElement) {
+    if (!targetElement) return;
+
+    // Support both new .tool-group (header click) and legacy tool blocks (button click)
+    const block = targetElement.closest('.tool-group, .tool-call-block, .tool-result-block');
+    if (!block) return;
+
+    block.dataset.userToggled = 'true';
+    const isCollapsed = block.classList.toggle('collapsed');
+
+    const icon = block.querySelector('.tool-collapse-btn i');
+    if (icon) {
+        icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
     }
+
+    const btn = block.querySelector('.tool-collapse-btn');
+    if (btn) {
+        btn.title = isCollapsed ? 'Expand details' : 'Collapse details';
+    }
+
+    persistCollapseState(block, 'tool', isCollapsed);
 }
 
 function highlightRenderedCode(element) {

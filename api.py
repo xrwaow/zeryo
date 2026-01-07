@@ -275,7 +275,7 @@ class GenerateRequest(BaseModel):
     enabled_tool_names: Optional[List[str]] = None
     resolve_local_runtime_model: bool = False
     preserve_thinking: bool = False  # If True, include thinking content in LLM context
-    max_tool_calls: int = 10  # Maximum number of tool calls per generation (-1 for unlimited)
+    max_tool_calls: int = -1  # Maximum number of tool calls per generation (-1 for unlimited)
 
 from tools import TOOL_REGISTRY, TOOL_DEFINITIONS, convert_tools_to_openai_format, TOOLS_OPENAI_FORMAT
 # --- Tool Registry and Descriptions ---

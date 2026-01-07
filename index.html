@@ -80,19 +80,15 @@
                 
                 <div class="input-controls-row">
                     <div class="input-controls-left">
-                        <button class="input-button" id="image-button" title="Attach image">
-                            <i class="bi bi-image"></i>
-                        </button>
-                        <button class="input-button" id="file-button" title="Attach file">
-                             <i class="bi bi-file-earmark-text"></i>
-                        </button>
                         <button class="input-button character-select-button" id="character-select-button" title="Select Character">
                             <i class="bi bi-person-fill"></i>
                             <span class="character-select-name">Character</span>
-                        </button>
-                        <!-- Legacy character popup removed. Character selection now managed via Settings > Characters. -->
+                        </button>                        
                     </div>
                     <div class="input-controls-right">
+                        <button class="input-button tools-toggle-button" id="toggle-tools-btn" title="Toggle Tools">
+                            <i class="bi bi-tools"></i>
+                        </button>
                         <button class="input-button" id="stop-button" style="display:none;" title="Stop generating">
                             <i class="bi bi-stop-fill"></i>
                         </button>
@@ -127,6 +123,10 @@
                     <div class="settings-modal-panels">
                     <div class="settings-tab-panel active" data-panel="main">
                         <div class="settings-row">
+                            <label for="main-toggle-tools">Enable Tools</label>
+                            <input type="checkbox" id="main-toggle-tools" />
+                        </div>
+                        <div class="settings-row">
                             <label for="main-toggle-autoscroll">Autoscroll During Generation</label>
                             <input type="checkbox" id="main-toggle-autoscroll" />
                         </div>
@@ -138,13 +138,17 @@
                             <label for="main-toggle-preserve-thinking">Preserve Thinking in Context</label>
                             <input type="checkbox" id="main-toggle-preserve-thinking" />
                         </div>
+                        <small class="settings-hint">Preserve Thinking includes the model's chain-of-thought in subsequent messages.</small>
                         <div class="settings-row">
                             <label for="main-max-tool-calls">Max Tool Calls per Generation</label>
-                            <input type="number" id="main-max-tool-calls" min="-1" value="10" style="width: 60px; margin-left: auto;" />
+                            <input type="number" id="main-max-tool-calls" min="-1" value="-1" class="settings-number-input" />
                         </div>
                         <small class="settings-hint">Set to -1 for unlimited tool calls.</small>
-                        <small class="settings-hint">Preserve Thinking includes the model's chain-of-thought in subsequent messages. This may improve continuity but increases token usage.</small>
-                        <small class="settings-hint">These preferences are saved locally.</small>
+                        <div class="settings-row">
+                            <label for="main-paste-as-file-lines">Send pasted text as file if &gt; N lines</label>
+                            <input type="number" id="main-paste-as-file-lines" min="0" value="0" class="settings-number-input" />
+                        </div>
+                        <small class="settings-hint">Set to 0 to disable. Pasted text exceeding this line count will be attached as a file.</small>
                     </div>
                     <div class="settings-tab-panel" data-panel="appearance">
                         <p class="settings-section-title">Theme</p>
@@ -196,10 +200,6 @@
                         </div>
                     </div>
                     <div class="settings-tab-panel" data-panel="tools">
-                        <div class="settings-row">
-                            <label for="main-toggle-tools">Enable Tool Calls</label>
-                            <input type="checkbox" id="main-toggle-tools" />
-                        </div>
                         <p class="settings-section-title">Available Tools</p>
                         <div id="tools-checkbox-list" class="tools-checkbox-list">
                             <div class="tools-list-empty">Loading tools…</div>
