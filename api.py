@@ -141,6 +141,8 @@ def init_db():
     except sqlite3.OperationalError: pass
     try: cursor.execute("ALTER TABLE characters ADD COLUMN model_supports_images INTEGER")
     except sqlite3.OperationalError: pass
+    try: cursor.execute("ALTER TABLE characters ADD COLUMN openrouter_providers TEXT")
+    except sqlite3.OperationalError: pass
     # --- Indexes ---
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages (chat_id)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_messages_parent_id ON messages (parent_message_id)")
@@ -233,6 +235,8 @@ class Character(BaseModel):
     model_provider: Optional[str] = None
     model_identifier: Optional[str] = None
     model_supports_images: Optional[bool] = None
+    # OpenRouter provider order (comma-separated list for fallback)
+    openrouter_providers: Optional[str] = None
     # CoT tags
     cot_start_tag: Optional[str] = None
     cot_end_tag: Optional[str] = None
@@ -247,6 +251,7 @@ class UpdateCharacterRequest(Character):
     model_provider: Optional[str] = None
     model_identifier: Optional[str] = None
     model_supports_images: Optional[bool] = None
+    openrouter_providers: Optional[str] = None
     cot_start_tag: Optional[str] = None
     cot_end_tag: Optional[str] = None
     settings: Optional[Dict[str, Any]] = None
@@ -743,8 +748,9 @@ async def _perform_generation_stream(
         system_prompt_text = ""
         char_info: Optional[Dict[str, Any]] = None
         provider_hint: Optional[str] = None
+        openrouter_providers_list: Optional[List[str]] = None
         if chat_info["character_id"]:
-            cursor_check.execute("SELECT sysprompt, model_name, model_provider, model_identifier, model_supports_images, preferred_model FROM characters WHERE character_id = ?", (chat_info["character_id"],))
+            cursor_check.execute("SELECT sysprompt, model_name, model_provider, model_identifier, model_supports_images, preferred_model, openrouter_providers FROM characters WHERE character_id = ?", (chat_info["character_id"],))
             char_info_row = cursor_check.fetchone()
             if char_info_row:
                 char_info = dict(char_info_row)
@@ -757,6 +763,9 @@ async def _perform_generation_stream(
                         if name_candidate and name_candidate.strip().lower() == "local":
                             provider_hint = "local"
                             break
+                # Parse openrouter_providers if present
+                if char_info.get("openrouter_providers"):
+                    openrouter_providers_list = [p.strip() for p in char_info["openrouter_providers"].split(",") if p.strip()]
             else:
                 system_prompt_text = ""
 
@@ -865,6 +874,9 @@ async def _perform_generation_stream(
                     llm_body["tools"] = openai_format_tools
                     # Optional: set tool_choice to "auto" (default behavior)
                     # llm_body["tool_choice"] = "auto"
+                # Add OpenRouter provider order if specified and using OpenRouter
+                if provider == 'openrouter' and openrouter_providers_list:
+                    llm_body["provider"] = {"order": openrouter_providers_list}
                 headers = {'Content-Type': 'application/json', 'Accept': 'text/event-stream'}
                 if api_details['api_key']: headers['Authorization'] = f"Bearer {api_details['api_key']}"
             
@@ -1839,8 +1851,8 @@ async def create_character_v2(character: Character):
                     character.model_supports_images = bool(found['supports_images'])
         cursor.execute(
             """INSERT INTO characters (character_id, character_name, sysprompt, preferred_model, preferred_model_supports_images,
-                model_name, model_provider, model_identifier, model_supports_images, cot_start_tag, cot_end_tag, settings)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                model_name, model_provider, model_identifier, model_supports_images, openrouter_providers, cot_start_tag, cot_end_tag, settings)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 character_id,
                 character.character_name,
@@ -1851,6 +1863,7 @@ async def create_character_v2(character: Character):
                 character.model_provider,
                 character.model_identifier,
                 1 if (character.model_supports_images) else 0 if character.model_supports_images is not None else None,
+                character.openrouter_providers,
                 character.cot_start_tag,
                 character.cot_end_tag,
                 json.dumps(character.settings or {})
@@ -1874,7 +1887,7 @@ async def list_characters_v2():
         SELECT character_id, character_name, sysprompt,
                preferred_model, preferred_model_supports_images,
                model_name, model_provider, model_identifier, model_supports_images,
-               cot_start_tag, cot_end_tag, settings
+               openrouter_providers, cot_start_tag, cot_end_tag, settings
         FROM characters ORDER BY character_name
     """)
     characters = []
@@ -1890,6 +1903,7 @@ async def list_characters_v2():
             "model_provider": row["model_provider"],
             "model_identifier": row["model_identifier"],
             "model_supports_images": bool(row["model_supports_images"]) if row["model_supports_images"] is not None else None,
+            "openrouter_providers": row["openrouter_providers"],
             "cot_start_tag": row["cot_start_tag"],
             "cot_end_tag": row["cot_end_tag"],
             "settings": settings_obj
@@ -1904,7 +1918,7 @@ async def get_character_v2(character_id: str):
         SELECT character_id, character_name, sysprompt,
                preferred_model, preferred_model_supports_images,
                model_name, model_provider, model_identifier, model_supports_images,
-               cot_start_tag, cot_end_tag, settings
+               openrouter_providers, cot_start_tag, cot_end_tag, settings
         FROM characters WHERE character_id = ?
     """, (character_id,))
     row = cursor.fetchone(); conn.close()
@@ -1920,6 +1934,7 @@ async def get_character_v2(character_id: str):
         "model_provider": row["model_provider"],
         "model_identifier": row["model_identifier"],
         "model_supports_images": bool(row["model_supports_images"]) if row["model_supports_images"] is not None else None,
+        "openrouter_providers": row["openrouter_providers"],
         "cot_start_tag": row["cot_start_tag"],
         "cot_end_tag": row["cot_end_tag"],
         "settings": json.loads(row["settings"]) if row["settings"] else {}
@@ -1929,7 +1944,7 @@ async def get_character_v2(character_id: str):
 async def update_character_v2(character_id: str, update: UpdateCharacterRequest):
     """Update a character. Fields not provided are left unchanged."""
     conn = get_db_connection(); cursor = conn.cursor()
-    cursor.execute("SELECT character_id, character_name, sysprompt, preferred_model, preferred_model_supports_images, model_name, model_provider, model_identifier, model_supports_images, cot_start_tag, cot_end_tag, settings FROM characters WHERE character_id = ?", (character_id,))
+    cursor.execute("SELECT character_id, character_name, sysprompt, preferred_model, preferred_model_supports_images, model_name, model_provider, model_identifier, model_supports_images, openrouter_providers, cot_start_tag, cot_end_tag, settings FROM characters WHERE character_id = ?", (character_id,))
     existing = cursor.fetchone()
     if not existing:
         conn.close(); raise HTTPException(status_code=404, detail="Character not found")
@@ -1944,6 +1959,10 @@ async def update_character_v2(character_id: str, update: UpdateCharacterRequest)
     new_model_provider = update.model_provider if update.model_provider is not None else existing['model_provider']
     new_model_identifier = update.model_identifier if update.model_identifier is not None else existing['model_identifier']
     new_model_supports_images = existing['model_supports_images'] if update.model_supports_images is None else (1 if update.model_supports_images else 0)
+    # OpenRouter providers (allow clearing with empty string)
+    new_openrouter_providers = update.openrouter_providers if update.openrouter_providers is not None else existing['openrouter_providers']
+    if new_openrouter_providers == "":
+        new_openrouter_providers = None
     # For CoT tags, allow clearing by sending empty string (treat as explicit clear) or update with new value
     # If the field was not in the request JSON at all, it comes as None; if explicitly set to "" or a value, use that
     new_cot_start = update.cot_start_tag if update.cot_start_tag is not None else existing["cot_start_tag"]
@@ -1963,10 +1982,10 @@ async def update_character_v2(character_id: str, update: UpdateCharacterRequest)
         cursor.execute(
             """UPDATE characters SET character_name = ?, sysprompt = ?, preferred_model = ?, preferred_model_supports_images = ?,
                        model_name = ?, model_provider = ?, model_identifier = ?, model_supports_images = ?,
-                       cot_start_tag = ?, cot_end_tag = ?, settings = ? WHERE character_id = ?""",
+                       openrouter_providers = ?, cot_start_tag = ?, cot_end_tag = ?, settings = ? WHERE character_id = ?""",
             (new_name, new_sysprompt, new_pref_model, new_pref_model_supports,
              new_model_name, new_model_provider, new_model_identifier, new_model_supports_images,
-             new_cot_start, new_cot_end, json.dumps(new_settings or {}), character_id)
+             new_openrouter_providers, new_cot_start, new_cot_end, json.dumps(new_settings or {}), character_id)
         )
         conn.commit()
     except sqlite3.IntegrityError as e:

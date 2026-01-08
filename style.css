@@ -1973,7 +1973,7 @@ body.welcome-active .input-area .input-container {
     display: flex;
     align-items: center;
     gap: 6px;
-    padding: 8px 14px;
+    padding: 8px 14px 0px 14px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
@@ -1999,7 +1999,7 @@ body.welcome-active .input-area .input-container {
 }
 
 .tool-section-content {
-    padding: 12px 14px;
+    padding: 8px 14px;
     font-size: 13px;
     color: var(--text-primary);
     overflow-x: auto;

@@ -294,11 +294,34 @@ function openCharacterEditor(existing=null) {
     supportsImagesLabel.appendChild(supportsImagesCheckbox);
     supportsImagesLabel.appendChild(document.createTextNode(' Supports Images'));
     
+    // OpenRouter providers input (only shown when provider is openrouter)
+    const openrouterProvidersInput = document.createElement('input');
+    openrouterProvidersInput.type = 'text';
+    openrouterProvidersInput.placeholder = 'e.g., moonshotai, novita/fp8 (comma separated)';
+    openrouterProvidersInput.value = existing?.openrouter_providers || '';
+    const openrouterProvidersGroup = createFormGroup('OpenRouter Providers (fallback order)', openrouterProvidersInput);
+    openrouterProvidersGroup.style.display = (existing?.model_provider || 'openrouter') === 'openrouter' ? 'block' : 'none';
+    
+    // Add hint below the input
+    const providersHint = document.createElement('small');
+    providersHint.className = 'settings-hint';
+    providersHint.textContent = 'Comma-separated list of providers to use in order (first is primary, rest are fallbacks).';
+    providersHint.style.display = openrouterProvidersGroup.style.display;
+    
+    // Show/hide openrouter providers input based on provider selection
+    modelProviderSelect.addEventListener('change', () => {
+        const showProviders = modelProviderSelect.value === 'openrouter';
+        openrouterProvidersGroup.style.display = showProviders ? 'block' : 'none';
+        providersHint.style.display = showProviders ? 'block' : 'none';
+    });
+    
     // Assemble body
     body.appendChild(createFormGroup('Character Name', nameInput));
     body.appendChild(createFormGroup('System Prompt', promptArea));
     body.appendChild(createFormGroup('Provider', modelProviderSelect));
     body.appendChild(createFormGroup('Model Identifier', modelIdentifierInput));
+    body.appendChild(openrouterProvidersGroup);
+    body.appendChild(providersHint);
     body.appendChild(supportsImagesLabel);
     
     // Actions footer
@@ -307,6 +330,7 @@ function openCharacterEditor(existing=null) {
     const saveBtn = document.createElement('button'); saveBtn.className='btn-primary'; saveBtn.textContent='Save';
     saveBtn.addEventListener('click', async () => {
         const modelIdValue = modelIdentifierInput.value.trim();
+        const openrouterProvidersValue = openrouterProvidersInput.value.trim();
         const body = {
             character_name: nameInput.value.trim(),
             sysprompt: promptArea.value,
@@ -316,6 +340,7 @@ function openCharacterEditor(existing=null) {
             model_provider: modelProviderSelect.value || null,
             model_identifier: modelIdValue || null,
             model_supports_images: supportsImagesCheckbox.checked,
+            openrouter_providers: openrouterProvidersValue || null,
             cot_start_tag: null,
             cot_end_tag: null,
             settings: {}
@@ -337,6 +362,7 @@ function openCharacterEditor(existing=null) {
                         model_provider: body.model_provider,
                         model_identifier: body.model_identifier,
                         model_supports_images: body.model_supports_images,
+                        openrouter_providers: body.openrouter_providers,
                         settings: body.settings
                     };
                 }
@@ -363,6 +389,7 @@ function openCharacterEditor(existing=null) {
                     model_provider: body.model_provider,
                     model_identifier: body.model_identifier,
                     model_supports_images: body.model_supports_images,
+                    openrouter_providers: body.openrouter_providers,
                     settings: body.settings
                 };
                 state.charactersCache.push(newChar);
