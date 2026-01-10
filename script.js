@@ -30,6 +30,9 @@ const imagePreviewContainer = document.getElementById('image-preview-container')
 const chatHistoryContainer = document.querySelector('.chat-history');
 const toggleToolsBtn = document.getElementById('toggle-tools-btn');
 const toggleAutoscrollBtn = document.getElementById('toggle-autoscroll-btn');
+const toolsQuickMenu = document.getElementById('tools-quick-menu');
+const toolsQuickMenuList = document.getElementById('tools-quick-menu-list');
+const toolsQuickMenuClose = document.getElementById('tools-quick-menu-close');
 
 const settingsBtn = document.getElementById('settings-btn');
 // Settings modal (centered modal)
@@ -246,6 +249,78 @@ async function populateCharacterDropdown() {
     characterDropdownList.appendChild(createItem);
 
     requestAnimationFrame(showCharacterDropdown);
+}
+
+// --- Tools Quick Menu (right-click popup) ---
+function hideToolsQuickMenu() {
+    if (!toolsQuickMenu) return;
+    toolsQuickMenu.style.display = 'none';
+}
+
+function showToolsQuickMenu(anchorElement) {
+    if (!toolsQuickMenu) return;
+    
+    const rect = anchorElement.getBoundingClientRect();
+    const gap = 8;
+    
+    toolsQuickMenu.style.display = 'flex';
+    toolsQuickMenu.style.position = 'fixed';
+    
+    // Position above the button
+    const menuHeight = toolsQuickMenu.offsetHeight || 300;
+    const top = Math.max(10, rect.top - gap - menuHeight);
+    
+    // Align right edge with button right edge
+    const menuWidth = toolsQuickMenu.offsetWidth || 260;
+    const left = Math.max(10, rect.right - menuWidth);
+    
+    toolsQuickMenu.style.top = `${top}px`;
+    toolsQuickMenu.style.left = `${left}px`;
+}
+
+function populateToolsQuickMenu() {
+    if (!toolsQuickMenuList) return;
+    
+    toolsQuickMenuList.innerHTML = '';
+    
+    if (!state.availableTools || state.availableTools.length === 0) {
+        toolsQuickMenuList.innerHTML = '<div class="tools-quick-menu-empty">No tools available.</div>';
+        requestAnimationFrame(() => showToolsQuickMenu(toggleToolsBtn));
+        return;
+    }
+    
+    const sortedTools = [...state.availableTools].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    
+    sortedTools.forEach(tool => {
+        const item = document.createElement('label');
+        item.className = 'tools-quick-menu-item';
+        
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = state.enabledToolNames.has(tool.name);
+        checkbox.addEventListener('change', () => {
+            if (checkbox.checked) {
+                state.enabledToolNames.add(tool.name);
+            } else {
+                state.enabledToolNames.delete(tool.name);
+            }
+            persistEnabledToolNames();
+            updateEffectiveSystemPrompt();
+            // Sync with settings modal if open
+            renderToolsCheckboxList(document.getElementById('tools-checkbox-list'));
+        });
+        
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'tools-quick-menu-item-name';
+        nameSpan.textContent = tool.name;
+        nameSpan.title = tool.description || tool.name;
+        
+        item.appendChild(checkbox);
+        item.appendChild(nameSpan);
+        toolsQuickMenuList.appendChild(item);
+    });
+    
+    requestAnimationFrame(() => showToolsQuickMenu(toggleToolsBtn));
 }
 
 function openCharacterEditor(existing=null) {
@@ -861,12 +936,6 @@ function reconcileEnabledToolSelection() {
     persistEnabledToolNames();
 }
 
-function updateToolsCheckboxDisableState() {
-    document.querySelectorAll('#tools-checkbox-list input[type="checkbox"]').forEach(cb => {
-        cb.disabled = !state.toolsEnabled;
-    });
-}
-
 function renderToolsCheckboxList(container) {
     if (!container) return;
 
@@ -885,7 +954,6 @@ function renderToolsCheckboxList(container) {
         checkbox.type = 'checkbox';
         checkbox.value = tool.name;
         checkbox.checked = state.enabledToolNames.has(tool.name);
-        checkbox.disabled = !state.toolsEnabled;
         checkbox.addEventListener('change', async () => {
             if (checkbox.checked) {
                 state.enabledToolNames.add(tool.name);
@@ -1303,13 +1371,11 @@ async function fetchToolsMetadata() {
     state.availableTools = tools;
     reconcileEnabledToolSelection();
     renderToolsCheckboxList(document.getElementById('tools-checkbox-list'));
-    updateToolsCheckboxDisableState();
     } catch (error) {
         console.error('Error fetching tools metadata:', error);
     state.availableTools = [];
     addSystemMessage('Failed to load tools metadata from backend.', 'warning');
     renderToolsCheckboxList(document.getElementById('tools-checkbox-list'));
-    updateToolsCheckboxDisableState();
     }
 }
 
@@ -2975,17 +3041,18 @@ function activateSettingsTab(tabName) {
     localStorage.setItem('settingsActiveTab', tabName);
 }
 
-function updateToolsTabVisibility() {
-    // Hide/show the Tools tab button based on whether tools are enabled
-    const toolsTabBtn = document.querySelector('.settings-tab-btn[data-tab="tools"]');
-    if (toolsTabBtn) {
-        toolsTabBtn.style.display = state.toolsEnabled ? '' : 'none';
+// Syncs the toolsEnabled state across all UI elements
+function syncToolsToggles() {
+    // Update input button state
+    if (toggleToolsBtn) {
+        toggleToolsBtn.classList.toggle('active', state.toolsEnabled);
     }
-    // If tools are disabled and we're on the tools tab, switch to main
-    const lastTab = localStorage.getItem('settingsActiveTab');
-    if (!state.toolsEnabled && lastTab === 'tools') {
-        activateSettingsTab('main');
-    }
+    // Update main settings checkbox
+    const mainCheckbox = document.getElementById('main-toggle-tools');
+    if (mainCheckbox) mainCheckbox.checked = state.toolsEnabled;
+    // Update tools tab checkbox
+    const toolsTabCheckbox = document.getElementById('tools-tab-toggle');
+    if (toolsTabCheckbox) toolsTabCheckbox.checked = state.toolsEnabled;
 }
 
 function refreshSettingsModalState() {
@@ -3015,8 +3082,7 @@ function refreshSettingsModalState() {
             state.toolsEnabled = cbTools.checked;
             localStorage.setItem('toolsEnabled', state.toolsEnabled);
             updateEffectiveSystemPrompt();
-            updateToolsCheckboxDisableState();
-            updateToolsTabVisibility();
+            syncToolsToggles();
             addSystemMessage(`Tools ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
         };
     }
@@ -3069,10 +3135,21 @@ function refreshSettingsModalState() {
         };
     }
 
+    // Tools tab toggle (in Tools panel)
+    const toolsTabToggle = document.getElementById('tools-tab-toggle');
+    if (toolsTabToggle) {
+        toolsTabToggle.checked = !!state.toolsEnabled;
+        toolsTabToggle.onchange = () => {
+            state.toolsEnabled = toolsTabToggle.checked;
+            localStorage.setItem('toolsEnabled', state.toolsEnabled);
+            updateEffectiveSystemPrompt();
+            syncToolsToggles();
+            addSystemMessage(`Tools ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
+        };
+    }
+
     // Tools list
     renderToolsCheckboxList(toolsListContainer);
-    updateToolsCheckboxDisableState();
-    updateToolsTabVisibility();
 
     // Restore last active tab (fallback to first button)
     const lastTab = localStorage.getItem('settingsActiveTab');
@@ -3093,20 +3170,34 @@ function setupToolToggle() {
             localStorage.setItem('toolsEnabled', state.toolsEnabled);
             console.log("Tools enabled:", state.toolsEnabled);
             updateEffectiveSystemPrompt();
-            const settingsCheckbox = document.getElementById('main-toggle-tools');
-            if (settingsCheckbox) settingsCheckbox.checked = state.toolsEnabled;
-            updateToolsCheckboxDisableState();
-            updateToolsTabVisibility();
+            syncToolsToggles();
             addSystemMessage(`Tools ${state.toolsEnabled ? 'enabled' : 'disabled'}.`, 'info');
+        });
+        
+        // Right-click to open tools quick menu
+        toggleToolsBtn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            populateToolsQuickMenu();
         });
     } else {
         console.warn("Tools toggle button not found; using saved toolsEnabled state only.");
     }
+    
+    // Tools quick menu close button
+    if (toolsQuickMenuClose) {
+        toolsQuickMenuClose.addEventListener('click', hideToolsQuickMenu);
+    }
+    
+    // Close tools quick menu when clicking outside
+    document.addEventListener('click', (e) => {
+        if (toolsQuickMenu && toolsQuickMenu.style.display !== 'none') {
+            if (!toolsQuickMenu.contains(e.target) && e.target !== toggleToolsBtn) {
+                hideToolsQuickMenu();
+            }
+        }
+    });
 
-    const settingsCheckbox = document.getElementById('main-toggle-tools');
-    if (settingsCheckbox) settingsCheckbox.checked = state.toolsEnabled;
-    updateToolsCheckboxDisableState();
-    updateToolsTabVisibility();
+    syncToolsToggles();
     updateEffectiveSystemPrompt();
 }
 

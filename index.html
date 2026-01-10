@@ -34,6 +34,18 @@
             <div class="character-dropdown-loading">Loading characters…</div>
         </div>
     </div>
+    <!-- Tools Quick Menu (right-click on tools button) -->
+    <div class="tools-quick-menu" id="tools-quick-menu" style="display: none;">
+        <div class="tools-quick-menu-header">
+            <span>Tools</span>
+            <button class="tools-quick-menu-close" id="tools-quick-menu-close">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
+        <div class="tools-quick-menu-list" id="tools-quick-menu-list">
+            <div class="tools-quick-menu-loading">Loading tools…</div>
+        </div>
+    </div>
     <button class="base-button new-chat-btn" id="new-chat-btn">
             <i class="bi bi-plus-lg"></i>
     </button>
@@ -123,10 +135,6 @@
                     <div class="settings-modal-panels">
                     <div class="settings-tab-panel active" data-panel="main">
                         <div class="settings-row">
-                            <label for="main-toggle-tools">Enable Tools</label>
-                            <input type="checkbox" id="main-toggle-tools" />
-                        </div>
-                        <div class="settings-row">
                             <label for="main-toggle-autoscroll">Autoscroll During Generation</label>
                             <input type="checkbox" id="main-toggle-autoscroll" />
                         </div>
@@ -200,11 +208,15 @@
                         </div>
                     </div>
                     <div class="settings-tab-panel" data-panel="tools">
+                        <div class="settings-row tools-master-toggle">
+                            <label for="tools-tab-toggle">Enable Tool Calls</label>
+                            <input type="checkbox" id="tools-tab-toggle" />
+                        </div>
                         <p class="settings-section-title">Available Tools</p>
                         <div id="tools-checkbox-list" class="tools-checkbox-list">
                             <div class="tools-list-empty">Loading tools…</div>
                         </div>
-                        <small class="settings-hint">Toggle individual tools. These apply when tool calls are enabled.</small>
+                        <small class="settings-hint">Select which tools are available when tool calls are enabled.</small>
                     </div>
                     <div class="settings-tab-panel" data-panel="characters">
                         <div class="characters-manager">

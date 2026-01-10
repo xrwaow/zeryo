@@ -2326,6 +2326,108 @@ body.welcome-active .input-area .input-container {
     background: color-mix(in srgb, var(--error-color) 10%, transparent);
 }
 
+/* Tools Quick Menu (right-click popup on tools button) */
+.tools-quick-menu {
+    position: fixed;
+    min-width: 260px;
+    width: auto;
+    max-width: min(340px, calc(100vw - 32px));
+    max-height: 400px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: var(--border-radius-lg);
+    display: flex;
+    flex-direction: column;
+    z-index: 1001;
+    overflow: hidden;
+}
+
+.tools-quick-menu-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 14px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border-color);
+    font-weight: 600;
+    font-size: 13px;
+    flex-shrink: 0;
+}
+
+.tools-quick-menu-close {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 16px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--border-radius-sm);
+    transition: all .2s ease;
+}
+
+.tools-quick-menu-close:hover {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+}
+
+.tools-quick-menu-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px;
+}
+
+.tools-quick-menu-loading {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.tools-quick-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: var(--border-radius-md);
+    cursor: pointer;
+    transition: background .15s ease;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.tools-quick-menu-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.tools-quick-menu-item input[type="checkbox"] {
+    flex-shrink: 0;
+}
+
+.tools-quick-menu-item-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tools-quick-menu-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.tools-master-toggle {
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-color);
+}
+
 /* Character Selection Dropdown (in input area) */
 .character-dropdown {
     position: fixed;
@@ -2336,7 +2438,6 @@ body.welcome-active .input-area .input-container {
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: var(--border-radius-lg);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
     display: flex;
     flex-direction: column;
     z-index: 1000;
