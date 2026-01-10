@@ -449,7 +449,6 @@ const state = {
     streamController: null,
     currentAssistantMessageDiv: null,
     currentCharacterId: null,
-    streamingThinkTimer: { intervalId: null, startTime: null },
 
     activeSystemPrompt: null, // Store the actual character prompt text
     effectiveSystemPrompt: null, // Character prompt + optional tools prompt
@@ -3656,13 +3655,6 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         return;
     }
 
-    // Reset timer state at the beginning of a new generation
-    if (state.streamingThinkTimer.intervalId) {
-        clearInterval(state.streamingThinkTimer.intervalId);
-    }
-    state.streamingThinkTimer = { intervalId: null, startTime: null };
-
-
     setGenerationInProgressUI(true);
     state.currentAssistantMessageDiv = targetContentDiv;
     targetContentDiv.classList.add('streaming');
@@ -3676,20 +3668,31 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     targetContentDiv.querySelector('.generation-stopped-indicator')?.remove();
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
-    // Track streaming content as ordered segments (thinking blocks and content blocks interspersed)
-    // Each segment is { type: 'thinking' | 'content', text: string }
-    let streamingSegments = initialText ? [{ type: 'content', text: initialText }] : [];
-    let isCurrentlyThinking = false;    // Whether we're currently receiving thinking chunks
+    // === INCREMENTAL STREAMING ARCHITECTURE ===
+    // Each segment tracks: type, text, completed (frozen), element (DOM reference)
+    // Completed blocks are never re-rendered, preserving user interactions
+    let streamingSegments = initialText ? [{ type: 'content', text: initialText, completed: false, element: null }] : [];
+    let isCurrentlyThinking = false;
     let lastRenderTime = 0;
     let pendingRenderTimeout = null;
-    const RENDER_THROTTLE_MS = 50; // Only re-render every 50ms max
+    const RENDER_THROTTLE_MS = 50;
 
     // Helper to get/create the current segment of expected type
+    // When type changes, mark previous segment as completed
     const getCurrentSegment = (type) => {
-        if (streamingSegments.length === 0 || streamingSegments[streamingSegments.length - 1].type !== type) {
-            streamingSegments.push({ type, text: '' });
+        const lastSeg = streamingSegments.length > 0 ? streamingSegments[streamingSegments.length - 1] : null;
+        
+        if (!lastSeg || lastSeg.type !== type) {
+            // Mark previous segment as completed (frozen)
+            if (lastSeg && !lastSeg.completed) {
+                lastSeg.completed = true;
+            }
+            // Create new segment
+            const newSeg = { type, text: '', completed: false, element: null };
+            streamingSegments.push(newSeg);
+            return newSeg;
         }
-        return streamingSegments[streamingSegments.length - 1];
+        return lastSeg;
     };
 
     const updateStreamingMinHeight = () => {
@@ -3712,138 +3715,140 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         updateScrollButtonVisibility();
     });
 
-    // Helper to build combined content for rendering (all segments in order)
-    // Returns an object with { text: string, blocks: array } for hybrid rendering
-    const buildCombinedContent = () => {
-        // We now return the segments directly for the new rendering approach
-        return streamingSegments;
+    // Create a think block DOM element
+    // Toggle is handled by delegated event listener on messagesWrapper
+    const createThinkBlockElement = () => {
+        const thinkBlockWrapper = document.createElement('div');
+        thinkBlockWrapper.className = 'think-block collapsed';
+        thinkBlockWrapper.dataset.tempId = 'streaming-think-block';
+
+        const header = document.createElement('div');
+        header.className = 'think-header';
+        header.innerHTML = `
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <div class="think-header-actions">
+                <button class="think-block-toggle" title="Expand thought process">
+                    <i class="bi bi-chevron-down"></i>
+                </button>
+            </div>`;
+        
+        thinkBlockWrapper.appendChild(header);
+
+        const thinkContentDiv = document.createElement('div');
+        thinkContentDiv.className = 'think-content';
+        thinkBlockWrapper.appendChild(thinkContentDiv);
+
+        return thinkBlockWrapper;
     };
 
-    // Get all thinking content combined (for timer display and rendering)
-    const getAllThinkingContent = () => {
-        return streamingSegments.filter(s => s.type === 'thinking').map(s => s.text).join('\n\n');
+    // Create a content wrapper element for markdown content
+    const createContentElement = () => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'streaming-content-segment';
+        wrapper.dataset.streamingActive = 'true';
+        return wrapper;
     };
 
-    // Get all content (non-thinking, non-tool) combined
-    const getAllContent = () => {
-        return streamingSegments.filter(s => s.type === 'content').map(s => s.text).join('');
-    };
-
-    // Get all tool segments for rendering
-    const getToolSegments = () => {
-        return streamingSegments.filter(s => s.type === 'tool_call' || s.type === 'tool_result');
-    };
-
-    const hasAnyThinking = () => streamingSegments.some(s => s.type === 'thinking' && s.text.length > 0);
-    const hasAnyToolCalls = () => streamingSegments.some(s => s.type === 'tool_call' || s.type === 'tool_result');
-
-    // Unified render function for streaming content (handles thinking, content, tool_call, tool_result)
-    const doRender = () => {
+    // INCREMENTAL RENDER: Only update active (non-completed) segments
+    const renderIncremental = () => {
         if (!targetContentDiv || state.streamController?.signal.aborted) return;
-        
-        const segments = buildCombinedContent();
-        const hasThinking = hasAnyThinking();
-        const allThinkingContent = getAllThinkingContent();
-        const allContent = getAllContent();
-        const hasTools = hasAnyToolCalls();
 
-        // Timer logic for think blocks
-        if (hasThinking && isCurrentlyThinking && state.streamingThinkTimer.intervalId === null) {
-            state.streamingThinkTimer.startTime = Date.now();
-            state.streamingThinkTimer.intervalId = setInterval(() => {
-                if (state.streamingThinkTimer.intervalId && state.currentAssistantMessageDiv) {
-                    const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                    if (timerEl) {
-                        const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
-                        timerEl.textContent = `${elapsed}s`;
-                    }
-                } else if (state.streamingThinkTimer.intervalId) {
-                    clearInterval(state.streamingThinkTimer.intervalId);
-                }
-            }, 100);
-        } else if (hasThinking && !isCurrentlyThinking && state.streamingThinkTimer.intervalId !== null) {
-            clearInterval(state.streamingThinkTimer.intervalId);
-            if (state.currentAssistantMessageDiv) {
-                const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                if (timerEl && state.streamingThinkTimer.startTime) {
-                    const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
-                    timerEl.textContent = `${elapsed}s`;
-                }
-            }
-            state.streamingThinkTimer = { intervalId: null, startTime: null };
-        }
-
-        // Clear and rebuild the content div with segments
-        const savedCursor = targetContentDiv.querySelector('.pulsing-cursor');
-        targetContentDiv.innerHTML = '';
-        
-        // Render each segment in order
-        for (const seg of segments) {
-            if (seg.type === 'thinking') {
-                // Render thinking block
-                const isLastThinkingSegment = segments.filter(s => s.type === 'thinking').indexOf(seg) === segments.filter(s => s.type === 'thinking').length - 1;
-                const thinkBlockWrapper = document.createElement('div');
-                thinkBlockWrapper.className = `think-block ${isCurrentlyThinking && isLastThinkingSegment ? '' : ''}`;
-                thinkBlockWrapper.dataset.tempId = 'streaming-think-block';
-
-                const header = document.createElement('div');
-                header.className = 'think-header';
-                header.innerHTML = `
-                    <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
-                    <span class="think-timer"></span>
-                    <div class="think-header-actions">
-                        <button class="think-block-toggle" title="Collapse thought process">
-                            <i class="bi bi-chevron-up"></i>
-                        </button>
-                    </div>`;
-                thinkBlockWrapper.appendChild(header);
-
-                const thinkContentDiv = document.createElement('div');
-                thinkContentDiv.className = 'think-content';
-                thinkContentDiv.innerHTML = marked.parse(seg.text || '');
-                thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
-                thinkBlockWrapper.appendChild(thinkContentDiv);
-                
-                targetContentDiv.appendChild(thinkBlockWrapper);
-            } else if (seg.type === 'content') {
-                // Render content block
-                if (seg.text) {
-                    const contentWrapper = document.createElement('div');
-                    contentWrapper.innerHTML = renderMarkdown(seg.text);
-                    while (contentWrapper.firstChild) {
-                        targetContentDiv.appendChild(contentWrapper.firstChild);
-                    }
-                }
-            } else if (seg.type === 'tool_call') {
-                // Render tool call using the unified tool group renderer
-                // First, find matching result if exists
-                const matchingResult = segments.find(s => 
-                    s.type === 'tool_result' && 
-                    (s.id === seg.id || (s.name === seg.name && !s.rendered))
-                );
-                if (matchingResult) {
-                    matchingResult.rendered = true;
-                }
-                const toolData = { name: seg.name, id: seg.id, payloadInfo: { arguments: seg.arguments, raw: JSON.stringify(seg.arguments) } };
-                const resultData = matchingResult ? { name: matchingResult.name, body: matchingResult.result || '', status: matchingResult.error ? 'error' : null } : null;
-                renderToolGroup(targetContentDiv, toolData, resultData);
-            } else if (seg.type === 'tool_result' && !seg.rendered) {
-                // Render orphan tool result (shouldn't normally happen)
-                const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
-                renderToolGroup(targetContentDiv, null, resultData);
-            }
-        }
-        
-        applyCodeBlockDefaults(targetContentDiv);
-        finalizeStreamingCodeBlocks(targetContentDiv);
-        
+        // Remove cursor temporarily
         targetContentDiv.querySelector('.pulsing-cursor')?.remove();
+
+        // Process each segment
+        for (const seg of streamingSegments) {
+            // If segment has no element yet, create and append it
+            if (!seg.element) {
+                if (seg.type === 'thinking') {
+                    seg.element = createThinkBlockElement();
+                    targetContentDiv.appendChild(seg.element);
+                } else if (seg.type === 'content') {
+                    seg.element = createContentElement();
+                    targetContentDiv.appendChild(seg.element);
+                } else if (seg.type === 'tool_call') {
+                    // Find matching result if exists
+                    const matchingResult = streamingSegments.find(s => 
+                        s.type === 'tool_result' && 
+                        (s.id === seg.id || (s.name === seg.name && !s.rendered))
+                    );
+                    if (matchingResult) {
+                        matchingResult.rendered = true;
+                        seg.hasResult = true; // Mark this call as having its result
+                    }
+                    const toolData = { name: seg.name, id: seg.id, payloadInfo: { arguments: seg.arguments, raw: JSON.stringify(seg.arguments) } };
+                    const resultData = matchingResult ? { name: matchingResult.name, body: matchingResult.result || '', status: matchingResult.error ? 'error' : null } : null;
+                    
+                    // Create a wrapper for the tool group
+                    const toolWrapper = document.createElement('div');
+                    toolWrapper.className = 'streaming-tool-segment';
+                    targetContentDiv.appendChild(toolWrapper);
+                    renderToolGroup(toolWrapper, toolData, resultData);
+                    seg.element = toolWrapper;
+                    seg.completed = true; // Tool calls are immediately completed
+                } else if (seg.type === 'tool_result' && !seg.rendered) {
+                    // Try to find and update the matching tool_call element
+                    // Prefer ID match; for name match, find one that hasn't had result applied yet
+                    let matchingCall = null;
+                    if (seg.id) {
+                        matchingCall = streamingSegments.find(s => 
+                            s.type === 'tool_call' && s.element && s.id === seg.id
+                        );
+                    }
+                    if (!matchingCall) {
+                        matchingCall = streamingSegments.find(s => 
+                            s.type === 'tool_call' && s.element && s.name === seg.name && !s.hasResult
+                        );
+                    }
+                    if (matchingCall && matchingCall.element) {
+                        // Re-render the existing tool wrapper with the result
+                        const toolData = { name: matchingCall.name, id: matchingCall.id, payloadInfo: { arguments: matchingCall.arguments, raw: JSON.stringify(matchingCall.arguments) } };
+                        const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
+                        matchingCall.element.innerHTML = '';
+                        renderToolGroup(matchingCall.element, toolData, resultData);
+                        matchingCall.hasResult = true; // Mark this call as having its result
+                        seg.element = matchingCall.element;
+                        seg.rendered = true;
+                        seg.completed = true;
+                        continue; // Don't create a new wrapper
+                    }
+                    // Orphan tool result - no matching call found
+                    const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
+                    const toolWrapper = document.createElement('div');
+                    toolWrapper.className = 'streaming-tool-segment';
+                    targetContentDiv.appendChild(toolWrapper);
+                    renderToolGroup(toolWrapper, null, resultData);
+                    seg.element = toolWrapper;
+                    seg.completed = true;
+                }
+            }
+
+            // Only update content if segment is NOT completed
+            if (!seg.completed && seg.element) {
+                if (seg.type === 'thinking') {
+                    // Skip updating if user has manually collapsed this block
+                    if (seg.element.dataset.userToggled === 'true' && seg.element.classList.contains('collapsed')) continue;
+                    
+                    const thinkContentDiv = seg.element.querySelector('.think-content');
+                    if (thinkContentDiv) {
+                        thinkContentDiv.innerHTML = marked.parse(seg.text || '');
+                        thinkContentDiv.querySelectorAll('pre').forEach(pre => enhanceCodeBlock(pre));
+                    }
+                } else if (seg.type === 'content') {
+                    seg.element.innerHTML = renderMarkdown(seg.text);
+                    applyCodeBlockDefaults(seg.element);
+                }
+            }
+        }
+
+        // Re-add cursor at the end
         if (!state.streamController?.signal.aborted) {
             targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
         }
+
         updateStreamingMinHeight();
         if (state.autoscrollEnabled) requestAutoScroll();
-        
+
         lastRenderTime = Date.now();
     };
 
@@ -3858,10 +3863,82 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         }
         
         if (timeSinceLastRender >= RENDER_THROTTLE_MS) {
-            doRender();
+            renderIncremental();
         } else {
-            pendingRenderTimeout = setTimeout(doRender, RENDER_THROTTLE_MS - timeSinceLastRender);
+            pendingRenderTimeout = setTimeout(renderIncremental, RENDER_THROTTLE_MS - timeSinceLastRender);
         }
+    };
+
+    // Build final raw text from streaming segments for full re-render
+    const buildFinalRawText = () => {
+        const cotTags = getCotTagPairs();
+        const defaultStart = cotTags.length > 0 ? cotTags[0].start : '<think>';
+        const defaultEnd = cotTags.length > 0 ? cotTags[0].end : '</think>';
+        
+        let rawText = '';
+        for (const seg of streamingSegments) {
+            if (seg.type === 'thinking' && seg.text) {
+                rawText += `${defaultStart}\n${seg.text}\n${defaultEnd}\n`;
+            } else if (seg.type === 'content' && seg.text) {
+                rawText += seg.text;
+            } else if (seg.type === 'tool_call') {
+                const argsStr = seg.arguments ? JSON.stringify(seg.arguments, null, 2) : '';
+                rawText += `<tool_call name="${seg.name}"${seg.id ? ` id="${seg.id}"` : ''}>\n${argsStr}\n</tool_call>\n`;
+            } else if (seg.type === 'tool_result') {
+                const statusAttr = seg.error ? ' status="error"' : '';
+                rawText += `<tool_result name="${seg.name}"${statusAttr}>\n${seg.result || ''}\n</tool_result>\n`;
+            }
+        }
+        return rawText;
+    };
+
+    // Add message actions to the placeholder message div
+    const addMessageActions = () => {
+        const messageDiv = targetContentDiv?.closest('.message');
+        if (!messageDiv) return;
+        
+        let avatarActionsDiv = messageDiv.querySelector('.message-avatar-actions');
+        if (!avatarActionsDiv) {
+            avatarActionsDiv = document.createElement('div');
+            avatarActionsDiv.className = 'message-avatar-actions';
+            messageDiv.appendChild(avatarActionsDiv);
+        }
+        avatarActionsDiv.classList.remove('placeholder-actions');
+        
+        // Add basic action buttons if not already present
+        if (!avatarActionsDiv.querySelector('.message-actions')) {
+            const actionsDiv = document.createElement('div');
+            actionsDiv.className = 'message-actions';
+            
+            const copyBtn = document.createElement('button');
+            copyBtn.className = 'message-action-btn';
+            copyBtn.innerHTML = '<i class="bi bi-clipboard"></i>';
+            copyBtn.title = 'Copy message text';
+            copyBtn.addEventListener('click', () => copyMessageContent(targetContentDiv, copyBtn));
+            actionsDiv.appendChild(copyBtn);
+            
+            avatarActionsDiv.appendChild(actionsDiv);
+        }
+    };
+
+    // Full render for when streaming ends - uses same buildContentHtml as loadChat
+    const doFullRender = () => {
+        // Build raw text from accumulated segments
+        const finalRawText = buildFinalRawText();
+        
+        // Capture collapse states before full re-render
+        const savedStates = captureCollapseStates(targetContentDiv);
+        
+        // Full re-render using the same function as loadChat
+        buildContentHtml(targetContentDiv, finalRawText);
+        
+        // Re-apply collapse states
+        if (savedStates) {
+            applyCollapseStates(targetContentDiv, savedStates);
+        }
+        
+        // Add message actions (copy button, etc.)
+        addMessageActions();
     };
 
     try {
@@ -3884,13 +3961,13 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             (name, args) => {
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-                doRender();
+                renderIncremental();
             },
             // onToolEnd
             (name, result, error) => {
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
-                doRender();
+                renderIncremental();
             },
             // onComplete
             async () => {
@@ -3905,9 +3982,8 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 if (targetContentDiv) {
                     targetContentDiv.classList.remove('streaming');
                     targetContentDiv.querySelector('.pulsing-cursor')?.remove();
-                    // Final render with all segments
-                    doRender();
-                    targetContentDiv.querySelector('.pulsing-cursor')?.remove(); // Remove cursor after final render
+                    // Full re-render using buildContentHtml (same as loadChat uses)
+                    doFullRender();
                 }
 
                 if (state.autoscrollEnabled) requestAutoScroll();
@@ -3948,6 +4024,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             // onError
             async (error, isAbort) => {
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
+                
                 const rowBeingStreamedTo = targetContentDiv ? targetContentDiv.closest('.message-row') : null;
                 const isPlaceholderRow = rowBeingStreamedTo ? rowBeingStreamedTo.classList.contains('placeholder') : false;
 
@@ -4018,7 +4095,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 console.log(`Tool pending confirmation: ${name}`, args);
                 
                 // Render accumulated content first
-                doRender();
+                renderIncremental();
                 
                 // Find the tool call block that was just rendered and ensure it shows confirmation UI
                 const toolBlocks = targetContentDiv.querySelectorAll('.tool-group, .tool-call-block');
@@ -4049,25 +4126,35 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             () => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
                 isCurrentlyThinking = false;
+                // Mark the current thinking segment as completed
+                const thinkSeg = streamingSegments.find(s => s.type === 'thinking' && !s.completed);
+                if (thinkSeg) {
+                    thinkSeg.completed = true;
+                }
                 triggerRender();
             },
             // onToolCall - new JSON-based tool call event
             (name, id, args) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
                 console.log(`Tool call received: ${name} (${id})`, args);
+                // Mark any active content segment as completed before adding tool
+                const lastSeg = streamingSegments.length > 0 ? streamingSegments[streamingSegments.length - 1] : null;
+                if (lastSeg && !lastSeg.completed) {
+                    lastSeg.completed = true;
+                }
                 // Add tool call as a segment for rendering
-                streamingSegments.push({ type: 'tool_call', name, id, arguments: args });
+                streamingSegments.push({ type: 'tool_call', name, id, arguments: args, completed: false, element: null });
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
-                doRender();
+                renderIncremental();
             },
             // onToolResult - new JSON-based tool result event
             (name, id, result, error) => {
                 if (!targetContentDiv || state.streamController?.signal.aborted || state.currentAssistantMessageDiv !== targetContentDiv) return;
                 console.log(`Tool result received: ${name} (${id})`, { result: result?.substring?.(0, 100), error });
                 // Add tool result as a segment for rendering
-                streamingSegments.push({ type: 'tool_result', name, id, result, error });
+                streamingSegments.push({ type: 'tool_result', name, id, result, error, completed: false, element: null });
                 if (pendingRenderTimeout) { clearTimeout(pendingRenderTimeout); pendingRenderTimeout = null; }
-                doRender();
+                renderIncremental();
             }
         );
     } catch (error) { // Catch errors from streamFromBackend setup itself (e.g. network error before stream starts)
@@ -4122,19 +4209,6 @@ function setGenerationInProgressUI(inProgress) {
         sendButton.disabled = true;
         sendButton.innerHTML = '<div class="spinner"></div>';
     } else {
-        // Stop and clear any active think timer
-        if (state.streamingThinkTimer.intervalId) {
-            clearInterval(state.streamingThinkTimer.intervalId);
-            if (state.currentAssistantMessageDiv) {
-                const timerEl = state.currentAssistantMessageDiv.querySelector('.think-timer');
-                if (timerEl && state.streamingThinkTimer.startTime) {
-                    const elapsed = ((Date.now() - state.streamingThinkTimer.startTime) / 1000).toFixed(1);
-                    timerEl.textContent = `${elapsed}s`;
-                }
-            }
-            state.streamingThinkTimer = { intervalId: null, startTime: null };
-        }
-
         stopButton.style.display = 'none';
         sendButton.disabled = false;
         sendButton.innerHTML = '<i class="bi bi-arrow-up"></i>';

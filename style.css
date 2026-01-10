@@ -1219,7 +1219,8 @@ body.welcome-active .input-area .input-container {
     border-radius: var(--border-radius-sm);
     border: 1px solid var(--think-block-border);
     background-color: var(--think-block-bg);
-    overflow: hidden; /* Ensure header rounding applies */
+    /* No overflow:hidden - allows sticky header to work */
+    position: relative;
 }
 
 .think-header {
@@ -1232,6 +1233,14 @@ body.welcome-active .input-area .input-container {
     background-color: var(--think-block-header-bg);
     color: var(--think-block-header-text);
     cursor: pointer;
+    /* Sticky positioning like code-header */
+    position: sticky;
+    top: 0px;
+    z-index: 10;
+    border-top-left-radius: var(--border-radius-sm);
+    border-top-right-radius: var(--border-radius-sm);
+    /* Ensure clickable */
+    user-select: none;
 }
 
 .think-header-title {
@@ -1281,6 +1290,10 @@ body.welcome-active .input-area .input-container {
     font-size: 13px; /* Slightly smaller like tool content */
     color: var(--text-primary);
     /* Code blocks inside will be handled by highlight.js styling */
+    /* Background needed for clean appearance below sticky header */
+    background-color: var(--think-block-bg);
+    border-bottom-left-radius: var(--border-radius-sm);
+    border-bottom-right-radius: var(--border-radius-sm);
 }
 
 /* Collapsed state for Think Block */

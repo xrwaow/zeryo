@@ -194,13 +194,13 @@ def scrape(url: str) -> str:
     if not text:
         return "No extractable content found at the provided URL."
 
-    if len(text) <= 4096:
+    if len(text) <= 8192:
         return text
 
     # Provide a short summary when the content exceeds the maximum length.
-    excerpt = text[:100].strip()
+    excerpt = text[:8192].strip()
     summary_lines = [
-        "Summary (content truncated because it exceeded 4096 characters)."
+        "Summary (content truncated because it exceeded 8192 characters)."
     ]
     if description:
         summary_lines.append(f"Description: {description}")
