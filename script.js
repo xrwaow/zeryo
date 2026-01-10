@@ -1754,6 +1754,135 @@ function consolidateAssistantMessageGroups() {
             }
         });
     });
+    
+    // After consolidating rows, merge consecutive merged blocks within each consolidated group
+    mergeMergedBlocksInGroups();
+}
+
+/**
+ * Merges consecutive .merged-block elements within consolidated assistant groups.
+ * This handles the case where multiple assistant messages each have their own merged block,
+ * and we want them all combined into one merged block.
+ */
+function mergeMergedBlocksInGroups() {
+    if (!messagesWrapper) return;
+    
+    // Process each message content area
+    messagesWrapper.querySelectorAll('.message-content').forEach(contentDiv => {
+        // Find all top-level merged blocks and standalone think/tool blocks
+        const mergeableItems = [];
+        
+        // Walk through children and collect items that should be merged
+        const children = Array.from(contentDiv.children);
+        
+        for (const child of children) {
+            // Check if this is a merged block
+            if (child.classList.contains('merged-block')) {
+                mergeableItems.push({ type: 'merged-block', element: child });
+            }
+            // Check if this is a standalone think block (not inside a merged block)
+            else if (child.classList.contains('think-block')) {
+                mergeableItems.push({ type: 'think', element: child });
+            }
+            // Check if this is a standalone tool group (not inside a merged block)
+            else if (child.classList.contains('tool-group') || child.classList.contains('streaming-tool-segment')) {
+                mergeableItems.push({ type: 'tool', element: child });
+            }
+            // Check inside assistant-group-segment wrappers
+            else if (child.classList.contains('assistant-group-segment')) {
+                const segmentChildren = Array.from(child.children);
+                for (const segChild of segmentChildren) {
+                    if (segChild.classList.contains('merged-block')) {
+                        mergeableItems.push({ type: 'merged-block', element: segChild, wrapper: child });
+                    } else if (segChild.classList.contains('think-block')) {
+                        mergeableItems.push({ type: 'think', element: segChild, wrapper: child });
+                    } else if (segChild.classList.contains('tool-group') || segChild.classList.contains('streaming-tool-segment')) {
+                        mergeableItems.push({ type: 'tool', element: segChild, wrapper: child });
+                    }
+                }
+            }
+        }
+        
+        // If we have 2+ mergeable items, combine them into one merged block
+        if (mergeableItems.length < 2) return;
+        
+        // Check if there are any actual merged blocks or multiple items to combine
+        const hasMultipleMergeableContent = mergeableItems.length >= 2;
+        if (!hasMultipleMergeableContent) return;
+        
+        // Calculate combined stats
+        let thinkCount = 0;
+        let toolCount = 0;
+        const allInnerElements = [];
+        
+        for (const item of mergeableItems) {
+            if (item.type === 'merged-block') {
+                // Extract contents from existing merged block
+                const mergedContent = item.element.querySelector('.merged-block-content');
+                if (mergedContent) {
+                    Array.from(mergedContent.children).forEach(child => {
+                        allInnerElements.push(child);
+                        if (child.classList.contains('think-block')) thinkCount++;
+                        else if (child.classList.contains('tool-group') || child.classList.contains('streaming-tool-segment')) toolCount++;
+                    });
+                }
+            } else if (item.type === 'think') {
+                allInnerElements.push(item.element);
+                thinkCount++;
+            } else if (item.type === 'tool') {
+                allInnerElements.push(item.element);
+                toolCount++;
+            }
+        }
+        
+        if (allInnerElements.length < 2) return;
+        
+        // Create a new combined merged block
+        const combinedMergedBlock = document.createElement('div');
+        combinedMergedBlock.className = 'merged-block collapsed';
+        
+        const parts = [];
+        if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
+        if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
+        const headerText = parts.join(', ') || 'Operations';
+        
+        const header = document.createElement('div');
+        header.className = 'merged-block-header';
+        header.innerHTML = `
+            <i class="bi bi-check-circle merged-block-icon"></i>
+            <span class="merged-block-status">${headerText}</span>
+            <button class="merged-block-toggle" title="Expand details">
+                <i class="bi bi-chevron-down"></i>
+            </button>
+        `;
+        combinedMergedBlock.appendChild(header);
+        
+        const content = document.createElement('div');
+        content.className = 'merged-block-content';
+        allInnerElements.forEach(el => content.appendChild(el));
+        combinedMergedBlock.appendChild(content);
+        
+        // Find the first item's position to insert the combined block
+        const firstItem = mergeableItems[0];
+        const insertTarget = firstItem.wrapper || firstItem.element;
+        insertTarget.parentNode.insertBefore(combinedMergedBlock, insertTarget);
+        
+        // Remove all original merged blocks and their wrappers if empty
+        const wrappersToCheck = new Set();
+        for (const item of mergeableItems) {
+            if (item.wrapper) {
+                wrappersToCheck.add(item.wrapper);
+            }
+            item.element.remove();
+        }
+        
+        // Clean up empty wrappers
+        wrappersToCheck.forEach(wrapper => {
+            if (wrapper.children.length === 0) {
+                wrapper.remove();
+            }
+        });
+    });
 }
 
 function findRowForMessageId(messageId) {
@@ -2740,9 +2869,16 @@ function addMessage(message) {
         
         // Count non-text items to determine if we need a merged block
         const hasThinking = !!message.thinking_content;
-        const toolCallCount = (message.tool_calls && Array.isArray(message.tool_calls)) ? message.tool_calls.length : 0;
+        // Count tool calls from message.tool_calls array, or fall back to child tool messages
+        let toolCallCount = (message.tool_calls && Array.isArray(message.tool_calls)) ? message.tool_calls.length : 0;
+        if (toolCallCount === 0 && childToolMessages.length > 0) {
+            // No tool_calls array but we have child tool results - count unique tool calls
+            toolCallCount = childToolMessages.length;
+        }
         const totalNonTextItems = (hasThinking ? 1 : 0) + toolCallCount;
         const needsMergedBlock = totalNonTextItems >= 2;
+        
+        console.log('[addMessage] Merged block check:', { hasThinking, toolCallCount, totalNonTextItems, needsMergedBlock, tool_calls: message.tool_calls, childToolCount: childToolMessages.length });
         
         // Create merged block wrapper if we have 2+ non-text items
         let mergedBlock = null;
@@ -2805,7 +2941,7 @@ function addMessage(message) {
         }
         
         // Render tool calls from the tool_calls array (not from XML in message text)
-        if (message.tool_calls && Array.isArray(message.tool_calls)) {
+        if (message.tool_calls && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
             message.tool_calls.forEach(toolCall => {
                 const toolName = toolCall.function?.name || toolCall.name || 'unknown';
                 const toolId = toolCall.id;
@@ -2840,14 +2976,48 @@ function addMessage(message) {
                 
                 renderToolGroup(nonTextContainer, toolData, resultData);
             });
+        } else if (childToolMessages.length > 0) {
+            // Fallback: render tools from child tool messages if tool_calls array is empty
+            // This handles cases where tool_calls aren't stored but results are
+            childToolMessages.forEach(toolMsg => {
+                const toolName = toolMsg.tool_name || 'unknown';
+                const toolData = { 
+                    name: toolName, 
+                    id: toolMsg.tool_call_id, 
+                    payloadInfo: null // We don't have the original arguments in child messages
+                };
+                const resultData = {
+                    name: toolName,
+                    body: toolMsg.message || '',
+                    status: null
+                };
+                renderToolGroup(nonTextContainer, toolData, resultData);
+            });
         }
         
         // Render main content (text goes AFTER the merged block / non-text items)
+        // Strip any XML tags that we render from structured data to avoid duplicates
         if (message.message) {
-            const contentWrapper = document.createElement('div');
-            contentWrapper.innerHTML = renderMarkdown(message.message);
-            while (contentWrapper.firstChild) {
-                contentDiv.appendChild(contentWrapper.firstChild);
+            let textContent = message.message;
+            // Remove tool_call and tool_result XML tags since they're rendered from message.tool_calls
+            textContent = textContent.replace(/<tool_call\s+[^>]*>[\s\S]*?<\/tool_call>/gi, '');
+            textContent = textContent.replace(/<tool_result[^>]*>[\s\S]*?<\/tool_result>/gi, '');
+            // Remove think tags since they're rendered from message.thinking_content
+            const cotTags = getCotTagPairs();
+            for (const pair of cotTags) {
+                const thinkPattern = new RegExp(escapeRegExp(pair.start) + '[\\s\\S]*?' + escapeRegExp(pair.end), 'gi');
+                textContent = textContent.replace(thinkPattern, '');
+            }
+            // Also remove standard <think> tags
+            textContent = textContent.replace(/<think>[\s\S]*?<\/think>/gi, '');
+            textContent = textContent.trim();
+            
+            if (textContent) {
+                const contentWrapper = document.createElement('div');
+                contentWrapper.innerHTML = renderMarkdown(textContent);
+                while (contentWrapper.firstChild) {
+                    contentDiv.appendChild(contentWrapper.firstChild);
+                }
             }
         }
         
@@ -4266,7 +4436,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     targetContentDiv.appendChild(seg.element);
                 } else if (seg.type === 'tool_call') {
                     // Check if we need to create/join a merged block
-                    if (!wasLastSegmentContent()) {
+                    const wasContent = wasLastSegmentContent();
+                    console.log('[renderIncremental] Processing tool_call:', seg.name, { wasContent, hasActiveMergedBlock: !!activeMergedBlock });
+                    if (!wasContent) {
                         // Previous was also think/tool, ensure we're in a merged block
                         checkRetroactiveMerge();
                     }
