@@ -733,7 +733,7 @@ body.welcome-active .input-area .input-container {
 
 /* General Input Buttons (Attach, File, Stop) */
 .input-button {
-    background-color: var(--bg-secondary);
+    background-color: #00000000;
     border: 1px solid #00000000;
     color: var(--text-secondary);
     width: 32px;
@@ -778,6 +778,21 @@ body.welcome-active .input-area .input-container {
     animation: spin 1s ease-in-out infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.tools-toggle-button {
+    background-color: #00000000;
+    border: #00000000;
+    color: var(--text-secondary);
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    font-size: 16px;
+    padding: 0;
+}
 
 /* Tools Toggle Button */
 .tools-toggle-button.active {
@@ -2046,6 +2061,99 @@ body.welcome-active .input-area .input-container {
     margin: 4px 0 10px;
 }
 
+/* --- Merged Block (groups consecutive think blocks and tool calls) --- */
+.merged-block {
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--border-color);
+    background: var(--bg-secondary);
+    margin: 12px 0;
+    overflow: hidden;
+}
+
+.merged-block-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.2s ease;
+}
+
+.merged-block-header:hover {
+    background: color-mix(in srgb, var(--accent-color) 10%, var(--bg-tertiary));
+}
+
+.merged-block-icon {
+    font-size: 14px;
+    color: var(--accent-color);
+    flex-shrink: 0;
+}
+
+.merged-block-status {
+    flex: 1;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.merged-block-toggle {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    padding: 2px 6px;
+    border-radius: var(--border-radius-sm);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.merged-block-toggle:hover {
+    color: var(--text-primary);
+    background: color-mix(in srgb, var(--text-secondary) 15%, transparent);
+}
+
+.merged-block-content {
+    border-top: 1px solid var(--border-color);
+}
+
+.merged-block.collapsed .merged-block-content {
+    display: none;
+}
+
+/* Inner blocks within merged-block get reduced styling */
+.merged-block-content .think-block,
+.merged-block-content .tool-group,
+.merged-block-content .streaming-tool-segment .tool-group {
+    border: none;
+    border-radius: 0;
+    margin: 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.merged-block-content > *:last-child,
+.merged-block-content > *:last-child .tool-group {
+    border-bottom: none;
+}
+
+/* Streaming tool segments inside merged block */
+.merged-block-content .streaming-tool-segment {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.merged-block-content .streaming-tool-segment:last-child {
+    border-bottom: none;
+}
+
+.merged-block-content .streaming-tool-segment .tool-group {
+    border-bottom: none;
+}
+
 /* Centered Settings Modal */
 .center-modal {
     position: fixed;
@@ -2786,6 +2894,18 @@ body.welcome-active .input-area .input-container {
 }
 
 .tool-result-image img {
+    max-width: 100%;
+    border-radius: var(--border-radius-sm);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+/* Python output image displayed outside tool call */
+.python-output-image {
+    margin: 12px 0;
+    text-align: center;
+}
+
+.python-output-image img {
     max-width: 100%;
     border-radius: var(--border-radius-sm);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);

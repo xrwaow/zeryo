@@ -1221,6 +1221,27 @@ function handleThinkBlockToggle(targetElement) {
     persistCollapseState(block, 'think', isCollapsed);
 }
 
+function handleMergedBlockToggle(targetElement) {
+    if (!targetElement) return;
+
+    const block = targetElement.closest('.merged-block');
+    if (!block) return;
+
+    block.dataset.userToggled = 'true';
+    const isCollapsed = block.classList.toggle('collapsed');
+
+    const toggleBtn = block.querySelector('.merged-block-toggle');
+    const icon = toggleBtn?.querySelector('i');
+    if (icon) {
+        icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+    }
+    if (toggleBtn) {
+        toggleBtn.title = isCollapsed ? 'Expand details' : 'Collapse details';
+    }
+
+    persistCollapseState(block, 'merged', isCollapsed);
+}
+
 function updateEffectiveSystemPrompt() {
     let basePrompt = state.activeSystemPrompt || "";
     state.effectiveSystemPrompt = basePrompt.trim() || null;
@@ -1953,139 +1974,145 @@ function buildContentHtml(targetContentDiv, messageText, externalToolResults = [
     if (!targetContentDiv) return;
 
     const textToParse = messageText || '';
-    const thinkBlockTempId = 'streaming-think-block';
-    const remainingContentTempId = 'streaming-remaining-content';
     const cotTagPairs = getCotTagPairs();
-    const startsWithCot = startsWithCotBlock(textToParse, cotTagPairs);
 
     // Save collapse states before rebuilding to preserve user interactions
     const savedStates = captureCollapseStates(targetContentDiv);
     
     targetContentDiv.innerHTML = '';
 
-    if (startsWithCot) {
-        const fullRenderedHtml = renderMarkdown(textToParse, true, thinkBlockTempId);
-        targetContentDiv.innerHTML = fullRenderedHtml;
-         const thinkBlock = targetContentDiv.querySelector('.think-block');
-         if (thinkBlock && !thinkBlock.dataset.tempId) {
-             thinkBlock.dataset.tempId = thinkBlockTempId;
-         }
-         const potentialRemainingDiv = thinkBlock?.nextElementSibling;
-         const { remainingText } = parseThinkContent(textToParse, cotTagPairs);
-         if (potentialRemainingDiv && potentialRemainingDiv.tagName === 'DIV' && !potentialRemainingDiv.dataset.tempId && remainingText) {
-              potentialRemainingDiv.dataset.tempId = remainingContentTempId;
-         }
-    } else {
-        let lastIndex = 0;
-        const segments = [];
-        TOOL_TAG_REGEX.lastIndex = 0;
-        let match;
-
-        while ((match = TOOL_TAG_REGEX.exec(textToParse)) !== null) {
-            const textBefore = textToParse.substring(lastIndex, match.index);
-            if (textBefore) {
-                segments.push({ type: 'text', data: textBefore });
-            }
-
-            const toolCallTag = match[1];
-            const toolResultTag = match[5];
-
-            if (toolCallTag) {
-                const toolName = match[2];
-                const toolIdAttr = match[3] || null;
-                const payloadRaw = match[4] || '';
-                const payloadInfo = parseToolCallPayload(payloadRaw);
-                const resolvedId = toolIdAttr || payloadInfo.inferredId || null;
-                segments.push({
-                    type: 'tool',
-                    data: {
-                        name: toolName,
-                        id: resolvedId,
-                        payloadInfo
-                    }
-                });
-            } else if (toolResultTag) {
-                const resultName = match[6] || null;
-                const resultStatus = match[7] || null;
-                const resultBodyRaw = match[8] || '';
-                segments.push({
-                    type: 'result',
-                    data: {
-                        name: resultName,
-                        status: resultStatus,
-                        body: decodeHtmlEntities(resultBodyRaw),
-                        raw: resultBodyRaw
-                    }
-                });
-            }
-            lastIndex = TOOL_TAG_REGEX.lastIndex;
-        }
-
-        const remainingTextAfterTags = textToParse.substring(lastIndex);
-        if (remainingTextAfterTags) {
-            segments.push({ type: 'text', data: remainingTextAfterTags });
-        }
-
-        // Group tool calls with their corresponding results
-        // First, try to match with inline results, then fall back to external results
-        const processedResults = new Set();
-        const usedExternalResults = new Set();
-        const toolGroups = [];
-        
-        // First pass: count tool calls to enable order-based matching
-        const toolCallIndices = [];
-        for (let i = 0; i < segments.length; i++) {
-            if (segments[i].type === 'tool') {
-                toolCallIndices.push(i);
-            }
+    // === UNIFIED SEGMENT PARSING ===
+    // Parse ALL segment types: think blocks, tool calls, tool results, and text
+    const segments = [];
+    let lastIndex = 0;
+    
+    // Build a combined regex that matches think blocks and tool tags
+    // We need to extract think blocks AND tool tags in document order
+    const cotStartPattern = cotTagPairs.length > 0 ? cotTagPairs.map(p => escapeRegExp(p.start)).join('|') : null;
+    const cotEndPattern = cotTagPairs.length > 0 ? cotTagPairs.map(p => escapeRegExp(p.end)).join('|') : null;
+    
+    // Combined pattern for think blocks and tool tags
+    // Think pattern is optional if no COT tags are defined
+    const thinkPattern = (cotStartPattern && cotEndPattern) 
+        ? `(${cotStartPattern})([\\s\\S]*?)(${cotEndPattern})`
+        : null;
+    const toolCallPattern = `(<tool_call\\s+name="([^"]+)"(?:\\s+id="([^"]*)")?[^>]*>)([\\s\\S]*?)</tool_call>`;
+    const toolResultPattern = `(<tool_result(?:\\s+name="([^"]*)")?(?:\\s+status="([^"]*)")?[^>]*>)([\\s\\S]*?)</tool_result>`;
+    
+    // Build combined pattern based on what's available
+    const patterns = [];
+    if (thinkPattern) patterns.push(thinkPattern);
+    patterns.push(toolCallPattern);
+    patterns.push(toolResultPattern);
+    
+    const combinedPattern = new RegExp(patterns.join('|'), 'gi');
+    
+    // Debug: log the combined pattern
+    console.log('[buildContentHtml] Combined regex pattern:', combinedPattern.source.substring(0, 200) + '...');
+    console.log('[buildContentHtml] Text to parse length:', textToParse.length, 'Preview:', textToParse.substring(0, 100));
+    
+    // Group indices for each pattern type
+    // Think pattern: 3 groups (start tag, content, end tag)
+    // Tool call pattern: 4 groups (full open tag, name, id, payload)
+    // Tool result pattern: 4 groups (full open tag, name, status, body)
+    const thinkStartIdx = thinkPattern ? 1 : -1;
+    const toolCallStartIdx = thinkPattern ? 4 : 1;
+    const toolResultStartIdx = thinkPattern ? 8 : 5;
+    
+    let match;
+    while ((match = combinedPattern.exec(textToParse)) !== null) {
+        // Text before this match
+        const textBefore = textToParse.substring(lastIndex, match.index);
+        if (textBefore.trim()) {
+            segments.push({ type: 'text', data: textBefore });
         }
         
-        for (let i = 0; i < segments.length; i++) {
-            if (segments[i].type === 'tool') {
-                const toolName = segments[i].data?.name;
-                const toolId = segments[i].data?.id || segments[i].data?.payloadInfo?.inferredId;
-                const toolOrderIndex = toolCallIndices.indexOf(i); // 0-based index of this tool call
-                
-                // First try to find matching inline result
-                let matchingResult = null;
-                for (let j = i + 1; j < segments.length; j++) {
-                    if (segments[j].type === 'result' && !processedResults.has(j)) {
-                        const resultName = segments[j].data?.name;
-                        if (resultName === toolName || !resultName) {
-                            matchingResult = { index: j, data: segments[j].data };
-                            processedResults.add(j);
-                            break;
-                        }
+        if (thinkPattern && match[thinkStartIdx]) {
+            // Think block match: group 1=start tag, 2=content, 3=end tag
+            segments.push({ type: 'think', data: match[thinkStartIdx + 1] || '' });
+        } else if (match[toolCallStartIdx]) {
+            // Tool call match: groups are (full open tag, name, id, payload)
+            const toolName = match[toolCallStartIdx + 1];
+            const toolIdAttr = match[toolCallStartIdx + 2] || null;
+            const payloadRaw = match[toolCallStartIdx + 3] || '';
+            const payloadInfo = parseToolCallPayload(payloadRaw);
+            const resolvedId = toolIdAttr || payloadInfo.inferredId || null;
+            segments.push({
+                type: 'tool',
+                data: {
+                    name: toolName,
+                    id: resolvedId,
+                    payloadInfo
+                }
+            });
+        } else if (match[toolResultStartIdx]) {
+            // Tool result match: groups are (full open tag, name, status, body)
+            const resultName = match[toolResultStartIdx + 1] || null;
+            const resultStatus = match[toolResultStartIdx + 2] || null;
+            const resultBodyRaw = match[toolResultStartIdx + 3] || '';
+            segments.push({
+                type: 'result',
+                data: {
+                    name: resultName,
+                    status: resultStatus,
+                    body: decodeHtmlEntities(resultBodyRaw),
+                    raw: resultBodyRaw
+                }
+            });
+        }
+        
+        lastIndex = combinedPattern.lastIndex;
+    }
+    
+    // Remaining text after all matches
+    const remainingText = textToParse.substring(lastIndex);
+    if (remainingText.trim()) {
+        segments.push({ type: 'text', data: remainingText });
+    }
+    
+    // Debug: log parsed segments
+    console.log('[buildContentHtml] Parsed segments:', segments.map(s => ({ type: s.type, dataPreview: typeof s.data === 'string' ? s.data.substring(0, 50) : s.data?.name })));
+    
+    // === TOOL CALL / RESULT MATCHING ===
+    // Group tool calls with their corresponding results
+    const processedResults = new Set();
+    const usedExternalResults = new Set();
+    const toolGroups = [];
+    
+    // First pass: count tool calls to enable order-based matching
+    const toolCallIndices = [];
+    for (let i = 0; i < segments.length; i++) {
+        if (segments[i].type === 'tool') {
+            toolCallIndices.push(i);
+        }
+    }
+    
+    for (let i = 0; i < segments.length; i++) {
+        if (segments[i].type === 'tool') {
+            const toolName = segments[i].data?.name;
+            const toolId = segments[i].data?.id || segments[i].data?.payloadInfo?.inferredId;
+            const toolOrderIndex = toolCallIndices.indexOf(i);
+            
+            // Find matching inline result
+            let matchingResult = null;
+            for (let j = i + 1; j < segments.length; j++) {
+                if (segments[j].type === 'result' && !processedResults.has(j)) {
+                    const resultName = segments[j].data?.name;
+                    if (resultName === toolName || !resultName) {
+                        matchingResult = { index: j, data: segments[j].data };
+                        processedResults.add(j);
+                        break;
                     }
                 }
-                
-                // If no inline result, try to find from external tool results
-                if (!matchingResult && externalToolResults.length > 0) {
-                    // Try to match by tool_call_id first (most reliable)
-                    for (let k = 0; k < externalToolResults.length; k++) {
-                        if (!usedExternalResults.has(k)) {
-                            const extResult = externalToolResults[k];
-                            const extCallId = extResult.tool_call_id;
-                            if (extCallId && extCallId === toolId) {
-                                matchingResult = { 
-                                    index: -1, 
-                                    data: {
-                                        name: toolName,
-                                        status: extResult.status,
-                                        body: extResult.body || extResult.message || extResult.content || '',
-                                        raw: extResult.raw || ''
-                                    }
-                                };
-                                usedExternalResults.add(k);
-                                break;
-                            }
-                        }
-                    }
-                    
-                    // If still no match, use order-based matching (nth tool call -> nth external result)
-                    if (!matchingResult && toolOrderIndex < externalToolResults.length) {
-                        const extResult = externalToolResults[toolOrderIndex];
-                        if (!usedExternalResults.has(toolOrderIndex)) {
+            }
+            
+            // If no inline result, try external results
+            if (!matchingResult && externalToolResults.length > 0) {
+                for (let k = 0; k < externalToolResults.length; k++) {
+                    if (!usedExternalResults.has(k)) {
+                        const extResult = externalToolResults[k];
+                        const extCallId = extResult.tool_call_id;
+                        if (extCallId && extCallId === toolId) {
                             matchingResult = { 
                                 index: -1, 
                                 data: {
@@ -2095,34 +2122,175 @@ function buildContentHtml(targetContentDiv, messageText, externalToolResults = [
                                     raw: extResult.raw || ''
                                 }
                             };
-                            usedExternalResults.add(toolOrderIndex);
+                            usedExternalResults.add(k);
+                            break;
                         }
                     }
                 }
                 
-                toolGroups.push({ toolIndex: i, toolData: segments[i].data, result: matchingResult });
+                if (!matchingResult && toolOrderIndex < externalToolResults.length) {
+                    const extResult = externalToolResults[toolOrderIndex];
+                    if (!usedExternalResults.has(toolOrderIndex)) {
+                        matchingResult = { 
+                            index: -1, 
+                            data: {
+                                name: toolName,
+                                status: extResult.status,
+                                body: extResult.body || extResult.message || extResult.content || '',
+                                raw: extResult.raw || ''
+                            }
+                        };
+                        usedExternalResults.add(toolOrderIndex);
+                    }
+                }
+            }
+            
+            toolGroups.push({ toolIndex: i, toolData: segments[i].data, result: matchingResult });
+        }
+    }
+    
+    // === GROUP CONSECUTIVE NON-TEXT SEGMENTS INTO MERGED BLOCKS ===
+    const renderGroups = [];
+    let currentMergeGroup = null;
+    
+    for (let i = 0; i < segments.length; i++) {
+        const segment = segments[i];
+        const isNonText = segment.type === 'think' || segment.type === 'tool' || segment.type === 'result';
+        
+        if (isNonText) {
+            if (!currentMergeGroup) {
+                currentMergeGroup = { type: 'merge', items: [] };
+            }
+            currentMergeGroup.items.push({ segment, index: i });
+        } else {
+            // Text segment - close any merge group and add both
+            if (currentMergeGroup) {
+                renderGroups.push(currentMergeGroup);
+                currentMergeGroup = null;
+            }
+            renderGroups.push({ type: 'text', segment });
+        }
+    }
+    
+    // Don't forget the last merge group
+    if (currentMergeGroup) {
+        renderGroups.push(currentMergeGroup);
+    }
+    
+    // Debug: log render groups
+    console.log('[buildContentHtml] Render groups:', renderGroups.map(g => g.type === 'merge' ? { type: 'merge', itemCount: g.items.length, itemTypes: g.items.map(i => i.segment.type) } : { type: 'text' }));
+    
+    // === RENDER GROUPS ===
+    for (const group of renderGroups) {
+        if (group.type === 'text') {
+            targetContentDiv.insertAdjacentHTML('beforeend', renderMarkdownContent(group.segment.data));
+        } else if (group.type === 'merge') {
+            // Check if we need a merged block (2+ items) or just render single item directly
+            if (group.items.length === 1) {
+                // Single item - render directly without merge wrapper
+                const item = group.items[0];
+                renderSingleSegment(targetContentDiv, item.segment, item.index, toolGroups, processedResults);
+            } else {
+                // Multiple items - create merged block
+                const mergedBlock = createStaticMergedBlock(group.items, toolGroups, processedResults);
+                targetContentDiv.appendChild(mergedBlock);
             }
         }
-
-        segments.forEach((segment, idx) => {
-            if (segment.type === 'text') {
-                targetContentDiv.insertAdjacentHTML('beforeend', renderMarkdown(segment.data));
-            } else if (segment.type === 'tool') {
-                // Find the group for this tool
-                const group = toolGroups.find(g => g.toolIndex === idx);
-                if (group) {
-                    renderToolGroup(targetContentDiv, group.toolData, group.result?.data);
-                }
-            } else if (segment.type === 'result') {
-                // Only render standalone results that weren't grouped with a tool call
-                if (!processedResults.has(idx)) {
-                    renderToolGroup(targetContentDiv, null, segment.data);
-                }
-            }
-        });
     }
+    
     applyCodeBlockDefaults(targetContentDiv);
     applyCollapseStates(targetContentDiv, savedStates);
+}
+
+// Helper: Render markdown content (for text segments - think blocks already extracted)
+function renderMarkdownContent(text) {
+    if (!text) return '';
+    // Text segments should not contain think blocks since they were already extracted
+    // Use renderMarkdown which handles any remaining content
+    return renderMarkdown(text, true);
+}
+
+// Helper: Render a single segment (think, tool, or result) directly to container
+function renderSingleSegment(container, segment, idx, toolGroups, processedResults) {
+    if (segment.type === 'think') {
+        // Create a standalone think block
+        const thinkBlockWrapper = document.createElement('div');
+        thinkBlockWrapper.className = 'think-block collapsed';
+        
+        const header = document.createElement('div');
+        header.className = 'think-header';
+        header.innerHTML = `
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <div class="think-header-actions">
+                <button class="think-block-toggle" title="Expand thought process">
+                    <i class="bi bi-chevron-down"></i>
+                </button>
+            </div>`;
+        thinkBlockWrapper.appendChild(header);
+        
+        const thinkContentDiv = document.createElement('div');
+        thinkContentDiv.className = 'think-content';
+        thinkContentDiv.innerHTML = renderMarkdownContent(segment.data);
+        thinkBlockWrapper.appendChild(thinkContentDiv);
+        
+        container.appendChild(thinkBlockWrapper);
+    } else if (segment.type === 'tool') {
+        const group = toolGroups.find(g => g.toolIndex === idx);
+        if (group) {
+            renderToolGroup(container, group.toolData, group.result?.data);
+        }
+    } else if (segment.type === 'result') {
+        if (!processedResults.has(idx)) {
+            renderToolGroup(container, null, segment.data);
+        }
+    }
+}
+
+// Helper: Create a static merged block containing multiple think/tool segments
+function createStaticMergedBlock(items, toolGroups, processedResults) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'merged-block collapsed';
+    
+    // Calculate stats for header
+    // Count tool calls (not results, since they're paired)
+    let thinkCount = 0;
+    let toolCount = 0;
+    
+    for (const item of items) {
+        if (item.segment.type === 'think') thinkCount++;
+        else if (item.segment.type === 'tool') toolCount++;
+        // Don't count 'result' separately - it's paired with 'tool'
+        // Only count orphan results (those not in processedResults)
+        else if (item.segment.type === 'result' && !processedResults.has(item.index)) toolCount++;
+    }
+    
+    // Build header text
+    const parts = [];
+    if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
+    if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
+    const headerText = parts.join(', ') || 'Operations';
+    
+    const header = document.createElement('div');
+    header.className = 'merged-block-header';
+    header.innerHTML = `
+        <i class="bi bi-check-circle merged-block-icon"></i>
+        <span class="merged-block-status">${headerText}</span>
+        <button class="merged-block-toggle" title="Expand details">
+            <i class="bi bi-chevron-down"></i>
+        </button>
+    `;
+    wrapper.appendChild(header);
+    
+    const content = document.createElement('div');
+    content.className = 'merged-block-content';
+    
+    // Render each item into the content
+    for (const item of items) {
+        renderSingleSegment(content, item.segment, item.index, toolGroups, processedResults);
+    }
+    
+    wrapper.appendChild(content);
+    return wrapper;
 }
 
 function applyCodeBlockDefaults(containerElement) {
@@ -2137,7 +2305,7 @@ function applyCodeBlockDefaults(containerElement) {
 // Unified collapse state management - captures user-toggled states from DOM
 function captureCollapseStates(containerElement) {
     if (!containerElement) return null;
-    const states = { code: new Map(), think: new Map(), tool: new Map() };
+    const states = { code: new Map(), think: new Map(), tool: new Map(), merged: new Map() };
     
     containerElement.querySelectorAll('.code-block-wrapper').forEach(block => {
         if (block.dataset.userToggled !== 'true') return;
@@ -2145,8 +2313,10 @@ function captureCollapseStates(containerElement) {
         states.code.set(key, block.classList.contains('collapsed'));
     });
     
+    // Only capture think blocks that are NOT inside a merged block
     containerElement.querySelectorAll('.think-block').forEach(block => {
         if (block.dataset.userToggled !== 'true') return;
+        if (block.closest('.merged-block')) return; // Skip if inside merged block
         states.think.set('think_0', block.classList.contains('collapsed'));
     });
     
@@ -2156,7 +2326,13 @@ function captureCollapseStates(containerElement) {
         states.tool.set(key, block.classList.contains('collapsed'));
     });
     
-    return (states.code.size || states.think.size || states.tool.size) ? states : null;
+    // Capture merged block states by index
+    containerElement.querySelectorAll('.merged-block').forEach((block, idx) => {
+        if (block.dataset.userToggled !== 'true') return;
+        states.merged.set(`merged_${idx}`, block.classList.contains('collapsed'));
+    });
+    
+    return (states.code.size || states.think.size || states.tool.size || states.merged.size) ? states : null;
 }
 
 // Apply saved collapse states to container
@@ -2171,7 +2347,9 @@ function applyCollapseStates(containerElement, states) {
         }
     });
     
+    // Only apply to think blocks that are NOT inside a merged block
     containerElement.querySelectorAll('.think-block').forEach(block => {
+        if (block.closest('.merged-block')) return; // Skip if inside merged block
         if (states.think?.has('think_0')) {
             block.dataset.userToggled = 'true';
             const collapsed = states.think.get('think_0');
@@ -2191,6 +2369,18 @@ function applyCollapseStates(containerElement, states) {
             if (icon) icon.className = collapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
         }
     });
+    
+    // Apply merged block states by index
+    containerElement.querySelectorAll('.merged-block').forEach((block, idx) => {
+        const key = `merged_${idx}`;
+        if (states.merged?.has(key)) {
+            block.dataset.userToggled = 'true';
+            const collapsed = states.merged.get(key);
+            block.classList.toggle('collapsed', collapsed);
+            const icon = block.querySelector('.merged-block-toggle i');
+            if (icon) icon.className = collapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+        }
+    });
 }
 
 // Persist a single element's collapse state to the message-level store
@@ -2200,7 +2390,7 @@ function persistCollapseState(element, type, isCollapsed) {
     if (!messageId) return;
     
     if (!state.userCollapseStates.has(messageId)) {
-        state.userCollapseStates.set(messageId, { code: new Map(), think: new Map(), tool: new Map() });
+        state.userCollapseStates.set(messageId, { code: new Map(), think: new Map(), tool: new Map(), merged: new Map() });
     }
     const msgState = state.userCollapseStates.get(messageId);
     
@@ -2210,6 +2400,16 @@ function persistCollapseState(element, type, isCollapsed) {
         msgState.think.set('think_0', isCollapsed);
     } else if (type === 'tool') {
         msgState.tool.set(`${element.dataset.toolName || ''}_${element.dataset.callId || ''}`, isCollapsed);
+    } else if (type === 'merged') {
+        // Find the index of this merged block among siblings
+        const contentDiv = element.closest('.message-content');
+        if (contentDiv) {
+            const mergedBlocks = contentDiv.querySelectorAll('.merged-block');
+            const idx = Array.from(mergedBlocks).indexOf(element);
+            if (idx >= 0) {
+                msgState.merged.set(`merged_${idx}`, isCollapsed);
+            }
+        }
     }
 }
 
@@ -2538,6 +2738,47 @@ function addMessage(message) {
             }
         });
         
+        // Count non-text items to determine if we need a merged block
+        const hasThinking = !!message.thinking_content;
+        const toolCallCount = (message.tool_calls && Array.isArray(message.tool_calls)) ? message.tool_calls.length : 0;
+        const totalNonTextItems = (hasThinking ? 1 : 0) + toolCallCount;
+        const needsMergedBlock = totalNonTextItems >= 2;
+        
+        // Create merged block wrapper if we have 2+ non-text items
+        let mergedBlock = null;
+        let mergedBlockContent = null;
+        if (needsMergedBlock) {
+            mergedBlock = document.createElement('div');
+            mergedBlock.className = 'merged-block collapsed';
+            
+            const mergedHeader = document.createElement('div');
+            mergedHeader.className = 'merged-block-header';
+            
+            // Build summary for header
+            const parts = [];
+            if (hasThinking) parts.push('1 thought');
+            if (toolCallCount > 0) parts.push(`${toolCallCount} tool call${toolCallCount > 1 ? 's' : ''}`);
+            const summaryText = parts.join(', ');
+            
+            mergedHeader.innerHTML = `
+                <i class="bi bi-lightning-charge merged-block-icon"></i>
+                <span class="merged-block-status">${summaryText}</span>
+                <button class="merged-block-toggle" title="Expand details">
+                    <i class="bi bi-chevron-down"></i>
+                </button>
+            `;
+            mergedBlock.appendChild(mergedHeader);
+            
+            mergedBlockContent = document.createElement('div');
+            mergedBlockContent.className = 'merged-block-content';
+            mergedBlock.appendChild(mergedBlockContent);
+            
+            contentDiv.appendChild(mergedBlock);
+        }
+        
+        // Target container for non-text items (merged block content or contentDiv directly)
+        const nonTextContainer = needsMergedBlock ? mergedBlockContent : contentDiv;
+        
         // Render thinking block first if present
         if (message.thinking_content) {
             const thinkBlockWrapper = document.createElement('div');
@@ -2560,16 +2801,7 @@ function addMessage(message) {
             thinkContentDiv.innerHTML = renderMarkdown(message.thinking_content);
             thinkBlockWrapper.appendChild(thinkContentDiv);
             
-            contentDiv.appendChild(thinkBlockWrapper);
-        }
-        
-        // Render main content
-        if (message.message) {
-            const contentWrapper = document.createElement('div');
-            contentWrapper.innerHTML = renderMarkdown(message.message);
-            while (contentWrapper.firstChild) {
-                contentDiv.appendChild(contentWrapper.firstChild);
-            }
+            nonTextContainer.appendChild(thinkBlockWrapper);
         }
         
         // Render tool calls from the tool_calls array (not from XML in message text)
@@ -2606,8 +2838,17 @@ function addMessage(message) {
                     status: matchingResult.status
                 } : null;
                 
-                renderToolGroup(contentDiv, toolData, resultData);
+                renderToolGroup(nonTextContainer, toolData, resultData);
             });
+        }
+        
+        // Render main content (text goes AFTER the merged block / non-text items)
+        if (message.message) {
+            const contentWrapper = document.createElement('div');
+            contentWrapper.innerHTML = renderMarkdown(message.message);
+            while (contentWrapper.firstChild) {
+                contentDiv.appendChild(contentWrapper.firstChild);
+            }
         }
         
         finalizeStreamingCodeBlocks(contentDiv);
@@ -2985,6 +3226,20 @@ function setupEventListeners() {
             handleThinkBlockToggle(thinkToggle);
             return;
         }
+        
+        // Handle merged block toggle
+        const mergedHeader = event.target.closest('.merged-block-header');
+        if (mergedHeader) {
+            handleMergedBlockToggle(mergedHeader);
+            return;
+        }
+        
+        const mergedToggle = event.target.closest('.merged-block-toggle');
+        if (mergedToggle) {
+            handleMergedBlockToggle(mergedToggle);
+            return;
+        }
+        
         const toolHeader = event.target.closest('.tool-group-header');
         if (toolHeader) {
             handleToolBlockToggle(toolHeader);
@@ -3436,7 +3691,7 @@ function viewAttachmentPopup(attachment) {
               'py': 'python', 'js': 'javascript', 'ts': 'typescript', 'jsx': 'javascript',
               'tsx': 'typescript', 'json': 'json', 'html': 'html', 'css': 'css', 'scss': 'scss',
               'md': 'markdown', 'yaml': 'yaml', 'yml': 'yaml', 'xml': 'xml', 'sql': 'sql',
-              'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'c': 'c', 'cpp': 'cpp', 'h': 'c',
+              'sh': 'bash', 'bash': 'bash', 'zsh': 'bash', 'c': 'c', 'cpp': 'cpp', 'h': 'c  ',
               'hpp': 'cpp', 'java': 'java', 'kt': 'kotlin', 'rs': 'rust', 'go': 'go',
               'rb': 'ruby', 'php': 'php', 'swift': 'swift', 'r': 'r', 'lua': 'lua',
               'toml': 'toml', 'ini': 'ini', 'dockerfile': 'dockerfile', 'makefile': 'makefile'
@@ -3768,6 +4023,139 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     let pendingRenderTimeout = null;
     const RENDER_THROTTLE_MS = 50;
 
+    // === MERGED BLOCK TRACKING ===
+    // Tracks the active merged block container for grouping consecutive think/tool blocks
+    let activeMergedBlock = null; // { element: DOM, headerEl: DOM, contentEl: DOM, stats: { thinkCount: int, toolsPending: int, toolsCompleted: int }, itemCount: int }
+
+    // Create a merged block container element
+    const createMergedBlockElement = () => {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'merged-block collapsed';
+        
+        const header = document.createElement('div');
+        header.className = 'merged-block-header';
+        header.innerHTML = `
+            <i class="bi bi-lightning-charge merged-block-icon"></i>
+            <span class="merged-block-status">Working...</span>
+            <button class="merged-block-toggle" title="Expand details">
+                <i class="bi bi-chevron-down"></i>
+            </button>
+        `;
+        wrapper.appendChild(header);
+        
+        const content = document.createElement('div');
+        content.className = 'merged-block-content';
+        wrapper.appendChild(content);
+        
+        return wrapper;
+    };
+
+    // Update the merged block header based on current stats
+    const updateMergedBlockHeader = (mb, isFinal = false) => {
+        if (!mb || !mb.headerEl) return;
+        const { thinkCount, toolsPending, toolsCompleted } = mb.stats;
+        const statusEl = mb.headerEl.querySelector('.merged-block-status');
+        const iconEl = mb.headerEl.querySelector('.merged-block-icon');
+        if (!statusEl || !iconEl) return;
+        
+        let text = '';
+        let icon = 'lightning-charge';
+        
+        if (isFinal) {
+            // Final state summary
+            const parts = [];
+            if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
+            if (toolsCompleted > 0) parts.push(`${toolsCompleted} tool call${toolsCompleted > 1 ? 's' : ''}`);
+            text = parts.length > 0 ? parts.join(', ') : 'Completed';
+            icon = 'check-circle';
+        } else if (toolsPending > 0) {
+            // Tools are running
+            const current = toolsCompleted + 1;
+            const total = toolsCompleted + toolsPending;
+            text = total > 1 ? `Executing tools (${current}/${total})...` : 'Executing tool...';
+            icon = 'gear';
+        } else if (thinkCount > 0 && toolsCompleted === 0) {
+            // Only thinking so far
+            text = 'Thinking...';
+            icon = 'lightbulb';
+        } else if (toolsCompleted > 0) {
+            // Tools completed, possibly more coming
+            text = `${toolsCompleted} tool call${toolsCompleted > 1 ? 's' : ''} completed`;
+            icon = 'check-circle';
+        } else {
+            text = 'Working...';
+        }
+        
+        statusEl.textContent = text;
+        iconEl.className = `bi bi-${icon} merged-block-icon`;
+    };
+
+    // Ensure we have an active merged block, creating one if needed
+    const ensureMergedBlock = () => {
+        if (!activeMergedBlock) {
+            const el = createMergedBlockElement();
+            targetContentDiv.appendChild(el);
+            activeMergedBlock = {
+                element: el,
+                headerEl: el.querySelector('.merged-block-header'),
+                contentEl: el.querySelector('.merged-block-content'),
+                stats: { thinkCount: 0, toolsPending: 0, toolsCompleted: 0 },
+                itemCount: 0
+            };
+        }
+        return activeMergedBlock;
+    };
+
+    // Close the active merged block (finalize it)
+    const closeMergedBlock = () => {
+        if (activeMergedBlock) {
+            updateMergedBlockHeader(activeMergedBlock, true);
+            activeMergedBlock = null;
+        }
+    };
+
+    // Check if we need to retroactively wrap the previous element in a merged block
+    // This handles the case: [think] followed by [tool] - need to wrap both
+    const checkRetroactiveMerge = () => {
+        if (activeMergedBlock) return; // Already in a merged block
+        
+        // Look at the last segment that has an element
+        const prevSegs = streamingSegments.filter(s => s.element && s.type !== 'content');
+        if (prevSegs.length === 0) return;
+        
+        const lastNonContent = prevSegs[prevSegs.length - 1];
+        // Check if it's a standalone think/tool block that's directly in targetContentDiv
+        if (lastNonContent.element && lastNonContent.element.parentElement === targetContentDiv) {
+            // Need to wrap it in a merged block
+            const mb = ensureMergedBlock();
+            // Move the previous element into the merged block content
+            mb.contentEl.appendChild(lastNonContent.element);
+            mb.itemCount++;
+            if (lastNonContent.type === 'thinking') {
+                mb.stats.thinkCount++;
+            } else if (lastNonContent.type === 'tool_call' || lastNonContent.type === 'tool_result') {
+                // Tool was already completed, count it
+                if (lastNonContent.hasResult || lastNonContent.type === 'tool_result') {
+                    mb.stats.toolsCompleted++;
+                } else {
+                    mb.stats.toolsPending++;
+                }
+            }
+            updateMergedBlockHeader(mb);
+        }
+    };
+
+    // Determine if the last rendered element was text content (not think/tool)
+    const wasLastSegmentContent = () => {
+        for (let i = streamingSegments.length - 1; i >= 0; i--) {
+            const seg = streamingSegments[i];
+            if (seg.element) {
+                return seg.type === 'content';
+            }
+        }
+        return true; // No segments yet, treat as content boundary
+    };
+
     // Helper to get/create the current segment of expected type
     // When type changes, mark previous segment as completed
     const getCurrentSegment = (type) => {
@@ -3841,6 +4229,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     };
 
     // INCREMENTAL RENDER: Only update active (non-completed) segments
+    // Now handles merged block grouping for consecutive think/tool segments
     const renderIncremental = () => {
         if (!targetContentDiv || state.streamController?.signal.aborted) return;
 
@@ -3852,12 +4241,36 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             // If segment has no element yet, create and append it
             if (!seg.element) {
                 if (seg.type === 'thinking') {
+                    // Check if we need to create/join a merged block
+                    if (!wasLastSegmentContent()) {
+                        // Previous was also think/tool, ensure we're in a merged block
+                        checkRetroactiveMerge();
+                    }
+                    
                     seg.element = createThinkBlockElement();
-                    targetContentDiv.appendChild(seg.element);
+                    
+                    // Determine where to append: merged block or directly to container
+                    if (activeMergedBlock) {
+                        activeMergedBlock.contentEl.appendChild(seg.element);
+                        activeMergedBlock.stats.thinkCount++;
+                        activeMergedBlock.itemCount++;
+                        updateMergedBlockHeader(activeMergedBlock);
+                    } else {
+                        // First think block - append directly, might be wrapped later
+                        targetContentDiv.appendChild(seg.element);
+                    }
                 } else if (seg.type === 'content') {
+                    // Content breaks any merged block
+                    closeMergedBlock();
                     seg.element = createContentElement();
                     targetContentDiv.appendChild(seg.element);
                 } else if (seg.type === 'tool_call') {
+                    // Check if we need to create/join a merged block
+                    if (!wasLastSegmentContent()) {
+                        // Previous was also think/tool, ensure we're in a merged block
+                        checkRetroactiveMerge();
+                    }
+                    
                     // Find matching result if exists
                     const matchingResult = streamingSegments.find(s => 
                         s.type === 'tool_result' && 
@@ -3865,7 +4278,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     );
                     if (matchingResult) {
                         matchingResult.rendered = true;
-                        seg.hasResult = true; // Mark this call as having its result
+                        seg.hasResult = true;
                     }
                     const toolData = { name: seg.name, id: seg.id, payloadInfo: { arguments: seg.arguments, raw: JSON.stringify(seg.arguments) } };
                     const resultData = matchingResult ? { name: matchingResult.name, body: matchingResult.result || '', status: matchingResult.error ? 'error' : null } : null;
@@ -3873,13 +4286,27 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     // Create a wrapper for the tool group
                     const toolWrapper = document.createElement('div');
                     toolWrapper.className = 'streaming-tool-segment';
-                    targetContentDiv.appendChild(toolWrapper);
+                    
+                    // Determine where to append: merged block or directly to container
+                    if (activeMergedBlock) {
+                        activeMergedBlock.contentEl.appendChild(toolWrapper);
+                        activeMergedBlock.itemCount++;
+                        if (matchingResult) {
+                            activeMergedBlock.stats.toolsCompleted++;
+                        } else {
+                            activeMergedBlock.stats.toolsPending++;
+                        }
+                        updateMergedBlockHeader(activeMergedBlock);
+                    } else {
+                        // First tool block - append directly, might be wrapped later
+                        targetContentDiv.appendChild(toolWrapper);
+                    }
+                    
                     renderToolGroup(toolWrapper, toolData, resultData);
                     seg.element = toolWrapper;
-                    seg.completed = true; // Tool calls are immediately completed
+                    seg.completed = true;
                 } else if (seg.type === 'tool_result' && !seg.rendered) {
                     // Try to find and update the matching tool_call element
-                    // Prefer ID match; for name match, find one that hasn't had result applied yet
                     let matchingCall = null;
                     if (seg.id) {
                         matchingCall = streamingSegments.find(s => 
@@ -3897,17 +4324,40 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                         const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
                         matchingCall.element.innerHTML = '';
                         renderToolGroup(matchingCall.element, toolData, resultData);
-                        matchingCall.hasResult = true; // Mark this call as having its result
+                        matchingCall.hasResult = true;
                         seg.element = matchingCall.element;
                         seg.rendered = true;
                         seg.completed = true;
-                        continue; // Don't create a new wrapper
+                        
+                        // Update merged block stats if we're in one
+                        if (activeMergedBlock) {
+                            activeMergedBlock.stats.toolsPending = Math.max(0, activeMergedBlock.stats.toolsPending - 1);
+                            activeMergedBlock.stats.toolsCompleted++;
+                            updateMergedBlockHeader(activeMergedBlock);
+                        }
+                        continue;
                     }
                     // Orphan tool result - no matching call found
+                    // Check if we need to create/join a merged block
+                    if (!wasLastSegmentContent()) {
+                        checkRetroactiveMerge();
+                    }
+                    
                     const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
                     const toolWrapper = document.createElement('div');
                     toolWrapper.className = 'streaming-tool-segment';
-                    targetContentDiv.appendChild(toolWrapper);
+                    
+                    // Determine where to append: merged block or directly to container
+                    if (activeMergedBlock) {
+                        activeMergedBlock.contentEl.appendChild(toolWrapper);
+                        activeMergedBlock.stats.toolsCompleted++;
+                        activeMergedBlock.itemCount++;
+                        updateMergedBlockHeader(activeMergedBlock);
+                    } else {
+                        // First orphan result - append directly, might be wrapped later
+                        targetContentDiv.appendChild(toolWrapper);
+                    }
+                    
                     renderToolGroup(toolWrapper, null, resultData);
                     seg.element = toolWrapper;
                     seg.completed = true;
@@ -4014,6 +4464,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
 
     // Full render for when streaming ends - uses same buildContentHtml as loadChat
     const doFullRender = () => {
+        // Close any active merged block before final render
+        closeMergedBlock();
+        
         // Build raw text from accumulated segments
         const finalRawText = buildFinalRawText();
         
@@ -4729,6 +5182,21 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
     
     toolGroup.appendChild(groupContent);
     messageContentDiv.appendChild(toolGroup);
+    
+    // If python_interpreter has images, also display them outside the tool call
+    if (hasResult && toolName === 'python_interpreter') {
+        const externalImageRegex = /\[IMAGE:base64:([A-Za-z0-9+/=]+)\]/g;
+        let match;
+        while ((match = externalImageRegex.exec(resultText)) !== null) {
+            const externalImgContainer = document.createElement('div');
+            externalImgContainer.className = 'python-output-image';
+            const externalImg = document.createElement('img');
+            externalImg.src = `data:image/png;base64,${match[1]}`;
+            externalImg.alt = 'Python output image';
+            externalImgContainer.appendChild(externalImg);
+            messageContentDiv.appendChild(externalImgContainer);
+        }
+    }
     
     return toolGroup;
 }

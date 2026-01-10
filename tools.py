@@ -123,8 +123,16 @@ def scrape(url: str) -> str:
         return "Error: trafilatura is not installed. Please add it to your environment to use the scrape tool."
 
     try:
-        downloaded = trafilatura.fetch_url(url)
-    except Exception as exc:
+        # Use requests with 10s timeout, then pass HTML to trafilatura
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        downloaded = response.text
+    except requests.exceptions.Timeout:
+        return "Error: Request timed out (10 second limit)."
+    except requests.exceptions.RequestException as exc:
         print(f"Error fetching URL '{url}': {exc}")
         return f"Error fetching URL: {exc}"
 
