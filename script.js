@@ -1702,9 +1702,7 @@ function consolidateAssistantMessageGroups() {
             break;
         }
 
-        if (groupRows.length <= 1) {
-            return;
-        }
+        if (groupRows.length <= 1) return;
 
         const baseRow = [...groupRows].reverse().find(row => row.classList.contains('assistant-row') && !row.classList.contains('placeholder'));
         if (!baseRow) return;
@@ -1712,36 +1710,69 @@ function consolidateAssistantMessageGroups() {
         const baseContent = baseRow.querySelector('.message-content');
         if (!baseContent) return;
 
-        const originalRaw = baseContent.dataset.raw || '';
         const baseParentId = groupRows[0].dataset.parentId || baseRow.dataset.parentId || '';
-
-        const segmentElements = groupRows.map(row => {
-            const segmentContent = row.querySelector('.message-content');
-            if (!segmentContent) return null;
-
-            const segmentWrapper = document.createElement('div');
-            segmentWrapper.className = 'assistant-group-segment';
-            segmentWrapper.dataset.segmentMessageId = row.dataset.messageId || '';
-            const isToolSegment = row.classList.contains('tool-message');
-            segmentWrapper.dataset.segmentRole = isToolSegment ? 'tool' : 'assistant';
-            if (isToolSegment) {
-                segmentWrapper.classList.add('assistant-group-segment--tool');
-            } else {
-                segmentWrapper.classList.add('assistant-group-segment--assistant');
+        
+        // Collect all think/tool items and text content from all rows
+        let thinkCount = 0, toolCount = 0;
+        const mergeableItems = [];
+        const textElements = [];
+        
+        for (const row of groupRows) {
+            const content = row.querySelector('.message-content');
+            if (!content) continue;
+            
+            for (const child of Array.from(content.children)) {
+                if (child.classList.contains('merged-block')) {
+                    // Extract inner items from existing merged block
+                    const inner = child.querySelector('.merged-block-content');
+                    if (inner) {
+                        for (const item of Array.from(inner.children)) {
+                            mergeableItems.push(item);
+                            if (item.classList.contains('think-block')) thinkCount++;
+                            else toolCount++;
+                        }
+                    }
+                } else if (child.classList.contains('think-block')) {
+                    mergeableItems.push(child);
+                    thinkCount++;
+                } else if (child.classList.contains('tool-group')) {
+                    mergeableItems.push(child);
+                    toolCount++;
+                } else {
+                    textElements.push(child);
+                }
             }
-
-            while (segmentContent.firstChild) {
-                segmentWrapper.appendChild(segmentContent.firstChild);
-            }
-
-            return segmentWrapper;
-        }).filter(Boolean);
-
-        if (!segmentElements.length) return;
-
+        }
+        
         baseContent.innerHTML = '';
-        segmentElements.forEach(fragment => baseContent.appendChild(fragment));
-        baseContent.dataset.raw = originalRaw;
+        
+        // Create combined merged block if we have 2+ items
+        if (mergeableItems.length >= 2) {
+            const mergedBlock = document.createElement('div');
+            mergedBlock.className = 'merged-block collapsed';
+            
+            const parts = [];
+            if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
+            if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
+            
+            mergedBlock.innerHTML = `
+                <div class="merged-block-header">
+                    <i class="bi bi-check-circle merged-block-icon"></i>
+                    <span class="merged-block-status">${parts.join(', ') || 'Operations'}</span>
+                    <button class="merged-block-toggle" title="Expand details"><i class="bi bi-chevron-down"></i></button>
+                </div>
+                <div class="merged-block-content"></div>
+            `;
+            const mergedContent = mergedBlock.querySelector('.merged-block-content');
+            mergeableItems.forEach(el => mergedContent.appendChild(el));
+            baseContent.appendChild(mergedBlock);
+        } else {
+            // Single or no items - add directly
+            mergeableItems.forEach(el => baseContent.appendChild(el));
+        }
+        
+        // Add text content after merged block
+        textElements.forEach(el => baseContent.appendChild(el));
 
         baseRow.dataset.parentId = baseParentId;
         baseRow.dataset.groupMessageIds = groupRows.map(row => row.dataset.messageId || '').join(',');
@@ -1749,138 +1780,7 @@ function consolidateAssistantMessageGroups() {
         baseRow.classList.remove('has-tool-followup');
 
         groupRows.forEach(row => {
-            if (row !== baseRow) {
-                row.remove();
-            }
-        });
-    });
-    
-    // After consolidating rows, merge consecutive merged blocks within each consolidated group
-    mergeMergedBlocksInGroups();
-}
-
-/**
- * Merges consecutive .merged-block elements within consolidated assistant groups.
- * This handles the case where multiple assistant messages each have their own merged block,
- * and we want them all combined into one merged block.
- */
-function mergeMergedBlocksInGroups() {
-    if (!messagesWrapper) return;
-    
-    // Process each message content area
-    messagesWrapper.querySelectorAll('.message-content').forEach(contentDiv => {
-        // Find all top-level merged blocks and standalone think/tool blocks
-        const mergeableItems = [];
-        
-        // Walk through children and collect items that should be merged
-        const children = Array.from(contentDiv.children);
-        
-        for (const child of children) {
-            // Check if this is a merged block
-            if (child.classList.contains('merged-block')) {
-                mergeableItems.push({ type: 'merged-block', element: child });
-            }
-            // Check if this is a standalone think block (not inside a merged block)
-            else if (child.classList.contains('think-block')) {
-                mergeableItems.push({ type: 'think', element: child });
-            }
-            // Check if this is a standalone tool group (not inside a merged block)
-            else if (child.classList.contains('tool-group') || child.classList.contains('streaming-tool-segment')) {
-                mergeableItems.push({ type: 'tool', element: child });
-            }
-            // Check inside assistant-group-segment wrappers
-            else if (child.classList.contains('assistant-group-segment')) {
-                const segmentChildren = Array.from(child.children);
-                for (const segChild of segmentChildren) {
-                    if (segChild.classList.contains('merged-block')) {
-                        mergeableItems.push({ type: 'merged-block', element: segChild, wrapper: child });
-                    } else if (segChild.classList.contains('think-block')) {
-                        mergeableItems.push({ type: 'think', element: segChild, wrapper: child });
-                    } else if (segChild.classList.contains('tool-group') || segChild.classList.contains('streaming-tool-segment')) {
-                        mergeableItems.push({ type: 'tool', element: segChild, wrapper: child });
-                    }
-                }
-            }
-        }
-        
-        // If we have 2+ mergeable items, combine them into one merged block
-        if (mergeableItems.length < 2) return;
-        
-        // Check if there are any actual merged blocks or multiple items to combine
-        const hasMultipleMergeableContent = mergeableItems.length >= 2;
-        if (!hasMultipleMergeableContent) return;
-        
-        // Calculate combined stats
-        let thinkCount = 0;
-        let toolCount = 0;
-        const allInnerElements = [];
-        
-        for (const item of mergeableItems) {
-            if (item.type === 'merged-block') {
-                // Extract contents from existing merged block
-                const mergedContent = item.element.querySelector('.merged-block-content');
-                if (mergedContent) {
-                    Array.from(mergedContent.children).forEach(child => {
-                        allInnerElements.push(child);
-                        if (child.classList.contains('think-block')) thinkCount++;
-                        else if (child.classList.contains('tool-group') || child.classList.contains('streaming-tool-segment')) toolCount++;
-                    });
-                }
-            } else if (item.type === 'think') {
-                allInnerElements.push(item.element);
-                thinkCount++;
-            } else if (item.type === 'tool') {
-                allInnerElements.push(item.element);
-                toolCount++;
-            }
-        }
-        
-        if (allInnerElements.length < 2) return;
-        
-        // Create a new combined merged block
-        const combinedMergedBlock = document.createElement('div');
-        combinedMergedBlock.className = 'merged-block collapsed';
-        
-        const parts = [];
-        if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
-        if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
-        const headerText = parts.join(', ') || 'Operations';
-        
-        const header = document.createElement('div');
-        header.className = 'merged-block-header';
-        header.innerHTML = `
-            <i class="bi bi-check-circle merged-block-icon"></i>
-            <span class="merged-block-status">${headerText}</span>
-            <button class="merged-block-toggle" title="Expand details">
-                <i class="bi bi-chevron-down"></i>
-            </button>
-        `;
-        combinedMergedBlock.appendChild(header);
-        
-        const content = document.createElement('div');
-        content.className = 'merged-block-content';
-        allInnerElements.forEach(el => content.appendChild(el));
-        combinedMergedBlock.appendChild(content);
-        
-        // Find the first item's position to insert the combined block
-        const firstItem = mergeableItems[0];
-        const insertTarget = firstItem.wrapper || firstItem.element;
-        insertTarget.parentNode.insertBefore(combinedMergedBlock, insertTarget);
-        
-        // Remove all original merged blocks and their wrappers if empty
-        const wrappersToCheck = new Set();
-        for (const item of mergeableItems) {
-            if (item.wrapper) {
-                wrappersToCheck.add(item.wrapper);
-            }
-            item.element.remove();
-        }
-        
-        // Clean up empty wrappers
-        wrappersToCheck.forEach(wrapper => {
-            if (wrapper.children.length === 0) {
-                wrapper.remove();
-            }
+            if (row !== baseRow) row.remove();
         });
     });
 }
@@ -2137,8 +2037,7 @@ function buildContentHtml(targetContentDiv, messageText, externalToolResults = [
     const combinedPattern = new RegExp(patterns.join('|'), 'gi');
     
     // Debug: log the combined pattern
-    console.log('[buildContentHtml] Combined regex pattern:', combinedPattern.source.substring(0, 200) + '...');
-    console.log('[buildContentHtml] Text to parse length:', textToParse.length, 'Preview:', textToParse.substring(0, 100));
+
     
     // Group indices for each pattern type
     // Think pattern: 3 groups (start tag, content, end tag)
@@ -2199,8 +2098,7 @@ function buildContentHtml(targetContentDiv, messageText, externalToolResults = [
         segments.push({ type: 'text', data: remainingText });
     }
     
-    // Debug: log parsed segments
-    console.log('[buildContentHtml] Parsed segments:', segments.map(s => ({ type: s.type, dataPreview: typeof s.data === 'string' ? s.data.substring(0, 50) : s.data?.name })));
+
     
     // === TOOL CALL / RESULT MATCHING ===
     // Group tool calls with their corresponding results
@@ -2306,8 +2204,7 @@ function buildContentHtml(targetContentDiv, messageText, externalToolResults = [
         renderGroups.push(currentMergeGroup);
     }
     
-    // Debug: log render groups
-    console.log('[buildContentHtml] Render groups:', renderGroups.map(g => g.type === 'merge' ? { type: 'merge', itemCount: g.items.length, itemTypes: g.items.map(i => i.segment.type) } : { type: 'text' }));
+
     
     // === RENDER GROUPS ===
     for (const group of renderGroups) {
@@ -2878,7 +2775,7 @@ function addMessage(message) {
         const totalNonTextItems = (hasThinking ? 1 : 0) + toolCallCount;
         const needsMergedBlock = totalNonTextItems >= 2;
         
-        console.log('[addMessage] Merged block check:', { hasThinking, toolCallCount, totalNonTextItems, needsMergedBlock, tool_calls: message.tool_calls, childToolCount: childToolMessages.length });
+
         
         // Create merged block wrapper if we have 2+ non-text items
         let mergedBlock = null;
@@ -4185,8 +4082,6 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     targetContentDiv.insertAdjacentHTML('beforeend', '<span class="pulsing-cursor">█</span>');
 
     // === INCREMENTAL STREAMING ARCHITECTURE ===
-    // Each segment tracks: type, text, completed (frozen), element (DOM reference)
-    // Completed blocks are never re-rendered, preserving user interactions
     let streamingSegments = initialText ? [{ type: 'content', text: initialText, completed: false, element: null }] : [];
     let isCurrentlyThinking = false;
     let lastRenderTime = 0;
@@ -4436,9 +4331,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     targetContentDiv.appendChild(seg.element);
                 } else if (seg.type === 'tool_call') {
                     // Check if we need to create/join a merged block
-                    const wasContent = wasLastSegmentContent();
-                    console.log('[renderIncremental] Processing tool_call:', seg.name, { wasContent, hasActiveMergedBlock: !!activeMergedBlock });
-                    if (!wasContent) {
+                    if (!wasLastSegmentContent()) {
                         // Previous was also think/tool, ensure we're in a merged block
                         checkRetroactiveMerge();
                     }
@@ -4582,29 +4475,6 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         }
     };
 
-    // Build final raw text from streaming segments for full re-render
-    const buildFinalRawText = () => {
-        const cotTags = getCotTagPairs();
-        const defaultStart = cotTags.length > 0 ? cotTags[0].start : '<think>';
-        const defaultEnd = cotTags.length > 0 ? cotTags[0].end : '</think>';
-        
-        let rawText = '';
-        for (const seg of streamingSegments) {
-            if (seg.type === 'thinking' && seg.text) {
-                rawText += `${defaultStart}\n${seg.text}\n${defaultEnd}\n`;
-            } else if (seg.type === 'content' && seg.text) {
-                rawText += seg.text;
-            } else if (seg.type === 'tool_call') {
-                const argsStr = seg.arguments ? JSON.stringify(seg.arguments, null, 2) : '';
-                rawText += `<tool_call name="${seg.name}"${seg.id ? ` id="${seg.id}"` : ''}>\n${argsStr}\n</tool_call>\n`;
-            } else if (seg.type === 'tool_result') {
-                const statusAttr = seg.error ? ' status="error"' : '';
-                rawText += `<tool_result name="${seg.name}"${statusAttr}>\n${seg.result || ''}\n</tool_result>\n`;
-            }
-        }
-        return rawText;
-    };
-
     // Add message actions to the placeholder message div
     const addMessageActions = () => {
         const messageDiv = targetContentDiv?.closest('.message');
@@ -4636,22 +4506,23 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
 
     // Full render for when streaming ends - uses same buildContentHtml as loadChat
     const doFullRender = () => {
-        // Close any active merged block before final render
+        // Close any active merged block and finalize its header
         closeMergedBlock();
         
-        // Build raw text from accumulated segments
-        const finalRawText = buildFinalRawText();
+        // Finalize all streaming elements - no full re-render needed
+        // The DOM is already correct from incremental rendering
         
-        // Capture collapse states before full re-render
-        const savedStates = captureCollapseStates(targetContentDiv);
+        // Finalize any streaming-specific classes/attributes
+        targetContentDiv.querySelectorAll('.streaming-content-segment').forEach(seg => {
+            seg.dataset.streamingActive = 'false';
+        });
+        targetContentDiv.querySelectorAll('.streaming-tool-segment').forEach(seg => {
+            seg.classList.remove('streaming-tool-segment');
+        });
         
-        // Full re-render using the same function as loadChat
-        buildContentHtml(targetContentDiv, finalRawText);
-        
-        // Re-apply collapse states
-        if (savedStates) {
-            applyCollapseStates(targetContentDiv, savedStates);
-        }
+        // Finalize code blocks
+        finalizeStreamingCodeBlocks(targetContentDiv);
+        applyCodeBlockDefaults(targetContentDiv);
         
         // Add message actions (copy button, etc.)
         addMessageActions();

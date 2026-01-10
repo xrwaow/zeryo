@@ -470,19 +470,6 @@ body.welcome-active .input-area .input-container {
     color: white;
 }
 
-.assistant-group-row .assistant-group-segment {
-    display: block;
-    margin-bottom: 12px;
-}
-
-.assistant-group-row .assistant-group-segment:last-child {
-    margin-bottom: 0;
-}
-
-.assistant-group-row .assistant-group-segment--tool {
-    margin-top: 4px;
-}
-
 .code-header {
     display: flex;
     justify-content: space-between;
