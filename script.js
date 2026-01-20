@@ -1784,7 +1784,16 @@ function consolidateAssistantMessageGroups() {
                         <div class="merged-block-content"></div>
                     `;
                     const mergedContent = mergedBlock.querySelector('.merged-block-content');
-                    group.items.forEach(i => mergedContent.appendChild(i.el));
+                    group.items.forEach(i => {
+                        if (i.el.classList.contains('think-block') && i.el.dataset.userToggled !== 'true') {
+                            i.el.classList.remove('collapsed');
+                            const icon = i.el.querySelector('.think-block-toggle i');
+                            if (icon) icon.className = 'bi bi-chevron-up';
+                            const btn = i.el.querySelector('.think-block-toggle');
+                            if (btn) btn.title = 'Collapse thinking';
+                        }
+                        mergedContent.appendChild(i.el);
+                    });
                     baseContent.appendChild(mergedBlock);
                 } else {
                     baseContent.appendChild(group.items[0].el);
@@ -2257,19 +2266,20 @@ function renderMarkdownContent(text) {
 }
 
 // Helper: Render a single segment (think, tool, or result) directly to container
-function renderSingleSegment(container, segment, idx, toolGroups, processedResults) {
+function renderSingleSegment(container, segment, idx, toolGroups, processedResults, inMergedBlock = false) {
     if (segment.type === 'think') {
         // Create a standalone think block
         const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = 'think-block block collapsed';
+        const isCollapsed = !inMergedBlock;
+        thinkBlockWrapper.className = `think-block block${isCollapsed ? ' collapsed' : ''}`;
         
         const header = document.createElement('div');
         header.className = 'think-header block-header';
         header.innerHTML = `
             <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking</span>
             <div class="think-header-actions">
-                <button class="think-block-toggle" title="Expand thinking">
-                    <i class="bi bi-chevron-down"></i>
+                <button class="think-block-toggle" title="${isCollapsed ? 'Expand thinking' : 'Collapse thinking'}">
+                    <i class="bi bi-chevron-${isCollapsed ? 'down' : 'up'}"></i>
                 </button>
             </div>`;
         thinkBlockWrapper.appendChild(header);
@@ -2332,7 +2342,7 @@ function createStaticMergedBlock(items, toolGroups, processedResults) {
     
     // Render each item into the content
     for (const item of items) {
-        renderSingleSegment(content, item.segment, item.index, toolGroups, processedResults);
+        renderSingleSegment(content, item.segment, item.index, toolGroups, processedResults, true);
     }
 
     wrapper.appendChild(content);
@@ -2836,15 +2846,16 @@ function addMessage(message) {
         // Render thinking block first if present
         if (message.thinking_content) {
             const thinkBlockWrapper = document.createElement('div');
-            thinkBlockWrapper.className = 'think-block block collapsed';
+            const isCollapsed = !needsMergedBlock;
+            thinkBlockWrapper.className = `think-block block${isCollapsed ? ' collapsed' : ''}`;
             
             const header = document.createElement('div');
             header.className = 'think-header block-header';
             header.innerHTML = `
                 <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking</span>
                 <div class="think-header-actions">
-                    <button class="think-block-toggle" title="Expand thinking">
-                        <i class="bi bi-chevron-down"></i>
+                    <button class="think-block-toggle" title="${isCollapsed ? 'Expand thinking' : 'Collapse thinking'}">
+                        <i class="bi bi-chevron-${isCollapsed ? 'down' : 'up'}"></i>
                     </button>
                 </div>`;
             thinkBlockWrapper.appendChild(header);
@@ -4344,9 +4355,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
 
     // Create a think block DOM element
     // Toggle is handled by delegated event listener on messagesWrapper
-    const createThinkBlockElement = () => {
+    const createThinkBlockElement = (isCollapsed = true) => {
         const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = 'think-block block collapsed';
+        thinkBlockWrapper.className = `think-block block${isCollapsed ? ' collapsed' : ''}`;
         thinkBlockWrapper.dataset.tempId = 'streaming-think-block';
 
         const header = document.createElement('div');
@@ -4354,8 +4365,8 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         header.innerHTML = `
             <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking...</span>
             <div class="think-header-actions">
-                <button class="think-block-toggle" title="Expand thinking">
-                    <i class="bi bi-chevron-down"></i>
+                <button class="think-block-toggle" title="${isCollapsed ? 'Expand thinking' : 'Collapse thinking'}">
+                    <i class="bi bi-chevron-${isCollapsed ? 'down' : 'up'}"></i>
                 </button>
             </div>`;
         
@@ -4395,7 +4406,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                         checkRetroactiveMerge();
                     }
                     
-                    seg.element = createThinkBlockElement();
+                    seg.element = createThinkBlockElement(!activeMergedBlock);
                     if (!activeMergedBlock) {
                         addHeaderShimmer(seg.element.querySelector('.block-header'));
                     }
@@ -5142,6 +5153,45 @@ function getToolIcon(name) {
     return iconMap[name] || 'tools';
 }
 
+// Tool header input preview config
+const TOOL_HEADER_ARG_PREVIEW = {
+    enabled: true,
+    maxChars: 80,
+    toolNames: ['search', 'scrape']
+};
+
+function truncateEnd(text, maxChars) {
+    if (!text) return '';
+    if (!maxChars || text.length <= maxChars) return text;
+    if (maxChars <= 1) return '…';
+    return `${text.slice(0, maxChars - 1)}…`;
+}
+
+function getToolHeaderArgPreview(toolName, payloadInfo) {
+    if (!TOOL_HEADER_ARG_PREVIEW.enabled) return '';
+    const normalizedName = (toolName || '').toLowerCase();
+    if (!TOOL_HEADER_ARG_PREVIEW.toolNames.includes(normalizedName)) return '';
+
+    const args = payloadInfo?.arguments || {};
+    let value = '';
+
+    if (normalizedName === 'search') {
+        value = args.query ?? args.q ?? args.search ?? args.input ?? '';
+    } else if (normalizedName === 'scrape') {
+        value = args.url ?? args.link ?? args.target ?? args.input ?? '';
+    }
+
+    if (!value && typeof args === 'string') value = args;
+    if (!value && args && typeof args === 'object') {
+        const fallback = Object.values(args).find(v => typeof v === 'string' && v.trim());
+        if (fallback) value = fallback;
+    }
+
+    const text = String(value || '').trim();
+    if (!text) return '';
+    return truncateEnd(text, TOOL_HEADER_ARG_PREVIEW.maxChars);
+}
+
 /**
  * Renders a unified tool group block containing both the tool call and its result.
  * This creates a single, cohesive collapsible block instead of separate disconnected elements.
@@ -5181,9 +5231,11 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
     const statusClass = hasResult ? (isError ? 'error' : 'success') : 'pending';
     const statusText = hasResult ? (isError ? 'Error' : 'Completed') : 'Running...';
     
+    const headerArgPreview = hasCall ? getToolHeaderArgPreview(toolName, toolData?.payloadInfo) : '';
     headerLeft.innerHTML = `
         <i class="bi bi-${toolIcon} tool-group-icon"></i>
         <span class="tool-group-name">${escapeHtml(toolName)}</span>
+        ${headerArgPreview ? `<span class="tool-group-arg-preview">${escapeHtml(headerArgPreview)}</span>` : ''}
         ${showStatus ? `<span class="tool-group-status ${statusClass}">
             <i class="bi bi-${statusIcon}"></i>
             ${statusText}

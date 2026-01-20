@@ -1954,6 +1954,17 @@ body.welcome-active .input-area .input-container {
     text-overflow: ellipsis;
 }
 
+.tool-group-arg-preview {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+    flex: 1 1 auto;
+    max-width: 360px;
+}
+
 .tool-group-status {
     display: flex;
     align-items: center;
@@ -2076,7 +2087,7 @@ body.welcome-active .input-area .input-container {
     border: none;
     color: inherit;
     padding: 2px 6px;
-    border-radius: var(--border-radius-sm);
+    border-radius: var(--border-radius-sm);;
     cursor: pointer;
     font-size: 12px;
     line-height: 1;
