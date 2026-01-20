@@ -1711,68 +1711,89 @@ function consolidateAssistantMessageGroups() {
         if (!baseContent) return;
 
         const baseParentId = groupRows[0].dataset.parentId || baseRow.dataset.parentId || '';
-        
-        // Collect all think/tool items and text content from all rows
-        let thinkCount = 0, toolCount = 0;
-        const mergeableItems = [];
-        const textElements = [];
-        
+
+        // Collect items in original order, tracking mergeable vs text
+        const orderedItems = [];
+        const pushMergeable = (el) => {
+            const isThink = el.classList.contains('think-block');
+            orderedItems.push({ type: 'mergeable', el, kind: isThink ? 'think' : 'tool' });
+        };
+
         for (const row of groupRows) {
             const content = row.querySelector('.message-content');
             if (!content) continue;
-            
+
             for (const child of Array.from(content.children)) {
                 if (child.classList.contains('merged-block')) {
-                    // Extract inner items from existing merged block
                     const inner = child.querySelector('.merged-block-content');
                     if (inner) {
                         for (const item of Array.from(inner.children)) {
-                            mergeableItems.push(item);
-                            if (item.classList.contains('think-block')) thinkCount++;
-                            else toolCount++;
+                            pushMergeable(item);
                         }
                     }
-                } else if (child.classList.contains('think-block')) {
-                    mergeableItems.push(child);
-                    thinkCount++;
-                } else if (child.classList.contains('tool-group')) {
-                    mergeableItems.push(child);
-                    toolCount++;
+                } else if (
+                    child.classList.contains('think-block') ||
+                    child.classList.contains('tool-group') ||
+                    child.classList.contains('tool-call-block') ||
+                    child.classList.contains('tool-result-block')
+                ) {
+                    pushMergeable(child);
                 } else {
-                    textElements.push(child);
+                    orderedItems.push({ type: 'text', el: child });
                 }
             }
         }
-        
-        baseContent.innerHTML = '';
-        
-        // Create combined merged block if we have 2+ items
-        if (mergeableItems.length >= 2) {
-            const mergedBlock = document.createElement('div');
-            mergedBlock.className = 'merged-block collapsed';
-            
-            const parts = [];
-            if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
-            if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
-            
-            mergedBlock.innerHTML = `
-                <div class="merged-block-header">
-                    <i class="bi bi-check-circle merged-block-icon"></i>
-                    <span class="merged-block-status">${parts.join(', ') || 'Operations'}</span>
-                    <button class="merged-block-toggle" title="Expand details"><i class="bi bi-chevron-down"></i></button>
-                </div>
-                <div class="merged-block-content"></div>
-            `;
-            const mergedContent = mergedBlock.querySelector('.merged-block-content');
-            mergeableItems.forEach(el => mergedContent.appendChild(el));
-            baseContent.appendChild(mergedBlock);
-        } else {
-            // Single or no items - add directly
-            mergeableItems.forEach(el => baseContent.appendChild(el));
+
+        // Build render groups to respect text boundaries
+        const renderGroups = [];
+        let currentMerge = null;
+
+        for (const item of orderedItems) {
+            if (item.type === 'mergeable') {
+                if (!currentMerge) currentMerge = [];
+                currentMerge.push(item);
+            } else {
+                if (currentMerge) {
+                    renderGroups.push({ type: 'merge', items: currentMerge });
+                    currentMerge = null;
+                }
+                renderGroups.push({ type: 'text', item });
+            }
         }
-        
-        // Add text content after merged block
-        textElements.forEach(el => baseContent.appendChild(el));
+        if (currentMerge) renderGroups.push({ type: 'merge', items: currentMerge });
+
+        baseContent.innerHTML = '';
+
+        for (const group of renderGroups) {
+            if (group.type === 'merge') {
+                if (group.items.length >= 2) {
+                    const mergedBlock = document.createElement('div');
+                    mergedBlock.className = 'merged-block collapsed';
+
+                    const thinkCount = group.items.filter(i => i.kind === 'think').length;
+                    const toolCount = group.items.filter(i => i.kind === 'tool').length;
+                    const parts = [];
+                    if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
+                    if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
+
+                    mergedBlock.innerHTML = `
+                        <div class="merged-block-header">
+                            <i class="bi bi-check-circle merged-block-icon"></i>
+                            <span class="merged-block-status">${parts.join(', ') || 'Operations'}</span>
+                            <button class="merged-block-toggle" title="Expand details"><i class="bi bi-chevron-down"></i></button>
+                        </div>
+                        <div class="merged-block-content"></div>
+                    `;
+                    const mergedContent = mergedBlock.querySelector('.merged-block-content');
+                    group.items.forEach(i => mergedContent.appendChild(i.el));
+                    baseContent.appendChild(mergedBlock);
+                } else {
+                    baseContent.appendChild(group.items[0].el);
+                }
+            } else {
+                baseContent.appendChild(group.item.el);
+            }
+        }
 
         baseRow.dataset.parentId = baseParentId;
         baseRow.dataset.groupMessageIds = groupRows.map(row => row.dataset.messageId || '').join(',');
@@ -4090,7 +4111,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
 
     // === MERGED BLOCK TRACKING ===
     // Tracks the active merged block container for grouping consecutive think/tool blocks
-    let activeMergedBlock = null; // { element: DOM, headerEl: DOM, contentEl: DOM, stats: { thinkCount: int, toolsPending: int, toolsCompleted: int }, itemCount: int }
+    let activeMergedBlock = null; // { element: DOM, headerEl: DOM, contentEl: DOM, stats: { thinkCount, toolBatchTotal, toolBatchCompleted, toolsCompletedTotal, thinkingActive }, itemCount: int }
 
     // Create a merged block container element
     const createMergedBlockElement = () => {
@@ -4118,7 +4139,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     // Update the merged block header based on current stats
     const updateMergedBlockHeader = (mb, isFinal = false) => {
         if (!mb || !mb.headerEl) return;
-        const { thinkCount, toolsPending, toolsCompleted } = mb.stats;
+        const { thinkCount, toolBatchTotal, toolBatchCompleted, toolsCompletedTotal, thinkingActive } = mb.stats;
         const statusEl = mb.headerEl.querySelector('.merged-block-status');
         const iconEl = mb.headerEl.querySelector('.merged-block-icon');
         if (!statusEl || !iconEl) return;
@@ -4130,22 +4151,20 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             // Final state summary
             const parts = [];
             if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
-            if (toolsCompleted > 0) parts.push(`${toolsCompleted} tool call${toolsCompleted > 1 ? 's' : ''}`);
+            if (toolsCompletedTotal > 0) parts.push(`${toolsCompletedTotal} tool call${toolsCompletedTotal > 1 ? 's' : ''}`);
             text = parts.length > 0 ? parts.join(', ') : 'Completed';
             icon = 'check-circle';
-        } else if (toolsPending > 0) {
+        } else if (toolBatchTotal > 0 && toolBatchCompleted < toolBatchTotal) {
             // Tools are running
-            const current = toolsCompleted + 1;
-            const total = toolsCompleted + toolsPending;
-            text = total > 1 ? `Executing tools (${current}/${total})...` : 'Executing tool...';
+            text = `Executing tools (${toolBatchCompleted}/${toolBatchTotal})...`;
             icon = 'gear';
-        } else if (thinkCount > 0 && toolsCompleted === 0) {
-            // Only thinking so far
+        } else if (thinkingActive) {
+            // Currently thinking
             text = 'Thinking...';
             icon = 'lightbulb';
-        } else if (toolsCompleted > 0) {
+        } else if (toolsCompletedTotal > 0) {
             // Tools completed, possibly more coming
-            text = `${toolsCompleted} tool call${toolsCompleted > 1 ? 's' : ''} completed`;
+            text = `${toolsCompletedTotal} tool call${toolsCompletedTotal > 1 ? 's' : ''} completed`;
             icon = 'check-circle';
         } else {
             text = 'Working...';
@@ -4164,11 +4183,43 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 element: el,
                 headerEl: el.querySelector('.merged-block-header'),
                 contentEl: el.querySelector('.merged-block-content'),
-                stats: { thinkCount: 0, toolsPending: 0, toolsCompleted: 0 },
+                stats: { thinkCount: 0, toolBatchTotal: 0, toolBatchCompleted: 0, toolsCompletedTotal: 0, thinkingActive: false },
                 itemCount: 0
             };
         }
         return activeMergedBlock;
+    };
+
+    const resetToolBatchIfComplete = (mb) => {
+        if (!mb) return;
+        if (mb.stats.toolBatchTotal > 0 && mb.stats.toolBatchCompleted >= mb.stats.toolBatchTotal) {
+            mb.stats.toolBatchTotal = 0;
+            mb.stats.toolBatchCompleted = 0;
+        }
+    };
+
+    const addToolCallToBatch = (mb, completed = false) => {
+        if (!mb) return;
+        resetToolBatchIfComplete(mb);
+        mb.stats.toolBatchTotal += 1;
+        if (completed) {
+            mb.stats.toolBatchCompleted += 1;
+            mb.stats.toolsCompletedTotal += 1;
+        }
+    };
+
+    const addToolResultToBatch = (mb, hasCall = true) => {
+        if (!mb) return;
+        if (!hasCall) {
+            resetToolBatchIfComplete(mb);
+            if (mb.stats.toolBatchTotal === 0) mb.stats.toolBatchTotal = 1;
+        } else if (mb.stats.toolBatchTotal === 0) {
+            mb.stats.toolBatchTotal = 1;
+        }
+        if (mb.stats.toolBatchCompleted < mb.stats.toolBatchTotal) {
+            mb.stats.toolBatchCompleted += 1;
+        }
+        mb.stats.toolsCompletedTotal += 1;
     };
 
     // Close the active merged block (finalize it)
@@ -4198,12 +4249,13 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             mb.itemCount++;
             if (lastNonContent.type === 'thinking') {
                 mb.stats.thinkCount++;
+                mb.stats.thinkingActive = !lastNonContent.completed;
             } else if (lastNonContent.type === 'tool_call' || lastNonContent.type === 'tool_result') {
                 // Tool was already completed, count it
                 if (lastNonContent.hasResult || lastNonContent.type === 'tool_result') {
-                    mb.stats.toolsCompleted++;
+                    addToolCallToBatch(mb, true);
                 } else {
-                    mb.stats.toolsPending++;
+                    addToolCallToBatch(mb, false);
                 }
             }
             updateMergedBlockHeader(mb);
@@ -4230,6 +4282,10 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             // Mark previous segment as completed (frozen)
             if (lastSeg && !lastSeg.completed) {
                 lastSeg.completed = true;
+                if (lastSeg.type === 'thinking' && activeMergedBlock) {
+                    activeMergedBlock.stats.thinkingActive = false;
+                    updateMergedBlockHeader(activeMergedBlock);
+                }
             }
             // Create new segment
             const newSeg = { type, text: '', completed: false, element: null };
@@ -4318,6 +4374,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     if (activeMergedBlock) {
                         activeMergedBlock.contentEl.appendChild(seg.element);
                         activeMergedBlock.stats.thinkCount++;
+                        activeMergedBlock.stats.thinkingActive = true;
                         activeMergedBlock.itemCount++;
                         updateMergedBlockHeader(activeMergedBlock);
                     } else {
@@ -4356,11 +4413,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     if (activeMergedBlock) {
                         activeMergedBlock.contentEl.appendChild(toolWrapper);
                         activeMergedBlock.itemCount++;
-                        if (matchingResult) {
-                            activeMergedBlock.stats.toolsCompleted++;
-                        } else {
-                            activeMergedBlock.stats.toolsPending++;
-                        }
+                        addToolCallToBatch(activeMergedBlock, !!matchingResult);
                         updateMergedBlockHeader(activeMergedBlock);
                     } else {
                         // First tool block - append directly, might be wrapped later
@@ -4396,8 +4449,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                         
                         // Update merged block stats if we're in one
                         if (activeMergedBlock) {
-                            activeMergedBlock.stats.toolsPending = Math.max(0, activeMergedBlock.stats.toolsPending - 1);
-                            activeMergedBlock.stats.toolsCompleted++;
+                            addToolResultToBatch(activeMergedBlock, true);
                             updateMergedBlockHeader(activeMergedBlock);
                         }
                         continue;
@@ -4415,7 +4467,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     // Determine where to append: merged block or directly to container
                     if (activeMergedBlock) {
                         activeMergedBlock.contentEl.appendChild(toolWrapper);
-                        activeMergedBlock.stats.toolsCompleted++;
+                        addToolResultToBatch(activeMergedBlock, false);
                         activeMergedBlock.itemCount++;
                         updateMergedBlockHeader(activeMergedBlock);
                     } else {
