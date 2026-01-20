@@ -1215,53 +1215,78 @@ body.welcome-active .input-area .input-container {
     gap: 10px;
 }
 
-/* Think Block (NEW STYLING) */
-.think-block {
+/* --- Block Styles (shared) --- */
+.block {
     margin: 12px 0;
-    border-radius: var(--border-radius-sm);
-    border: 1px solid var(--think-block-border);
+    border-radius: var(--border-radius-md);
+    border: 1px solid var(--border-color);
     background-color: var(--think-block-bg);
-    /* No overflow:hidden - allows sticky header to work */
     position: relative;
+    overflow: hidden;
 }
 
-.think-header {
+.think-block.block {
+    overflow: visible; /* Required for sticky header */
+}
+
+.block-header {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 4px 8px;
-    font-size: 12px;
-    font-weight: 500;
+    padding: 8px 12px;
     background-color: var(--think-block-header-bg);
-    color: var(--think-block-header-text);
+    color: var(--text-primary);
     cursor: pointer;
-    /* Sticky positioning like code-header */
+    user-select: none;
+    transition: background 0.2s ease;
+    border-top-left-radius: var(--border-radius-md);
+    border-top-right-radius: var(--border-radius-md);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.block-header:hover {
+    background: color-mix(in srgb, var(--accent-color) 15%, var(--think-block-header-bg));
+}
+
+.think-content,
+.tool-group-content,
+.merged-block-content {
+    border-top: 1px solid var(--border-color);
+    background-color: var(--think-block-bg);
+}
+
+.think-block.collapsed .block-header,
+.tool-group.collapsed .block-header,
+.merged-block.collapsed .block-header {
+    border-bottom-left-radius: var(--border-radius-md);
+    border-bottom-right-radius: var(--border-radius-md);
+}
+
+/* Specific Header Details */
+.think-header {
     position: sticky;
     top: 0px;
     z-index: 10;
-    border-top-left-radius: var(--border-radius-sm);
-    border-top-right-radius: var(--border-radius-sm);
-    /* Ensure clickable */
-    user-select: none;
+    gap: 12px;
+}
+
+.tool-group-header {
+    justify-content: space-between;
+}
+
+.merged-block-header {
+    gap: 10px;
 }
 
 .think-header-title {
     display: flex;
     align-items: center;
-    gap: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    gap: 8px;
 }
 
 .think-header-title i {
-    font-size: 14px; /* Icon size */
-}
-
-.think-timer {
-    font-family: 'JetBrains Mono', monospace;
-    color: var(--text-secondary);
-    min-width: 35px; /* Prevents layout shift as timer updates */
-    text-align: left;
+    font-size: 14px;
+    color: var(--accent-color);
 }
 
 .think-header-actions {
@@ -1272,9 +1297,9 @@ body.welcome-active .input-area .input-container {
 
 .think-block-toggle {
     background-color: transparent;
-    border: 1px solid transparent; /* Match tool button */
+    border: none;
     color: var(--text-secondary);
-    padding: 1px 5px;
+    padding: 2px 6px;
     border-radius: var(--border-radius-sm);
     cursor: pointer;
     font-size: 12px;
@@ -1283,29 +1308,20 @@ body.welcome-active .input-area .input-container {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 20px;
-    height: 20px;
 }
 
 .think-content {
-    padding: 10px 15px;
-    font-size: 13px; /* Slightly smaller like tool content */
+    padding: 12px 15px;
+    font-size: 13px;
     color: var(--text-primary);
-    /* Code blocks inside will be handled by highlight.js styling */
-    /* Background needed for clean appearance below sticky header */
     background-color: var(--think-block-bg);
-    border-bottom-left-radius: var(--border-radius-sm);
-    border-bottom-right-radius: var(--border-radius-sm);
+    border-bottom-left-radius: var(--border-radius-md);
+    border-bottom-right-radius: var(--border-radius-md);
 }
 
 /* Collapsed state for Think Block */
 .think-block.collapsed .think-content {
     display: none;
-}
-
-.think-block.collapsed .think-header {
-   border-bottom-left-radius: var(--border-radius-sm);
-   border-bottom-right-radius: var(--border-radius-sm);
 }
 
 .think-block:not(.collapsed) .think-header {
@@ -1860,49 +1876,21 @@ body.welcome-active .input-area .input-container {
 }
 
 /* --- Unified Tool Group Styling --- */
-.tool-group {
-    border-radius: var(--border-radius-md);
-    border: 1px solid var(--border-color);
-    background: var(--bg-tertiary);
-    margin: 12px 0;
-    overflow: hidden;
+.tool-group.block {
     transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.tool-group:hover {
-    border-color: color-mix(in srgb, var(--accent-color) 50%, var(--border-color));
-}
-
-.tool-group.success {
-    border-color: color-mix(in srgb, var(--accent-color) 40%, var(--border-color));
-}
-
-.tool-group.error {
+.tool-group.block.error {
     border-color: color-mix(in srgb, var(--error-color) 40%, var(--border-color));
 }
 
-/* Tool Group Header */
-.tool-group-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 4px 8px;
-    background: color-mix(in srgb, var(--accent-color) 8%, var(--bg-tertiary));
-    cursor: pointer;
-    transition: background 0.2s ease;
-    user-select: none;
+/* Tool Group Header (Success/Error overlays) */
+.tool-group.block.success .block-header {
+    background: color-mix(in srgb, var(--accent-color) 12%, var(--think-block-header-bg));
 }
 
-.tool-group.success .tool-group-header {
-    background: color-mix(in srgb, var(--accent-color) 12%, var(--bg-tertiary));
-}
-
-.tool-group.error .tool-group-header {
-    background: color-mix(in srgb, var(--error-color) 10%, var(--bg-tertiary));
-}
-
-.tool-group-header:hover {
-    background: color-mix(in srgb, var(--accent-color) 15%, var(--bg-tertiary));
+.tool-group.block.error .block-header {
+    background: color-mix(in srgb, var(--error-color) 10%, var(--think-block-header-bg));
 }
 
 .tool-group-header-left {
@@ -1911,6 +1899,10 @@ body.welcome-active .input-area .input-container {
     gap: 10px;
     flex: 1;
     min-width: 0;
+}
+
+.tool-group-header {
+    justify-content: space-between;
 }
 
 .tool-group-icon {
@@ -1922,8 +1914,8 @@ body.welcome-active .input-area .input-container {
 .tool-group-name {
     font-family: 'JetBrains Mono', monospace;
     font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
+    font-weight: 500;    
+    color: inherit;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -1951,8 +1943,8 @@ body.welcome-active .input-area .input-container {
 }
 
 .tool-group-status.pending {
-    background: color-mix(in srgb, var(--text-secondary) 15%, transparent);
-    color: var(--text-secondary);
+    background: color-mix(in srgb, var(--text-primary) 15%, transparent);
+    color: var(--text-primary);
 }
 
 .tool-group-status i {
@@ -1967,10 +1959,6 @@ body.welcome-active .input-area .input-container {
 }
 
 /* Tool Group Content (collapsible) */
-.tool-group-content {
-    border-top: 1px solid var(--border-color);
-}
-
 .tool-group.collapsed .tool-group-content {
     display: none;
 }
@@ -1989,28 +1977,16 @@ body.welcome-active .input-area .input-container {
     align-items: center;
     gap: 6px;
     padding: 8px 14px 0px 14px;
-    font-size: 11px;
-    font-weight: 600;
+    font-size: 12px;
+    font-weight: 500;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-    color: var(--text-secondary);
-    background: color-mix(in srgb, var(--bg-primary) 50%, transparent);
-}
-
-.tool-section-header i {
-    font-size: 12px;
+    color: var(--text-primary);
+    background: var(--bg-secondary);
 }
 
 .tool-call-section .tool-section-header {
     color: var(--accent-color);
-}
-
-.tool-result-section.success .tool-section-header {
-    color: var(--accent-color);
-}
-
-.tool-result-section.error .tool-section-header {
-    color: var(--error-color);
 }
 
 .tool-section-content {
@@ -2049,29 +2025,6 @@ body.welcome-active .input-area .input-container {
 }
 
 /* --- Merged Block (groups consecutive think blocks and tool calls) --- */
-.merged-block {
-    border-radius: var(--border-radius-md);
-    border: 1px solid var(--border-color);
-    background: var(--bg-secondary);
-    margin: 12px 0;
-    overflow: hidden;
-}
-
-.merged-block-header {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    background: var(--bg-tertiary);
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.2s ease;
-}
-
-.merged-block-header:hover {
-    background: color-mix(in srgb, var(--accent-color) 10%, var(--bg-tertiary));
-}
-
 .merged-block-icon {
     font-size: 14px;
     color: var(--accent-color);
@@ -2082,13 +2035,13 @@ body.welcome-active .input-area .input-container {
     flex: 1;
     font-size: 13px;
     font-weight: 500;
-    color: var(--text-secondary);
+    margin-left: 4px;
 }
 
 .merged-block-toggle {
     background: transparent;
     border: none;
-    color: var(--text-secondary);
+    color: inherit;
     padding: 2px 6px;
     border-radius: var(--border-radius-sm);
     cursor: pointer;
@@ -2105,26 +2058,51 @@ body.welcome-active .input-area .input-container {
     background: color-mix(in srgb, var(--text-secondary) 15%, transparent);
 }
 
-.merged-block-content {
-    border-top: 1px solid var(--border-color);
-}
-
 .merged-block.collapsed .merged-block-content {
     display: none;
 }
 
-/* Inner blocks within merged-block get reduced styling */
-.merged-block-content .think-block,
-.merged-block-content .tool-group,
-.merged-block-content .streaming-tool-segment .tool-group {
+/* --- Inner blocks within merged-block (Subtle Style) --- */
+.merged-block-content .block {
     border: none;
     border-radius: 0;
     margin: 0;
     border-bottom: 1px solid var(--border-color);
+    background-color: var(--bg-secondary);
 }
 
-.merged-block-content > *:last-child,
-.merged-block-content > *:last-child .tool-group {
+.merged-block-content .block-header {
+    background-color: var(--bg-tertiary);
+    padding: 4px 12px;
+    border-radius: 0;
+    font-size: 13px;
+    position: relative;
+    top: auto;
+}
+
+.merged-block-content .block-header:hover {
+    background: color-mix(in srgb, var(--accent-color) 10%, var(--bg-tertiary));
+}
+
+.merged-block-content .think-header-title {
+    text-transform: none;
+    letter-spacing: normal;
+    gap: 8px;
+}
+
+.merged-block-content .think-content,
+.merged-block-content .tool-group-content {
+    background-color: var(--bg-secondary);
+    border-top: none;
+    border-radius: 0;
+}
+
+.merged-block-content .tool-group.success .block-header,
+.merged-block-content .tool-group.error .block-header {
+    background-color: var(--bg-tertiary);
+}
+
+.merged-block-content > *:last-child,tool-group-header block-headererged-block-content > *:last-child .tool-group {
     border-bottom: none;
 }
 

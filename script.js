@@ -1102,16 +1102,15 @@ function renderMarkdown(text, initialCollapsedState = true, temporaryId = null) 
         const { thinkContent, remainingText } = parseThinkContent(processedText, cotTagPairs);
 
         const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = `think-block ${initialCollapsedState ? 'collapsed' : ''}`;
+        thinkBlockWrapper.className = `think-block block ${initialCollapsedState ? 'collapsed' : ''}`;
         if (temporaryId) { thinkBlockWrapper.dataset.tempId = temporaryId; }
 
         const header = document.createElement('div');
-        header.className = 'think-header';
+        header.className = 'think-header block-header';
         header.innerHTML = `
-            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
-            <span class="think-timer"></span>
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking...</span>
             <div class="think-header-actions">
-                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thought process">
+                <button class="think-block-toggle" title="${initialCollapsedState ? 'Expand' : 'Collapse'} thinking">
                     <i class="bi bi-chevron-${initialCollapsedState ? 'down' : 'up'}"></i>
                 </button>
             </div>`;
@@ -1215,7 +1214,7 @@ function handleThinkBlockToggle(targetElement) {
         icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
     }
     if (toggleBtn) {
-        toggleBtn.title = isCollapsed ? 'Expand thought process' : 'Collapse thought process';
+        toggleBtn.title = isCollapsed ? 'Expand thinking' : 'Collapse thinking';
     }
 
     persistCollapseState(block, 'think', isCollapsed);
@@ -1768,16 +1767,16 @@ function consolidateAssistantMessageGroups() {
             if (group.type === 'merge') {
                 if (group.items.length >= 2) {
                     const mergedBlock = document.createElement('div');
-                    mergedBlock.className = 'merged-block collapsed';
+                    mergedBlock.className = 'merged-block block collapsed';
 
                     const thinkCount = group.items.filter(i => i.kind === 'think').length;
                     const toolCount = group.items.filter(i => i.kind === 'tool').length;
                     const parts = [];
-                    if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
-                    if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
+                    if (thinkCount > 0) parts.push(`${thinkCount} Thinking`);
+                    if (toolCount > 0) parts.push(`${toolCount} Tool call${toolCount > 1 ? 's' : ''}`);
 
                     mergedBlock.innerHTML = `
-                        <div class="merged-block-header">
+                        <div class="merged-block-header block-header">
                             <i class="bi bi-check-circle merged-block-icon"></i>
                             <span class="merged-block-status">${parts.join(', ') || 'Operations'}</span>
                             <button class="merged-block-toggle" title="Expand details"><i class="bi bi-chevron-down"></i></button>
@@ -2262,14 +2261,14 @@ function renderSingleSegment(container, segment, idx, toolGroups, processedResul
     if (segment.type === 'think') {
         // Create a standalone think block
         const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = 'think-block collapsed';
+        thinkBlockWrapper.className = 'think-block block collapsed';
         
         const header = document.createElement('div');
-        header.className = 'think-header';
+        header.className = 'think-header block-header';
         header.innerHTML = `
-            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking</span>
             <div class="think-header-actions">
-                <button class="think-block-toggle" title="Expand thought process">
+                <button class="think-block-toggle" title="Expand thinking">
                     <i class="bi bi-chevron-down"></i>
                 </button>
             </div>`;
@@ -2296,7 +2295,7 @@ function renderSingleSegment(container, segment, idx, toolGroups, processedResul
 // Helper: Create a static merged block containing multiple think/tool segments
 function createStaticMergedBlock(items, toolGroups, processedResults) {
     const wrapper = document.createElement('div');
-    wrapper.className = 'merged-block collapsed';
+    wrapper.className = 'merged-block block collapsed';
     
     // Calculate stats for header
     // Count tool calls (not results, since they're paired)
@@ -2313,12 +2312,12 @@ function createStaticMergedBlock(items, toolGroups, processedResults) {
     
     // Build header text
     const parts = [];
-    if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
-    if (toolCount > 0) parts.push(`${toolCount} tool call${toolCount > 1 ? 's' : ''}`);
+    if (thinkCount > 0) parts.push(`${thinkCount} Thinking`);
+    if (toolCount > 0) parts.push(`${toolCount} Tool call${toolCount > 1 ? 's' : ''}`);
     const headerText = parts.join(', ') || 'Operations';
     
     const header = document.createElement('div');
-    header.className = 'merged-block-header';
+    header.className = 'merged-block-header block-header';
     header.innerHTML = `
         <i class="bi bi-check-circle merged-block-icon"></i>
         <span class="merged-block-status">${headerText}</span>
@@ -2335,7 +2334,7 @@ function createStaticMergedBlock(items, toolGroups, processedResults) {
     for (const item of items) {
         renderSingleSegment(content, item.segment, item.index, toolGroups, processedResults);
     }
-    
+
     wrapper.appendChild(content);
     return wrapper;
 }
@@ -2803,15 +2802,15 @@ function addMessage(message) {
         let mergedBlockContent = null;
         if (needsMergedBlock) {
             mergedBlock = document.createElement('div');
-            mergedBlock.className = 'merged-block collapsed';
+            mergedBlock.className = 'merged-block block collapsed';
             
             const mergedHeader = document.createElement('div');
-            mergedHeader.className = 'merged-block-header';
+            mergedHeader.className = 'merged-block-header block-header';
             
             // Build summary for header
             const parts = [];
-            if (hasThinking) parts.push('1 thought');
-            if (toolCallCount > 0) parts.push(`${toolCallCount} tool call${toolCallCount > 1 ? 's' : ''}`);
+            if (hasThinking) parts.push('1 Thinking');
+            if (toolCallCount > 0) parts.push(`${toolCallCount} Tool call${toolCallCount > 1 ? 's' : ''}`);
             const summaryText = parts.join(', ');
             
             mergedHeader.innerHTML = `
@@ -2821,6 +2820,7 @@ function addMessage(message) {
                     <i class="bi bi-chevron-down"></i>
                 </button>
             `;
+            mergedBlock.classList.add('block');
             mergedBlock.appendChild(mergedHeader);
             
             mergedBlockContent = document.createElement('div');
@@ -2836,15 +2836,14 @@ function addMessage(message) {
         // Render thinking block first if present
         if (message.thinking_content) {
             const thinkBlockWrapper = document.createElement('div');
-            thinkBlockWrapper.className = 'think-block collapsed';
+            thinkBlockWrapper.className = 'think-block block collapsed';
             
             const header = document.createElement('div');
-            header.className = 'think-header';
+            header.className = 'think-header block-header';
             header.innerHTML = `
-                <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
-                <span class="think-timer"></span>
+                <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking</span>
                 <div class="think-header-actions">
-                    <button class="think-block-toggle" title="Expand thought process">
+                    <button class="think-block-toggle" title="Expand thinking">
                         <i class="bi bi-chevron-down"></i>
                     </button>
                 </div>`;
@@ -4116,10 +4115,10 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     // Create a merged block container element
     const createMergedBlockElement = () => {
         const wrapper = document.createElement('div');
-        wrapper.className = 'merged-block collapsed';
+        wrapper.className = 'merged-block block collapsed';
         
         const header = document.createElement('div');
-        header.className = 'merged-block-header';
+        header.className = 'merged-block-header block-header';
         header.innerHTML = `
             <i class="bi bi-lightning-charge merged-block-icon"></i>
             <span class="merged-block-status">Working...</span>
@@ -4150,8 +4149,8 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         if (isFinal) {
             // Final state summary
             const parts = [];
-            if (thinkCount > 0) parts.push(`${thinkCount} thought${thinkCount > 1 ? 's' : ''}`);
-            if (toolsCompletedTotal > 0) parts.push(`${toolsCompletedTotal} tool call${toolsCompletedTotal > 1 ? 's' : ''}`);
+            if (thinkCount > 0) parts.push(`${thinkCount} Thinking`);
+            if (toolsCompletedTotal > 0) parts.push(`${toolsCompletedTotal} Tool call${toolsCompletedTotal > 1 ? 's' : ''}`);
             text = parts.length > 0 ? parts.join(', ') : 'Completed';
             icon = 'check-circle';
         } else if (toolBatchTotal > 0 && toolBatchCompleted < toolBatchTotal) {
@@ -4164,7 +4163,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             icon = 'lightbulb';
         } else if (toolsCompletedTotal > 0) {
             // Tools completed, possibly more coming
-            text = `${toolsCompletedTotal} tool call${toolsCompletedTotal > 1 ? 's' : ''} completed`;
+            text = `${toolsCompletedTotal} Tool call${toolsCompletedTotal > 1 ? 's' : ''} completed`;
             icon = 'check-circle';
         } else {
             text = 'Working...';
@@ -4319,15 +4318,15 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     // Toggle is handled by delegated event listener on messagesWrapper
     const createThinkBlockElement = () => {
         const thinkBlockWrapper = document.createElement('div');
-        thinkBlockWrapper.className = 'think-block collapsed';
+        thinkBlockWrapper.className = 'think-block block collapsed';
         thinkBlockWrapper.dataset.tempId = 'streaming-think-block';
 
         const header = document.createElement('div');
-        header.className = 'think-header';
+        header.className = 'think-header block-header';
         header.innerHTML = `
-            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thought Process</span>
+            <span class="think-header-title"><i class="bi bi-lightbulb"></i> Thinking...</span>
             <div class="think-header-actions">
-                <button class="think-block-toggle" title="Expand thought process">
+                <button class="think-block-toggle" title="Expand thinking">
                     <i class="bi bi-chevron-down"></i>
                 </button>
             </div>`;
@@ -5117,7 +5116,7 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
     
     // Create the unified group container
     const toolGroup = document.createElement('div');
-    toolGroup.className = 'tool-group collapsed';
+    toolGroup.className = `tool-group block collapsed`;
     if (isError) toolGroup.classList.add('error');
     else if (hasResult) toolGroup.classList.add('success');
     toolGroup.dataset.toolName = toolName;
@@ -5125,7 +5124,7 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
     
     // --- Group Header (main collapsible header) ---
     const groupHeader = document.createElement('div');
-    groupHeader.className = 'tool-group-header';
+    groupHeader.className = 'tool-group-header block-header';
     
     const headerLeft = document.createElement('div');
     headerLeft.className = 'tool-group-header-left';
