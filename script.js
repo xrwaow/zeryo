@@ -4135,6 +4135,26 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         return wrapper;
     };
 
+    const addHeaderShimmer = (headerEl) => {
+        if (headerEl) headerEl.classList.add('block-header-shimmer');
+    };
+
+    const removeHeaderShimmer = (headerEl) => {
+        if (headerEl) headerEl.classList.remove('block-header-shimmer');
+    };
+
+    const removeBlockHeaderShimmer = (blockEl) => {
+        if (!blockEl) return;
+        blockEl.querySelectorAll('.block-header.block-header-shimmer').forEach(header => {
+            header.classList.remove('block-header-shimmer');
+        });
+    };
+
+    const setMergedBlockShimmer = (mb, enabled) => {
+        if (!mb || !mb.headerEl) return;
+        mb.headerEl.classList.toggle('block-header-shimmer', !!enabled);
+    };
+
     // Update the merged block header based on current stats
     const updateMergedBlockHeader = (mb, isFinal = false) => {
         if (!mb || !mb.headerEl) return;
@@ -4171,6 +4191,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         
         statusEl.textContent = text;
         iconEl.className = `bi bi-${icon} merged-block-icon`;
+
+        const shouldShimmer = !isFinal && (thinkingActive || toolBatchTotal > toolBatchCompleted);
+        setMergedBlockShimmer(mb, shouldShimmer);
     };
 
     // Ensure we have an active merged block, creating one if needed
@@ -4225,6 +4248,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
     const closeMergedBlock = () => {
         if (activeMergedBlock) {
             updateMergedBlockHeader(activeMergedBlock, true);
+            setMergedBlockShimmer(activeMergedBlock, false);
             activeMergedBlock = null;
         }
     };
@@ -4245,6 +4269,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
             const mb = ensureMergedBlock();
             // Move the previous element into the merged block content
             mb.contentEl.appendChild(lastNonContent.element);
+            removeBlockHeaderShimmer(lastNonContent.element);
             mb.itemCount++;
             if (lastNonContent.type === 'thinking') {
                 mb.stats.thinkCount++;
@@ -4284,6 +4309,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 if (lastSeg.type === 'thinking' && activeMergedBlock) {
                     activeMergedBlock.stats.thinkingActive = false;
                     updateMergedBlockHeader(activeMergedBlock);
+                }
+                if (lastSeg.type === 'thinking') {
+                    removeBlockHeaderShimmer(lastSeg.element);
                 }
             }
             // Create new segment
@@ -4368,6 +4396,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     }
                     
                     seg.element = createThinkBlockElement();
+                    if (!activeMergedBlock) {
+                        addHeaderShimmer(seg.element.querySelector('.block-header'));
+                    }
                     
                     // Determine where to append: merged block or directly to container
                     if (activeMergedBlock) {
@@ -4420,6 +4451,9 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     }
                     
                     renderToolGroup(toolWrapper, toolData, resultData);
+                    if (!activeMergedBlock && !matchingResult) {
+                        addHeaderShimmer(toolWrapper.querySelector('.block-header'));
+                    }
                     seg.element = toolWrapper;
                     seg.completed = true;
                 } else if (seg.type === 'tool_result' && !seg.rendered) {
@@ -4441,6 +4475,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                         const resultData = { name: seg.name, body: seg.result || '', status: seg.error ? 'error' : null };
                         matchingCall.element.innerHTML = '';
                         renderToolGroup(matchingCall.element, toolData, resultData);
+                        removeBlockHeaderShimmer(matchingCall.element);
                         matchingCall.hasResult = true;
                         seg.element = matchingCall.element;
                         seg.rendered = true;
@@ -4569,6 +4604,11 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
         });
         targetContentDiv.querySelectorAll('.streaming-tool-segment').forEach(seg => {
             seg.classList.remove('streaming-tool-segment');
+        });
+
+        // Remove any shimmer effects once generation is complete
+        targetContentDiv.querySelectorAll('.block-header.block-header-shimmer').forEach(header => {
+            header.classList.remove('block-header-shimmer');
         });
         
         // Finalize code blocks
@@ -4768,6 +4808,11 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 const thinkSeg = streamingSegments.find(s => s.type === 'thinking' && !s.completed);
                 if (thinkSeg) {
                     thinkSeg.completed = true;
+                    removeBlockHeaderShimmer(thinkSeg.element);
+                    if (activeMergedBlock) {
+                        activeMergedBlock.stats.thinkingActive = false;
+                        updateMergedBlockHeader(activeMergedBlock);
+                    }
                 }
                 triggerRender();
             },

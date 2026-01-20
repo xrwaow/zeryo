@@ -1248,6 +1248,39 @@ body.welcome-active .input-area .input-container {
     background: color-mix(in srgb, var(--accent-color) 15%, var(--think-block-header-bg));
 }
 
+.block-header.block-header-shimmer {
+    position: relative;
+    overflow: hidden;
+}
+
+.block-header.block-header-shimmer::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        110deg,
+        transparent 0%,
+        color-mix(in srgb, var(--accent-color) 15%, transparent) 45%,
+        color-mix(in srgb, var(--accent-color) 30%, transparent) 50%,
+        color-mix(in srgb, var(--accent-color) 15%, transparent) 55%,
+        transparent 100%
+    );
+    transform: translateX(-100%);
+    animation: blockHeaderShimmer 1.6s ease-in-out infinite;
+    pointer-events: none;
+}
+
+@keyframes blockHeaderShimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .block-header.block-header-shimmer::after {
+        animation: none;
+    }
+}
+
 .think-content,
 .tool-group-content,
 .merged-block-content {
