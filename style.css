@@ -2034,11 +2034,12 @@ body.welcome-active .input-area .input-container {
 }
 
 .tool-section-content {
-    padding: 8px 14px;
+    padding: 6px 12px;
     font-size: 13px;
     color: var(--text-primary);
-    overflow-x: auto;
+    overflow: auto;
     background: var(--bg-secondary);
+    max-height: 260px;
 }
 
 .tool-section-content pre {
@@ -2051,6 +2052,50 @@ body.welcome-active .input-area .input-container {
 .tool-section-content code {
     font-family: 'JetBrains Mono', monospace;
     font-size: 13px;
+}
+
+.tool-args-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.tool-args-row {
+    display: grid;
+    grid-template-columns: minmax(90px, 160px) minmax(0, 1fr);
+    gap: 10px;
+    align-items: start;
+}
+
+.tool-arg-key {
+    color: var(--text-secondary);
+    font-size: 12px;
+    text-transform: none;
+    font-family: 'JetBrains Mono', monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tool-arg-value {
+    color: var(--text-primary);
+    font-size: 12.5px;
+    line-height: 1.4;
+    word-break: break-word;
+}
+
+.tool-args-empty,
+.tool-arg-more {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.tool-output-text {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* Legacy Tool Call/Result Styling (kept for backward compatibility) */
@@ -2275,10 +2320,29 @@ body.welcome-active .input-area .input-container {
 .settings-tab-panel.active { display:block; }
 @keyframes fadeIn { from { opacity:0; transform: translateY(4px);} to { opacity:1; transform: translateY(0);} }
 .settings-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:10px 0; border-bottom:1px solid var(--border-color); }
-.settings-row:last-of-type { border-bottom:none; }
 .settings-row label { font-size:14px; color: var(--text-primary); flex:1; }
 .settings-row input[type="checkbox"], .settings-row input[type="text"] { flex:0; }
 .settings-row input[type="text"] { background: var(--bg-tertiary); border:1px solid var(--border-color); border-radius: var(--border-radius-sm); color: var(--text-primary); padding:6px 8px; width:200px; }
+.api-keys-form { display: flex; flex-direction: column; gap: 6px; }
+.api-keys-row { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:10px 0; border-bottom:1px solid var(--border-color); }
+.api-keys-row label { font-size:14px; color: var(--text-primary); flex:1; }
+.api-keys-input { display:flex; align-items:center; gap:10px; }
+.api-keys-input input[type="password"],
+.api-keys-input input[type="text"] { background: var(--bg-tertiary); border:1px solid var(--border-color); border-radius: var(--border-radius-sm); color: var(--text-primary); padding:6px 8px; width:260px; }
+.api-keys-status { font-size:12px; padding:4px 10px; border-radius:999px; border:1px solid var(--border-color); color: var(--text-secondary); background: var(--bg-tertiary); }
+.api-keys-status.set { color: var(--accent-color); border-color: color-mix(in srgb, var(--accent-color) 50%, var(--border-color)); background: color-mix(in srgb, var(--accent-color) 12%, transparent); }
+.api-keys-status.missing { color: var(--error-color); border-color: color-mix(in srgb, var(--error-color) 45%, var(--border-color)); background: color-mix(in srgb, var(--error-color) 10%, transparent); }
+
+.attachment-popup-container.api-keys-popup {
+    width: 520px;
+    max-width: 90vw;
+    padding: 22px 24px;
+    gap: 12px;
+}
+
+.api-keys-popup-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
+.api-keys-popup-title { font-size: 18px; font-weight: 600; margin: 0; }
+.api-keys-popup-text { font-size: 14px; color: var(--text-secondary); line-height: 1.5; }
 .settings-number-input { 
     background: var(--bg-tertiary); 
     border: 1px solid var(--border-color); 
@@ -2364,6 +2428,7 @@ body.welcome-active .input-area .input-container {
     border-radius: var(--border-radius-md);
     padding: 12px 16px;
     margin-bottom: 8px;
+    min-height: 64px;
 }
 
 .character-main {

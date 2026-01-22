@@ -39,6 +39,10 @@ def load_config(file_path):
             return yaml.safe_load(f)
     return {}
 
+def save_config(file_path: str, data: Dict[str, Any]) -> None:
+    with open(file_path, 'w') as f:
+        yaml.safe_dump(data, f, sort_keys=False)
+
 api_keys_config = load_config('api_keys.yaml') # Raw keys NOT sent to frontend
 model_configs = load_config('model_config.yaml')
 
@@ -258,6 +262,12 @@ class UpdateCharacterRequest(Character):
 
 class SetActiveBranchRequest(BaseModel):
     child_index: int
+
+class ApiKeysUpdateRequest(BaseModel):
+    openrouter: Optional[str] = None
+    google: Optional[str] = None
+    local_api_key: Optional[str] = None
+    local_base_url: Optional[str] = None
 
 class ExecuteToolRequest(BaseModel):
     tool_name: str
@@ -1727,13 +1737,46 @@ async def get_config():
     config_data = {
         "openrouter_base_url": api_keys_config.get("openrouter_base_url", "https://openrouter.ai/api/v1"),
         "local_base_url": api_keys_config.get("local_base_url", "http://127.0.0.1:8080"),
-        "openrouter": None, "google": None, "local_api_key": None,
+        "has_openrouter": bool(api_keys_config.get("openrouter")),
+        "has_google": bool(api_keys_config.get("google")),
+        "has_local_api_key": bool(api_keys_config.get("local_api_key")),
     }
-    if 'openrouter' in api_keys_config: config_data['openrouter'] = api_keys_config['openrouter']
-    if 'google' in api_keys_config: config_data['google'] = api_keys_config['google']
-    if 'local_api_key' in api_keys_config: config_data['local_api_key'] = api_keys_config['local_api_key']
-    # print("Sending config to frontend:", {k: (v[:2] + '...' if isinstance(v, str) and k != 'local_base_url' and v else v) for k, v in config_data.items()})
     return config_data
+
+@app.post("/api_keys")
+async def update_api_keys(payload: ApiKeysUpdateRequest):
+    """Update api_keys.yaml without returning raw keys to the frontend."""
+    global api_keys_config
+
+    existing = load_config('api_keys.yaml') or {}
+
+    new_config = {
+        "openrouter": existing.get("openrouter"),
+        "google": existing.get("google"),
+        "local_api_key": existing.get("local_api_key"),
+        "local_base_url": existing.get("local_base_url", "http://127.0.0.1:8080"),
+    }
+
+    if payload.openrouter and payload.openrouter.strip():
+        new_config["openrouter"] = payload.openrouter.strip()
+    if payload.google and payload.google.strip():
+        new_config["google"] = payload.google.strip()
+    if payload.local_api_key and payload.local_api_key.strip():
+        new_config["local_api_key"] = payload.local_api_key.strip()
+    if payload.local_base_url and payload.local_base_url.strip():
+        new_config["local_base_url"] = payload.local_base_url.strip()
+
+    save_config('api_keys.yaml', new_config)
+    api_keys_config = new_config
+
+    return {
+        "status": "ok",
+        "openrouter_base_url": api_keys_config.get("openrouter_base_url", "https://openrouter.ai/api/v1"),
+        "local_base_url": api_keys_config.get("local_base_url", "http://127.0.0.1:8080"),
+        "has_openrouter": bool(api_keys_config.get("openrouter")),
+        "has_google": bool(api_keys_config.get("google")),
+        "has_local_api_key": bool(api_keys_config.get("local_api_key")),
+    }
 
 # (NEW) API Endpoint
 @app.post("/c/{chat_id}/generate")

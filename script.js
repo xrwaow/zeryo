@@ -528,10 +528,10 @@ const state = {
     activeSystemPrompt: null, // Store the actual character prompt text
     effectiveSystemPrompt: null, // Character prompt + optional tools prompt
     activeBranchInfo: {}, // { parentMessageId: { activeIndex: number, totalBranches: number } } -> Derived from messages during render
-    apiKeys: { // Store keys fetched from backend /config endpoint
-        openrouter: null,
-        google: null,
-        local: null,
+    apiKeys: { // Store key presence flags from backend /config endpoint
+        openrouter: false,
+        google: false,
+        local: false,
     },
     toolsEnabled: false, // Flag to control tool usage
     availableTools: [], // Catalog fetched from backend
@@ -1370,9 +1370,11 @@ async function fetchProviderConfig() {
 
         PROVIDER_CONFIG.openrouter_base_url = backendConfig.openrouter_base_url || PROVIDER_CONFIG.openrouter_base_url;
         PROVIDER_CONFIG.local_base_url = backendConfig.local_base_url || PROVIDER_CONFIG.local_base_url;
-        state.apiKeys.openrouter = backendConfig.openrouter || null;
-        state.apiKeys.google = backendConfig.google || null;
-        state.apiKeys.local = backendConfig.local_api_key || null;
+        state.apiKeys.openrouter = !!backendConfig.has_openrouter;
+        state.apiKeys.google = !!backendConfig.has_google;
+        state.apiKeys.local = !!backendConfig.has_local_api_key;
+
+        renderApiKeysSettings();
 
     console.log("Fetched provider config.");
 
@@ -1489,7 +1491,8 @@ function highlightCurrentChatInSidebar() {
     });
 }
 
-async function loadChat(chatId) {
+async function loadChat(chatId, options = {}) {
+    const { forceScroll = true } = options;
     if (!chatId) { console.warn("loadChat called with null chatId"); startNewChat(); return; }
     console.log(`Loading chat: ${chatId}`);
     state.toolCallPending = false;
@@ -1514,6 +1517,11 @@ async function loadChat(chatId) {
              return;
         }
         const chat = await response.json();
+
+        // Check if we were at the bottom before we clear the container
+        const wasAtBottom = (chatId === state.currentChatId && chatContainer)
+            ? (chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 50)
+            : false;
 
         state.currentChatId = chatId;
         state.messages = chat.messages || [];
@@ -1563,9 +1571,11 @@ async function loadChat(chatId) {
              document.body.classList.remove('welcome-active');
              renderActiveMessages();
              adjustTextareaHeight();
-             requestAnimationFrame(() => {
-                scrollToBottom('auto');
-             });
+             if (forceScroll || wasAtBottom) {
+                 requestAnimationFrame(() => {
+                    scrollToBottom('auto');
+                 });
+             }
         }
     } catch (error) {
         console.error('Error loading chat:', error);
@@ -3364,8 +3374,7 @@ function setupEventListeners() {
     // Settings modal open/close
     if (settingsBtn && settingsModal) {
         settingsBtn.addEventListener('click', () => {
-            settingsModal.style.display = 'flex';
-            refreshSettingsModalState();
+            openSettingsModal();
         });
     }
     if (settingsModal) {
@@ -3449,6 +3458,8 @@ function refreshSettingsModalState() {
             if (state.autoscrollEnabled) scrollToBottom('auto');
         };
     }
+
+    setupApiKeysTab();
     if (cbCodeblocks) {
         cbCodeblocks.checked = !!state.codeBlocksDefaultCollapsed;
         cbCodeblocks.onchange = () => {
@@ -3508,6 +3519,152 @@ function refreshSettingsModalState() {
     const lastTab = localStorage.getItem('settingsActiveTab');
     const defaultTab = tabButtons[0]?.dataset.tab;
     activateSettingsTab(lastTab || defaultTab || 'main');
+}
+
+function openSettingsModal(tabName = null) {
+    if (!settingsModal) return;
+    settingsModal.style.display = 'flex';
+    refreshSettingsModalState();
+    if (tabName) activateSettingsTab(tabName);
+}
+
+function renderApiKeysSettings() {
+    const openrouterInput = document.getElementById('api-key-openrouter');
+    const googleInput = document.getElementById('api-key-google');
+    const localInput = document.getElementById('api-key-local');
+    const localBaseUrlInput = document.getElementById('api-key-local-base-url');
+    const openrouterStatus = document.getElementById('api-key-status-openrouter');
+    const googleStatus = document.getElementById('api-key-status-google');
+    const localStatus = document.getElementById('api-key-status-local');
+
+    const setStatus = (el, isSet) => {
+        if (!el) return;
+        el.textContent = isSet ? 'Set' : 'Missing';
+        el.classList.toggle('set', !!isSet);
+        el.classList.toggle('missing', !isSet);
+    };
+
+    setStatus(openrouterStatus, state.apiKeys.openrouter);
+    setStatus(googleStatus, state.apiKeys.google);
+    setStatus(localStatus, state.apiKeys.local);
+
+    if (openrouterInput) {
+        openrouterInput.value = '';
+        openrouterInput.placeholder = state.apiKeys.openrouter ? '•••••••• (set)' : 'Enter OpenRouter key';
+    }
+    if (googleInput) {
+        googleInput.value = '';
+        googleInput.placeholder = state.apiKeys.google ? '•••••••• (set)' : 'Enter Google key';
+    }
+    if (localInput) {
+        localInput.value = '';
+        localInput.placeholder = state.apiKeys.local ? '•••••••• (set)' : 'Enter local key';
+    }
+    if (localBaseUrlInput) {
+        localBaseUrlInput.value = PROVIDER_CONFIG.local_base_url || '';
+    }
+}
+
+function setupApiKeysTab() {
+    const saveBtn = document.getElementById('save-api-keys-btn');
+    const statusEl = document.getElementById('api-keys-save-status');
+    const openrouterInput = document.getElementById('api-key-openrouter');
+    const googleInput = document.getElementById('api-key-google');
+    const localInput = document.getElementById('api-key-local');
+    const localBaseUrlInput = document.getElementById('api-key-local-base-url');
+
+    if (!saveBtn) return;
+
+    saveBtn.onclick = async () => {
+        const payload = {};
+        const openrouterVal = openrouterInput?.value?.trim();
+        const googleVal = googleInput?.value?.trim();
+        const localVal = localInput?.value?.trim();
+        const localBaseUrlVal = localBaseUrlInput?.value?.trim();
+
+        if (openrouterVal) payload.openrouter = openrouterVal;
+        if (googleVal) payload.google = googleVal;
+        if (localVal) payload.local_api_key = localVal;
+        if (localBaseUrlVal) payload.local_base_url = localBaseUrlVal;
+
+        if (!Object.keys(payload).length) {
+            if (statusEl) statusEl.textContent = 'Nothing to save.';
+            return;
+        }
+
+        saveBtn.disabled = true;
+        if (statusEl) statusEl.textContent = 'Saving…';
+
+        try {
+            const response = await fetch(`${API_BASE}/api_keys`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!response.ok) throw new Error(await response.text());
+            const data = await response.json();
+            PROVIDER_CONFIG.local_base_url = data.local_base_url || PROVIDER_CONFIG.local_base_url;
+            state.apiKeys.openrouter = !!data.has_openrouter;
+            state.apiKeys.google = !!data.has_google;
+            state.apiKeys.local = !!data.has_local_api_key;
+            renderApiKeysSettings();
+            if (statusEl) statusEl.textContent = 'Saved. Keys are stored in api_keys.yaml.';
+        } catch (error) {
+            console.error('Failed to save api keys:', error);
+            if (statusEl) statusEl.textContent = `Save failed: ${error.message}`;
+        } finally {
+            saveBtn.disabled = false;
+        }
+    };
+
+    renderApiKeysSettings();
+}
+
+function extractMissingApiKeyProvider(message = '') {
+    const match = String(message).match(/API key for provider '([^']+)' not configured/i);
+    return match ? match[1] : null;
+}
+
+function showApiKeysRequiredPopup(providerName) {
+    const overlay = document.createElement('div');
+    overlay.className = 'attachment-popup-overlay';
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    const container = document.createElement('div');
+    container.className = 'attachment-popup-container api-keys-popup';
+
+    const title = document.createElement('h3');
+    title.className = 'api-keys-popup-title';
+    title.textContent = 'API Key Required';
+
+    const text = document.createElement('p');
+    text.className = 'api-keys-popup-text';
+    text.textContent = `The ${providerName} model needs an API key. Open Settings → Configure API Keys to add it.`;
+
+    const actions = document.createElement('div');
+    actions.className = 'api-keys-popup-actions';
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'btn-secondary';
+    cancelBtn.textContent = 'Close';
+    cancelBtn.addEventListener('click', () => overlay.remove());
+
+    const openBtn = document.createElement('button');
+    openBtn.className = 'btn-primary';
+    openBtn.textContent = 'Open Settings';
+    openBtn.addEventListener('click', () => {
+        overlay.remove();
+        openSettingsModal('api-keys');
+    });
+
+    actions.appendChild(cancelBtn);
+    actions.appendChild(openBtn);
+
+    container.appendChild(title);
+    container.appendChild(text);
+    container.appendChild(actions);
+    overlay.appendChild(container);
+    document.body.appendChild(overlay);
 }
 
 function setupToolToggle() {
@@ -3911,14 +4068,13 @@ function setupDropZone() {
     });
 }
 
-function getApiKey(provider) {
+function hasApiKey(provider) {
     const lowerProvider = provider.toLowerCase();
-    const key = state.apiKeys[lowerProvider];
-    if (!key && lowerProvider !== 'local') {
+    const hasKey = !!state.apiKeys[lowerProvider];
+    if (!hasKey && lowerProvider !== 'local') {
         console.warn(`API Key for ${provider} is missing in state.`);
-        return null;
     }
-    return key;
+    return hasKey;
 }
 
 async function streamFromBackend(chatId, parentMessageId, modelName, generationArgs, toolsEnabled, onChunk, onToolStart, onToolEnd, onComplete, onError, onToolPendingConfirmation, onThinkingStart, onThinkingChunk, onThinkingEnd, onToolCall, onToolResult) {
@@ -4685,7 +4841,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                 try {
                     console.log("Reloading chat state after successful backend generation.");
                     if (state.currentChatId && streamingRow) {
-                        await loadChat(state.currentChatId);
+                        await loadChat(state.currentChatId, { forceScroll: false });
                         
                         // Apply captured states to the last assistant message (which now has real ID)
                         if (capturedStates) {
@@ -4736,7 +4892,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     if (state.currentChatId) {
                         try {
                             await new Promise(resolve => setTimeout(resolve, 750));
-                            await loadChat(state.currentChatId);
+                            await loadChat(state.currentChatId, { forceScroll: false });
                             if (state.autoscrollEnabled) scrollToBottom('smooth');
                             else requestAnimationFrame(updateScrollButtonVisibility);
                         } catch (loadError) {
@@ -4750,6 +4906,10 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                         rowBeingStreamedTo.remove();
                     }
                 } else {
+                    const missingProvider = extractMissingApiKeyProvider(error?.message);
+                    if (missingProvider) {
+                        showApiKeysRequiredPopup(missingProvider);
+                    }
                     addSystemMessage(`Generation Error: ${error.message}`, "error");
                     // Remove the placeholder row first
                     if (rowBeingStreamedTo && isPlaceholderRow) {
@@ -4759,7 +4919,7 @@ async function generateAssistantResponse(parentId, targetContentDiv, modelName, 
                     if (state.currentChatId) {
                         try {
                             console.log("Reloading chat to restore state after generation error.");
-                            await loadChat(state.currentChatId);
+                            await loadChat(state.currentChatId, { forceScroll: false });
                             if (state.autoscrollEnabled) scrollToBottom('smooth');
                             else requestAnimationFrame(updateScrollButtonVisibility);
                         } catch (loadError) {
@@ -5192,6 +5352,72 @@ function getToolHeaderArgPreview(toolName, payloadInfo) {
     return truncateEnd(text, TOOL_HEADER_ARG_PREVIEW.maxChars);
 }
 
+function normalizeArgsForDisplay(value) {
+    if (value && typeof value === 'object') return value;
+    return { value };
+}
+
+function stringifyValue(value) {
+    if (value === null) return 'null';
+    if (value === undefined) return 'undefined';
+    if (typeof value === 'string') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    try {
+        return JSON.stringify(value);
+    } catch (err) {
+        return String(value);
+    }
+}
+
+function createToolArgsList(argsObject, options = {}) {
+    const maxItems = typeof options.maxItems === 'number' ? options.maxItems : 12;
+    const maxValueLength = typeof options.maxValueLength === 'number' ? options.maxValueLength : 140;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'tool-args-list';
+
+    const entries = Object.entries(argsObject || {});
+    if (!entries.length) {
+        const empty = document.createElement('div');
+        empty.className = 'tool-args-empty';
+        empty.textContent = 'No args';
+        wrapper.appendChild(empty);
+        return wrapper;
+    }
+
+    const visibleEntries = entries.slice(0, maxItems);
+    visibleEntries.forEach(([key, value]) => {
+        const row = document.createElement('div');
+        row.className = 'tool-args-row';
+
+        const keyEl = document.createElement('span');
+        keyEl.className = 'tool-arg-key';
+        keyEl.textContent = key;
+
+        const valueEl = document.createElement('span');
+        valueEl.className = 'tool-arg-value';
+        const valueText = stringifyValue(value);
+        const truncated = truncateEnd(valueText, maxValueLength);
+        valueEl.textContent = truncated;
+        if (valueText !== truncated) {
+            valueEl.title = valueText;
+        }
+
+        row.appendChild(keyEl);
+        row.appendChild(valueEl);
+        wrapper.appendChild(row);
+    });
+
+    if (entries.length > maxItems) {
+        const more = document.createElement('div');
+        more.className = 'tool-arg-more';
+        more.textContent = `+${entries.length - maxItems} more`;
+        wrapper.appendChild(more);
+    }
+
+    return wrapper;
+}
+
 /**
  * Renders a unified tool group block containing both the tool call and its result.
  * This creates a single, cohesive collapsible block instead of separate disconnected elements.
@@ -5280,20 +5506,18 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
         try {
             const hasArgs = args && Object.keys(args).length > 0;
             const displayObject = hasArgs ? args : (!parseError && rawPayload ? JSON.parse(rawPayload) : {});
-            
-            if (toolName === 'python_interpreter' && displayObject.code) {
-                const wrapper = createCodeBlockWithContent(displayObject.code, 'python');
+            const normalizedArgs = normalizeArgsForDisplay(displayObject);
+
+            if (toolName === 'python_interpreter' && normalizedArgs.code) {
+                const wrapper = createCodeBlockWithContent(normalizedArgs.code, 'python');
                 callContent.appendChild(wrapper);
+            } else if (typeof displayObject === 'string') {
+                const text = document.createElement('div');
+                text.className = 'tool-output-text';
+                text.textContent = displayObject;
+                callContent.appendChild(text);
             } else {
-                const argsString = JSON.stringify(displayObject, null, 2);
-                const pre = document.createElement('pre');
-                const code = document.createElement('code');
-                code.className = 'language-json';
-                code.textContent = argsString;
-                try { hljs.highlightElement(code); }
-                catch (e) { console.warn('Error highlighting tool args:', e); }
-                pre.appendChild(code);
-                callContent.appendChild(pre);
+                callContent.appendChild(createToolArgsList(normalizedArgs));
             }
         } catch (err) {
             callContent.textContent = '[Invalid Arguments]';
@@ -5334,11 +5558,10 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
             while ((match = imageRegex.exec(resultText)) !== null) {
                 const textBefore = resultText.substring(lastIndex, match.index).trim();
                 if (textBefore) {
-                    const pre = document.createElement('pre');
-                    const code = document.createElement('code');
-                    code.textContent = textBefore;
-                    pre.appendChild(code);
-                    resultContent.appendChild(pre);
+                    const textBlock = document.createElement('div');
+                    textBlock.className = 'tool-output-text';
+                    textBlock.textContent = textBefore;
+                    resultContent.appendChild(textBlock);
                 }
                 const imgContainer = document.createElement('div');
                 imgContainer.className = 'tool-result-image';
@@ -5351,18 +5574,16 @@ function renderToolGroup(messageContentDiv, toolData, resultData) {
             }
             const textAfter = resultText.substring(lastIndex).trim();
             if (textAfter) {
-                const pre = document.createElement('pre');
-                const code = document.createElement('code');
-                code.textContent = textAfter;
-                pre.appendChild(code);
-                resultContent.appendChild(pre);
+                const textBlock = document.createElement('div');
+                textBlock.className = 'tool-output-text';
+                textBlock.textContent = textAfter;
+                resultContent.appendChild(textBlock);
             }
         } else if (toolName === 'python_interpreter' || resultText.includes('\n')) {
-            const pre = document.createElement('pre');
-            const code = document.createElement('code');
-            code.textContent = resultText || '[Empty Result]';
-            pre.appendChild(code);
-            resultContent.appendChild(pre);
+            const textBlock = document.createElement('div');
+            textBlock.className = 'tool-output-text';
+            textBlock.textContent = resultText || '[Empty Result]';
+            resultContent.appendChild(textBlock);
         } else {
             resultContent.innerHTML = renderMarkdown(resultText || '[Empty Result]');
         }
@@ -6128,11 +6349,11 @@ function updateAutoscrollButton() {
     if (!icon) return;
 
     if (state.autoscrollEnabled) {
-        icon.className = 'bi bi-unlock-fill';
+        icon.className = 'bi bi-arrow-down-circle-fill';
         toggleAutoscrollBtn.classList.add('active');
-        toggleAutoscrollBtn.title = 'Disable Autoscroll (Lock View)';
+        toggleAutoscrollBtn.title = 'Disable Autoscroll';
     } else {
-        icon.className = 'bi bi-lock-fill';
+        icon.className = 'bi bi-arrow-down-circle';
         toggleAutoscrollBtn.classList.remove('active');
         toggleAutoscrollBtn.title = 'Enable Autoscroll';
     }

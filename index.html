@@ -102,7 +102,7 @@
                             <i class="bi bi-tools"></i>
                         </button>
                         <button class="tools-toggle-button" id="toggle-autoscroll-btn" title="Toggle Autoscroll">
-                            <i class="bi bi-lock-fill"></i>
+                            <i class="bi bi-arrow-down-circle"></i>
                         </button>
                         <button class="input-button" id="stop-button" style="display:none;" title="Stop generating">
                             <i class="bi bi-stop-fill"></i>
@@ -133,6 +133,7 @@
                         <button class="settings-tab-btn" data-tab="appearance">Appearance</button>
                         <button class="settings-tab-btn" data-tab="generation">Generation</button>
                         <button class="settings-tab-btn" data-tab="tools">Tools</button>
+                        <button class="settings-tab-btn" data-tab="api-keys">Configure API Keys</button>
                         <button class="settings-tab-btn" data-tab="characters">Characters</button>
                     </div>
                     <div class="settings-modal-panels">
@@ -220,6 +221,43 @@
                             <div class="tools-list-empty">Loading tools…</div>
                         </div>
                         <small class="settings-hint">Select which tools are available when tool calls are enabled.</small>
+                    </div>
+                    <div class="settings-tab-panel" data-panel="api-keys">
+                        <p class="settings-section-title">API Keys</p>
+                        <div class="api-keys-form">
+                            <div class="api-keys-row">
+                                <label for="api-key-openrouter">OpenRouter API Key</label>
+                                <div class="api-keys-input">
+                                    <input type="password" id="api-key-openrouter" placeholder="Enter OpenRouter key" autocomplete="off" />
+                                    <span class="api-keys-status" id="api-key-status-openrouter"></span>
+                                </div>
+                            </div>
+                            <div class="api-keys-row">
+                                <label for="api-key-google">Google API Key</label>
+                                <div class="api-keys-input">
+                                    <input type="password" id="api-key-google" placeholder="Enter Google key" autocomplete="off" />
+                                    <span class="api-keys-status" id="api-key-status-google"></span>
+                                </div>
+                            </div>
+                            <div class="api-keys-row">
+                                <label for="api-key-local">Local API Key (optional)</label>
+                                <div class="api-keys-input">
+                                    <input type="password" id="api-key-local" placeholder="Enter local key" autocomplete="off" />
+                                    <span class="api-keys-status" id="api-key-status-local"></span>
+                                </div>
+                            </div>
+                            <div class="api-keys-row">
+                                <label for="api-key-local-base-url">Local Base URL</label>
+                                <div class="api-keys-input">
+                                    <input type="text" id="api-key-local-base-url" placeholder="http://127.0.0.1:8080" />
+                                </div>
+                            </div>
+                        </div>
+                        <small class="settings-hint">API keys are hidden and stored in api_keys.yaml on save.</small>
+                        <div class="form-actions">
+                            <button id="save-api-keys-btn" class="btn-primary">Save</button>
+                        </div>
+                        <small class="settings-hint" id="api-keys-save-status"></small>
                     </div>
                     <div class="settings-tab-panel" data-panel="characters">
                         <div class="characters-manager">
