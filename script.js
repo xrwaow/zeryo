@@ -1205,19 +1205,29 @@ function handleThinkBlockToggle(targetElement) {
     const block = targetElement.closest('.think-block');
     if (!block) return;
 
-    block.dataset.userToggled = 'true';
-    const isCollapsed = block.classList.toggle('collapsed');
+    const header = block.querySelector('.think-header');
+    let isCollapsed = false;
+    const toggleCollapse = () => {
+        block.dataset.userToggled = 'true';
+        isCollapsed = block.classList.toggle('collapsed');
 
-    const toggleBtn = block.querySelector('.think-block-toggle');
-    const icon = toggleBtn?.querySelector('i');
-    if (icon) {
-        icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
-    }
-    if (toggleBtn) {
-        toggleBtn.title = isCollapsed ? 'Expand thinking' : 'Collapse thinking';
-    }
+        const toggleBtn = block.querySelector('.think-block-toggle');
+        const icon = toggleBtn?.querySelector('i');
+        if (icon) {
+            icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+        }
+        if (toggleBtn) {
+            toggleBtn.title = isCollapsed ? 'Expand thinking' : 'Collapse thinking';
+        }
 
-    persistCollapseState(block, 'think', isCollapsed);
+        persistCollapseState(block, 'think', isCollapsed);
+    };
+
+    if (header && isStickyElement(header)) {
+        preserveStickyHeaderPosition(header, toggleCollapse);
+    } else {
+        toggleCollapse();
+    }
 }
 
 function handleMergedBlockToggle(targetElement) {
@@ -1226,19 +1236,54 @@ function handleMergedBlockToggle(targetElement) {
     const block = targetElement.closest('.merged-block');
     if (!block) return;
 
-    block.dataset.userToggled = 'true';
-    const isCollapsed = block.classList.toggle('collapsed');
+    const header = block.querySelector('.merged-block-header');
+    let isCollapsed = false;
+    const toggleCollapse = () => {
+        block.dataset.userToggled = 'true';
+        isCollapsed = block.classList.toggle('collapsed');
 
-    const toggleBtn = block.querySelector('.merged-block-toggle');
-    const icon = toggleBtn?.querySelector('i');
-    if (icon) {
-        icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+        const toggleBtn = block.querySelector('.merged-block-toggle');
+        const icon = toggleBtn?.querySelector('i');
+        if (icon) {
+            icon.className = isCollapsed ? 'bi bi-chevron-down' : 'bi bi-chevron-up';
+        }
+        if (toggleBtn) {
+            toggleBtn.title = isCollapsed ? 'Expand details' : 'Collapse details';
+        }
+
+        persistCollapseState(block, 'merged', isCollapsed);
+    };
+
+    if (header && isStickyElement(header)) {
+        preserveStickyHeaderPosition(header, toggleCollapse);
+    } else {
+        toggleCollapse();
     }
-    if (toggleBtn) {
-        toggleBtn.title = isCollapsed ? 'Expand details' : 'Collapse details';
+}
+
+function isStickyElement(element) {
+    if (!element) return false;
+    return window.getComputedStyle(element).position === 'sticky';
+}
+
+function preserveStickyHeaderPosition(headerElement, toggleFn) {
+    if (!headerElement || typeof toggleFn !== 'function' || !chatContainer) {
+        if (typeof toggleFn === 'function') toggleFn();
+        return;
     }
 
-    persistCollapseState(block, 'merged', isCollapsed);
+    const containerRect = chatContainer.getBoundingClientRect();
+    const beforeTop = headerElement.getBoundingClientRect().top - containerRect.top;
+
+    toggleFn();
+
+    requestAnimationFrame(() => {
+        const afterTop = headerElement.getBoundingClientRect().top - containerRect.top;
+        const delta = afterTop - beforeTop;
+        if (Math.abs(delta) > 0.5) {
+            chatContainer.scrollTop += delta;
+        }
+    });
 }
 
 function updateEffectiveSystemPrompt() {

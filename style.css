@@ -35,7 +35,7 @@
     /* Think Block Colors */
     --think-block-bg: color-mix(in srgb, var(--accent-color) 5%, transparent);
     --think-block-border: color-mix(in srgb, var(--accent-color) 50%, transparent);
-    --think-block-header-bg: color-mix(in srgb, var(--accent-color) 15%, transparent);
+    --think-block-header-bg: color-mix(in srgb, var(--accent-color) 18%, var(--bg-tertiary));
     --think-block-header-text: color-mix(in srgb, var(--accent-color) 80%, white);
 }
 
@@ -1229,6 +1229,10 @@ body.welcome-active .input-area .input-container {
     overflow: visible; /* Required for sticky header */
 }
 
+.merged-block.block {
+    overflow: visible; /* Required for sticky header */
+}
+
 .block-header {
     display: flex;
     align-items: center;
@@ -1308,6 +1312,9 @@ body.welcome-active .input-area .input-container {
 }
 
 .merged-block-header {
+    position: sticky;
+    top: 0px;
+    z-index: 11;
     gap: 10px;
 }
 
